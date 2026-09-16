@@ -107,8 +107,7 @@ brew install --cask guokuaile/tally/tally
 
 打开设置（面板右上角齿轮，或展开时按 ⌘,）→「hook」→ 两边各点一次「安装」。
 
-- Claude 侧改 `~/.claude/settings.json`，Codex 侧改 `~/.codex/hooks.json` 和 `~/.codex/config.toml`（写入信任哈希）；改之前都备份成 `.tally-backup`，你原有的 hook 不动。设置过 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 的会装到那里，用量和配额也跟着读那里。
-- Codex 侧安装要用到本机的 `codex` 命令。
+- Claude 侧改 `~/.claude/settings.json`，Codex 侧改 `~/.codex/hooks.json` 和 `~/.codex/config.toml`（写入信任哈希）；改之前都备份成 `.tally-backup`，你原有的 hook 不动。设置过 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 的会装到那里，用量和配额也跟着读那里；`CODEX_HOME` 只写在 alias 或启动脚本里、Tally 读不到的，会从 `~/.codex*` 里按会话记录认出终端 codex 用的那个目录，不会装进 ChatGPT 桌面版的目录。
 - 装之前就开着的会话要重开一次才会挂上，Codex 只在启动时读 hook。
 - 装好后每一侧下面显示「最近收到事件」；一直显示「还没收到过」时点「自检」，能看出是 hook 本身跑不起来，还是 agent 没在调它。
 

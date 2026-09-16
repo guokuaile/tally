@@ -43,7 +43,7 @@ final class HookSelfCheckTests: XCTestCase {
         let installer = HookInstaller(claudeSettings: dir.appendingPathComponent("settings.json"),
                                       codexHooks: dir.appendingPathComponent("hooks.json"),
                                       codexConfig: dir.appendingPathComponent("config.toml"),
-                                      hookBinary: "/x/tally-hook", codexHashes: { [] })
+                                      hookBinary: "/x/tally-hook")
         let model = HookInstallModel(installer: installer)
         model.selfTest(.claude)
         XCTAssertEqual(model.selfTests[.claude]?.hasPrefix("还没装好"), true, "配置里没有这条命令，二进制跑通了也证明不了 agent 调得通")

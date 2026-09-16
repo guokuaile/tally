@@ -14,20 +14,36 @@ Codex 侧 codex 家目录下 `hooks.json` 的六个事件 `SessionStart`、`User
 
 ## 安装（`HookInstaller.install`，幂等）
 
-codex 的家默认 `~/.codex`，但 `CODEX_HOME` 能指到别处——有人给终端 codex 单开一个家，好跟 ChatGPT 桌面版共用的那份隔开。所以家目录由 `CodexHome` 统一定：先看 app 自己的环境（从终端启动时才有），再问一次登录 shell（`echo TALLY_CODEX_HOME=$CODEX_HOME`，实测 10 ms，一个进程只问一次），都没有才 `~/.codex`。问 shell 有 10 秒上限（`LoginShell.lines` 走 `Subprocess.run`）：这一步在启动路径上，某台机器的启动脚本卡住、或起了个后台进程一直占着 stdout，都不能把刘海挂得出不来——到点就用已经收到的输出，里面没有要的那行就按问不到处理。hook 装哪儿、用量读哪儿（`~/<家>/sessions`）、配额读谁的 `auth.json`，全跟着它走；装错家等于装了也收不到会话。跑 app-server 时也要把 `CODEX_HOME` 传给子进程，否则它按默认家算哈希，跟我们刚写的那份 hooks.json 对不上。
+codex 的家默认 `~/.codex`，但 `CODEX_HOME` 能指到别处——有人给终端 codex 单开一个家，好跟 ChatGPT 桌面版共用的那份隔开。hook 装哪儿、用量读哪儿（`~/<家>/sessions`）、配额读谁的 `auth.json`，全跟着 `CodexHome` 走；装错家等于装了也收不到会话。它按顺序定，命中即停：
+
+1. app 自己环境里的 `CODEX_HOME`（从终端启动时才有），再问一次登录 shell（`echo TALLY_CODEX_HOME=$CODEX_HOME`，实测 10 ms，一个进程只问一次）。问 shell 有 10 秒上限（`LoginShell.lines` 走 `Subprocess.run`）：这一步在启动路径上，某台机器的启动脚本卡住、或起了个后台进程一直占着 stdout，都不能把刘海挂得出不来——到点就用已经收到的输出，里面没有要的那行就按问不到处理。
+2. 问不到就看用户主目录下 `.codex` 开头的文件夹，挑最近一次有**非桌面版会话**的那个（`CodexHome.terminalHome`）。变量常常只在 alias、shell 函数或隔离脚本那一个进程里设，登录 shell 问不出来——实测有台机器的隐私规则明令不许把 `CODEX_HOME` 导出到 shell 或 GUI 环境，终端 codex 在 `~/.codex-cli`，退回 `~/.codex` 就把 hook 装进了 ChatGPT 桌面版的家。分辨靠 rollout 第一行 `session_meta` 的 `originator`：终端是 `codex-tui` / `codex_exec`，桌面版是 `Codex Desktop`（`TranscriptTitle.codexOriginator`，同 `isScriptedCodexHead` 只找子串）。每个家从最新的一天往回翻，最多读 500 个文件头、每个 4 KB（`originator` 在前几百字节），只有桌面版会话的家翻不出来就算没有——读得太少不行，`~/.codex` 最近连开几十个桌面版会话时会漏掉更早的终端会话，反而挑中旧备份；各家之间比文件名（`rollout-<定宽时间>-<id>.jsonl`，按字符串比就是按时间比），比如 `~/.codex` 和旧备份 `~/.codex.bak-…` 都有终端会话时取 `~/.codex`。
+3. 都没有才 `~/.codex`。
+
+天花板：家不叫 `.codex` 开头、变量又没导出的认不出来；两个终端的家轮着用时，跟着 Tally 启动那会儿最近用过的那个走。真碰上前一种，再加一层「hook 收到的 `transcript_path` 反推家目录」（`ClaudeHome` 已经这样记 `CLAUDE_CONFIG_DIR`）。
+
+非默认的家取 `realpath`：Codex 对 `CODEX_HOME` 做 canonicalize，信任键里的 hooks.json 路径是解开软链接之后的；默认的 `~/.codex` 不解，Codex 自己也不解。
 
 Claude 侧同理（`ClaudeHome`）：`CLAUDE_CONFIG_DIR` 设了，Claude Code 的 settings.json、projects/、sessions/、.credentials.json、.claude.json 整个搬到那个目录，hook 就装进那里的 settings.json。问法和 `CodexHome` 一样（app 自己的环境 → 登录 shell 的 `echo TALLY_CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR` → `~/.claude`）。hook 进程从 Claude Code 继承环境，读 Claude Code 自己的 `sessions/` 时直接看 `CLAUDE_CONFIG_DIR`。只认一个家：几个账号各开一个目录同时用的话，Tally 跟着登录 shell 里设的那个。
 
 
 - 「Tally 匹配组」= 只含一个 hook 且命令含 `tally-hook`（或旧版的 `claude-event.js`）的匹配组。每个事件下：有就**原位**替换成期望组（多个时第一个原位、其余删），没有才追加到末尾。原位是因为 Codex 的信任键含序号，删了再追加会让别的 hook 序号漂移、哈希失效。
 - 文件不存在或 0 字节按 `{}`；不是合法 JSON 对象就抛错不覆盖。写回 `JSONSerialization` 的 prettyPrinted + sortedKeys + withoutEscapingSlashes，键会按字母序重排一次。
-- Codex 侧写完再跑 `codex app-server` 的 `initialize` + `hooks/list`，取命令含 `tally-hook` 的条目的 `key` 与 `currentHash`，在 `config.toml` 里同键就地改写 `trusted_hash`、没有才追加整块。哈希那步失败就用备份把 hooks.json 退回去再报错，不留半套。
+- Codex 侧写完 hooks.json 再给每条 Tally hook 写信任哈希（`CodexTrust`），在 `config.toml` 里同键就地改写 `trusted_hash`、没有才追加整块。写失败就用备份把 hooks.json 退回去再报错，不留半套。`config.toml` 在但读不出来（夹着非 UTF-8 字节）也按失败处理：当成空文件的话写回去只剩 Tally 这几块，用户别的配置全没了。
 
-  找 `codex` 分三级，命中即停：登录 shell（`$SHELL -lc`，`$SHELL` 没有就 `/bin/zsh`）→ 交互登录 shell（`-ilc`）→ 常见安装目录（homebrew 两处、`~/.local/bin`、`~/.bun/bin`、`~/.cargo/bin`、`~/.npm-global/bin`、`~/.volta/bin`）。app 自己只有 launchd 给的那几个系统目录，所以必须问 shell；而**登录 shell 不读 `.zshrc`**（zsh 只在交互时读它），nvm、volta、改过 npm prefix 的机器把 PATH 写在那儿。每次问 shell 的命令是 `command -v codex; echo TALLY_PATH=$PATH`，一次拿两样：路径按行挑真能执行的那条（交互 shell 会吐主题、instant prompt 那类噪声；`codex` 被包成 shell 函数时 `command -v` 只回名字，正好一起滤掉），PATH 认 `TALLY_PATH=` 前缀。
+  键是 `<hooks.json 路径>:<事件的 snake_case>:<组序号>:0`。哈希照 Codex 源码自己算（`codex-rs/hooks/src/engine/discovery.rs` 的 `hook_hash`，`codex-rs/config/src/fingerprint.rs` 的 `version_for_toml`）：`sha256:` 加按键排序的紧凑 JSON 的 sha256 十六进制，JSON 是
 
-  起 app-server 时子进程的 PATH = codex 所在目录 + 上面那步拿到的 shell PATH + app 自己的 PATH。codex 常是 `#!/usr/bin/env node` 的脚本，app 的 PATH 里没有 node，直接跑得到的是 `env: node: No such file or directory`，界面上却显示「没拿到信任哈希」；node 也不一定和 codex 同目录（实测有台机器 codex 在 `~/.local/bin`、node 在 `/usr/local/bin`），所以只补 codex 那层目录不够。
+  ```json
+  {"event_name":"stop","hooks":[{"async":false,"command":"\"/Applications/Tally.app/Contents/MacOS/tally-hook\" --provider codex","timeout":5,"type":"command"}]}
+  ```
 
-  读 app-server 的输出是**边跑边读、读到 id 为 2 的那条就停**（上限 20 秒）。子进程统一走 `Subprocess.run`，上限对每条路径都生效：stdout 与 stderr 同时收（stderr 灌满 64 KB 管道也堵不住），等输出、等退出都按同一个截止时间，到点先 SIGTERM，1 秒后还在就 SIGKILL。原来是循环里调 `availableData`，它在管道没数据时一直阻塞，截止时间只在两次读之间检查——app-server 一声不吭就永远卡住，「安装」按钮一直转、`--install-hooks` 不退出（探针：上限 2 秒、子进程 6 秒不出声，照样等满 6 秒）。原先是「睡 4 秒 → 关 stdin → 等它退出 → 一次性读」，两头都会坏：慢机器上 4 秒还没答完就被 terminate；hook 多的机器输出超过管道缓冲（64 KB）会把 app-server 堵死，再 terminate 读到的是半截——两种都表现为「响应里没有 id 为 2 的结果」，而那句话对排查毫无帮助。现在 id 为 2 那条带 `error` 时把它的原话报出来（比如「不支持 hooks/list」），失败时还附上 stderr 与收到的开头一段。本机实测 0.1 秒拿到 11 条。
+  - 哈希里没有 hooks.json 路径和序号：同一条命令在哪台机器、排第几，哈希都一样。
+  - `timeout` 是 Codex 归一化之后的值：`SessionEnd` 被压到 1–3 秒，Tally 写的 5 在哈希里是 3。
+  - `matcher`、`statusMessage` 为空时不出现（TOML 表示不了空值）；Tally 的组两样都没有。
+
+  实测对得上：本机 app-server 报的 11 条，加另一台机器 `config.toml` 里 4 条带 matcher 和中文 statusMessage 的，全部一致。
+
+  不跑 `codex app-server` 的 `hooks/list` 拿哈希：有人把 codex 包进隐私检查脚本，脚本按参数拦下 `app-server` 子命令（实测报「本地隐私模式禁止 cloud、remote-control、app-server 和 app 子命令」）；何况要跑它还得在 app 里找 codex、补 node 的 PATH、扛慢机器超时和 64 KB 管道堵塞，这几样都出过事。代价是 Codex 哪天改了算法，写进去的哈希就对不上，表现为设置页「还没收到过事件」。`CodexTrustTests` 用 app-server 实报的六个哈希钉住算法；Codex 升级后跑一遍「验证」里那条 `hooks/list`，Tally 六条都是 `trusted` 才算没变。
 - 改前复制成 `<原名>.tally-backup`；失败时界面显示原因和一份可复制的手工步骤。
 - 状态 `installed`（每个事件都恰好一个 Tally 组且命令等于期望）/ `pointsElsewhere(说明)` / `missing`。`Tally --install-hooks` 是同一逻辑的命令行入口。
 
@@ -37,7 +53,9 @@ Claude 侧同理（`ClaudeHome`）：`CLAUDE_CONFIG_DIR` 设了，Claude Code �
 
 ## 移除（`HookInstaller.uninstall`）
 
-删掉各事件下的 Tally 匹配组，别的 hook 不动；事件数组空了连键一起删，`hooks` 空了连顶层键一起删；照样留备份。Codex 侧删掉后别的 hook 序号前移，所以改之前先跑一次 `hooks/list` 记下哪些命令是 `trustStatus == trusted` 的，改完再跑一次，只把这些按新键写回 `config.toml`，用户没信任过的一条不碰；后半步失败就把 JSON 退回备份。Tally 自己那几条 `[hooks.state.…]` 留着不清，键已没人引用，无害。
+删掉各事件下的 Tally 匹配组，别的 hook 不动；事件数组空了连键一起删，`hooks` 空了连顶层键一起删；照样留备份。
+
+Codex 侧删掉后，同一事件里排在 Tally 组后面的 hook 序号前移，而信任状态是按序号记的。所以接着改 `config.toml`：先删 Tally 组自己那几块 `[hooks.state.…]`，再按序号从小到大把后面的块改名到新序号，块里的 `trusted_hash`、`enabled` 原样跟过去。哈希不含序号，挪过去照样对得上；用户没信任过的本来就没有块，挪完也还是没有，不替用户做主。从小到大挪不会撞键：新序号上原来要么是刚删掉的 Tally 组，要么是已经挪走的块。Tally 的块必须删：留着的话，后面的 hook 挪到这个序号上就会和它重名，`config.toml` 里出现两个同名表，Codex 整份读不进去。后半步失败就把 JSON 退回备份。
 
 卸载 Tally = 设置里点两个「移除」，再把 Tally.app 拖进废纸篓。macOS 不让 app 在被删除时自己跑清理，所以分两步。
 
@@ -46,7 +64,7 @@ Claude 侧同理（`ClaudeHome`）：`CLAUDE_CONFIG_DIR` 设了，Claude Code �
 每侧 hook 行下面两样东西，专治「装了没反应」（同类项目公开后评论最多的就是这一类）：
 
 - **最近收到事件**：`tally-hook` 每收到一个合法事件（session_id 和事件名都校验过），就把事件名和时间写进 `~/Library/Application Support/Tally/hook-last-<claude|codex>.json`（`HookHeartbeat`）。放在会话目录的上一层：会话目录被 kqueue 盯着，写在里面的话每次工具调用都会让 app 重读一遍目录。设置页读它显示「最近收到事件：3 分钟前（Stop）」；从来没收到过显示「还没收到过事件」——多半是装之前就开着的会话没重开（Codex 只在启动时读 hooks.json），Codex 侧还可能是信任哈希没写上。写这个文件失败不影响记状态，hook 照样 exit 0。
-- **自检按钮**（`HookSelfTest`）：状态不是「已安装」就不跑，提示先点「安装」——配置里不是这条命令的话，二进制跑通了也证明不了 agent 调得通。装好了就把写进配置的那条命令（带引号的路径，Codex 侧跟 `--provider codex`）原样交给 `/bin/sh`（前面加 `exec`，被信号杀掉才看得出来），喂一条模拟的 `SessionStart`，`TALLY_SESSIONS_DIR` 指到临时目录，3 秒截止。stdin 走 `/bin/sh` 的文件重定向：hook 要把 stdin 读到结束，`Subprocess.run` 给的管道一直开着，直接喂的话 hook 会等到 900 ms 自退、什么都不写。结果一句话：正常（多少 ms、写出了状态文件）/ 退出码非 0（带 stderr 开头）/ 被信号杀掉（常见于 app 被系统隔离）/ 跑完没写出文件（目录没有写权限）/ 3 秒没退出。它分得清「hook 本身坏了」和「agent 没调它」，后一种看上面那条。
+- **自检按钮**（`HookSelfTest`）：状态不是「已安装」就不跑，提示先点「安装」——配置里不是这条命令的话，二进制跑通了也证明不了 agent 调得通。装好了就把写进配置的那条命令（带引号的路径，Codex 侧跟 `--provider codex`）原样交给 `/bin/sh`（前面加 `exec`，被信号杀掉才看得出来），喂一条模拟的 `SessionStart`，`TALLY_SESSIONS_DIR` 指到临时目录，3 秒截止。stdin 走 `/bin/sh` 的文件重定向：hook 要把 stdin 读到结束，读不到结束就等到 900 ms 自退、什么都不写。结果一句话：正常（多少 ms、写出了状态文件）/ 退出码非 0（带 stderr 开头）/ 被信号杀掉（常见于 app 被系统隔离）/ 跑完没写出文件（目录没有写权限）/ 3 秒没退出。它分得清「hook 本身坏了」和「agent 没调它」，后一种看上面那条。
 
 ## 发版与更新
 
@@ -63,12 +81,14 @@ DMG 本身：Tally.app + Applications 快捷方式 + 「首次打开必读.txt�
 ## 验证
 
 ```bash
-swift test --filter 'HookInstallerTests|HookSelfCheckTests|UpdateCheckerTests'
+swift test --filter 'HookInstallerTests|CodexTrustTests|CodexHomeTests|HookSelfCheckTests|UpdateCheckerTests'
 /Applications/Tally.app/Contents/MacOS/Tally --install-hooks
 H='"/Applications/Tally.app/Contents/MacOS/tally-hook"'
 jq --arg c "$H" '[.hooks | to_entries[] | .value[] | .hooks[] | select(.command == $c)] | length' ~/.claude/settings.json
 jq --arg c "$H --provider codex" '[.hooks | to_entries[] | .value[] | .hooks[] | select(.command == $c)] | length' ~/.codex/hooks.json
+# Codex 升级后：app-server 报的 Tally 六条都是 trusted，说明哈希算法没变（codex 被隐私脚本包住的机器上跑不了，换台机器验）
+(printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"p","version":"0"}}}\n'; sleep 1; printf '{"jsonrpc":"2.0","id":2,"method":"hooks/list","params":{"cwds":["/tmp"]}}\n'; sleep 3) | codex app-server 2>/dev/null | grep '"id":2' | jq -r '.result.data[].hooks[] | select(.command | contains("tally-hook")) | .trustStatus' | sort | uniq -c
 curl -sLo /tmp/Tally.dmg https://github.com/guokuaile/tally/releases/latest/download/Tally.dmg && hdiutil verify /tmp/Tally.dmg
 ```
 
-用例：文件不存在 / 0 字节 / 非法 JSON（抛错不覆盖）、别的 hook 保留且序号不变、安装两次相同、旧组原位替换、缺事件报 `pointsElsewhere`、Codex 哈希就地改写、备份存在、移除只删 Tally 组并删空键、移除只重写原本信任的、哈希失败回滚 JSON；心跳（合法事件写、校验不过不写、写在会话目录上一层）、最近收到事件的文案（没收到过 / 刚刚 / 分钟 / 小时 / 天）、自检结果五种文案、没装好不跑、拿编出来的 hook 按配置里的命令格式真跑一次自检。Claude 那条 `jq` 打印 7，Codex 那条打印 6。新版本（补零比较、后缀去掉、认不出的版本号不提示、解析 Release、Homebrew 判定、提示条同一版本同一个 id）。真发一次版才算验过：Release 页有 `Tally.dmg`、`curl -sI https://github.com/guokuaile/tally/releases/latest/download/Tally.dmg` 是 302、tap 仓库里 cask 的 sha256 等于下载下来的 `shasum -a 256 /tmp/Tally.dmg`。
+用例：文件不存在 / 0 字节 / 非法 JSON（抛错不覆盖）、别的 hook 保留且序号不变、安装两次相同、旧组原位替换、缺事件报 `pointsElsewhere`、Codex 哈希就地改写且等于 app-server 实报值（含 `SessionEnd` 超时压到 3）、备份存在、移除只删 Tally 组并删空键、移除后序号前移的块改名且没信任过的不加块、Tally 自己的块删掉、写 `config.toml` 失败回滚 JSON、`config.toml` 读不出来（非 UTF-8）报错且两个文件都不动；家目录（变量优先、挑最近有非桌面版会话的 `.codex*`、只有桌面版会话的家不选、都没有退回 `~/.codex`）；心跳（合法事件写、校验不过不写、写在会话目录上一层）、最近收到事件的文案（没收到过 / 刚刚 / 分钟 / 小时 / 天）、自检结果五种文案、没装好不跑、拿编出来的 hook 按配置里的命令格式真跑一次自检。Claude 那条 `jq` 打印 7，Codex 那条打印 6。新版本（补零比较、后缀去掉、认不出的版本号不提示、解析 Release、Homebrew 判定、提示条同一版本同一个 id）。真发一次版才算验过：Release 页有 `Tally.dmg`、`curl -sI https://github.com/guokuaile/tally/releases/latest/download/Tally.dmg` 是 302、tap 仓库里 cask 的 sha256 等于下载下来的 `shasum -a 256 /tmp/Tally.dmg`。

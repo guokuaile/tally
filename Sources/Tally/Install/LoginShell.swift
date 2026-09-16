@@ -39,12 +39,57 @@ enum CodexHome {
     static let url: URL = resolve(shellValue: LoginShell.value(LoginShell.lines("-lc", "echo TALLY_CODEX_HOME=$CODEX_HOME"),
                                                                marker: "TALLY_CODEX_HOME"))
 
-    static func resolve(shellValue: String?) -> URL {
+    /// 变量优先，问不到再在 `.codex*` 里认终端那个家，都没有才 `~/.codex`。
+    static func resolve(shellValue: String?, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
         let value = [ProcessInfo.processInfo.environment["CODEX_HOME"], shellValue]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
-        guard let value else { return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex") }
-        return URL(fileURLWithPath: (value as NSString).expandingTildeInPath)
+        if let value { return canonical(URL(fileURLWithPath: (value as NSString).expandingTildeInPath)) }
+        return terminalHome(in: home) ?? home.appendingPathComponent(".codex")
+    }
+
+    /// 变量只在 alias、shell 函数或隔离脚本那一个进程里设时，登录 shell 问不出来（实测有台机器的隐私规则明令不许导出），
+    /// 退回 `~/.codex` 就把 hook 装进了 ChatGPT 桌面版的家。所以在 `.codex` 开头的文件夹里挑最近一次有非桌面版会话的那个。
+    /// 天花板：家不叫 `.codex` 开头的认不出；真碰上了再从 hook 收到的 transcript_path 反推。
+    static func terminalHome(in home: URL) -> URL? {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: home.path)) ?? []
+        let newest = names.filter { $0.hasPrefix(".codex") }
+            .compactMap { name -> (url: URL, rollout: String)? in
+                let url = home.appendingPathComponent(name)
+                return latestTerminalRollout(in: url.appendingPathComponent("sessions")).map { (url, $0) }
+            }
+            .max { $0.rollout < $1.rollout }
+        guard let newest else { return nil }
+        return newest.url.lastPathComponent == ".codex" ? newest.url : canonical(newest.url)
+    }
+
+    /// 从最新的一天往回找第一个不是桌面版写的 rollout，返回文件名（`rollout-<定宽时间>-<id>.jsonl`，按字符串比就是按时间比）。
+    /// 最多读 500 个文件头：只有桌面版会话的家不值得翻遍上千个文件。也不能太少：`~/.codex` 最近要是连开几十个桌面版会话，
+    /// 看得太少就漏掉更早的终端会话，反而挑中一个旧备份（`~/.codex.bak-…` 实测就有）。
+    static func latestTerminalRollout(in sessions: URL) -> String? {
+        func newestFirst(_ url: URL) -> [URL] {
+            ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? [])
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        }
+        let days = newestFirst(sessions).lazy.flatMap { newestFirst($0).lazy.flatMap(newestFirst) }
+        var budget = 500
+        for day in days {
+            for file in newestFirst(day) where file.lastPathComponent.hasPrefix("rollout-") {
+                guard budget > 0 else { return nil }
+                budget -= 1
+                guard let originator = TranscriptTitle.codexOriginator(rollout: file) else { continue }
+                if originator != "Codex Desktop" { return file.lastPathComponent }
+            }
+        }
+        return nil
+    }
+
+    /// Codex 对 `CODEX_HOME` 取 realpath，信任键里的 hooks.json 路径是解开软链接之后的；默认的 `~/.codex` Codex 不解，这里也不解。
+    /// 路径不存在就原样返回。
+    static func canonical(_ url: URL) -> URL {
+        guard let resolved = realpath(url.path, nil) else { return url }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved))
     }
 }
 

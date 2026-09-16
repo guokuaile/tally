@@ -149,11 +149,24 @@ public enum TranscriptTitle {
             && (firstLine.contains("\"source\":\"exec\"") || firstLine.contains("\"source\":{"))
     }
 
-    /// 文件头 `tailBytes` 字节。
-    private static func head(of url: URL) -> String? {
+    /// rollout 第一行 `session_meta` 里的 `originator`：终端是 `codex-tui`、`codex_exec`，ChatGPT 桌面版是 `Codex Desktop`。
+    /// 找 codex 的家时靠它排除桌面版那个（`CodexHome`）；同 `isScriptedCodexHead` 只找子串。它在前几百字节（前面只有 id、时间、cwd），
+    /// 只读 4 KB：找家时要翻几百个文件。读不到或不是 rollout 为 nil。
+    public static func codexOriginator(rollout url: URL) -> String? {
+        guard let head = head(of: url, bytes: 4096) else { return nil }
+        let firstLine = head.prefix { $0 != "\n" }
+        guard firstLine.contains("\"type\":\"session_meta\""),
+              let start = firstLine.range(of: "\"originator\":\"")?.upperBound,
+              let end = firstLine[start...].firstIndex(of: "\"")
+        else { return nil }
+        return String(firstLine[start..<end])
+    }
+
+    /// 文件头 `bytes` 字节。
+    private static func head(of url: URL, bytes: Int = tailBytes) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: tailBytes), !data.isEmpty else { return nil }
+        guard let data = try? handle.read(upToCount: bytes), !data.isEmpty else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
 

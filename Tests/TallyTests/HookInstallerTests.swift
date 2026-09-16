@@ -23,14 +23,22 @@ final class HookInstallerTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
-    private func installer(hashes: [CodexHookEntry] = []) -> HookInstaller {
+    private func installer() -> HookInstaller {
         HookInstaller(
             claudeSettings: dir.appendingPathComponent("settings.json"),
             codexHooks: dir.appendingPathComponent("hooks.json"),
             codexConfig: dir.appendingPathComponent("config.toml"),
-            hookBinary: binary,
-            codexHashes: { hashes }
+            hookBinary: binary
         )
+    }
+
+    /// Tally 在 Codex 里的信任键：hooks.json 用的是测试目录里那份。
+    private func codexKey(_ event: String, _ group: Int, _ handler: Int = 0) -> String {
+        CodexTrust.key(hooksFile: dir.appendingPathComponent("hooks.json").path, event: event, group: group, handler: handler)
+    }
+
+    private func toml() throws -> String {
+        try String(contentsOf: dir.appendingPathComponent("config.toml"), encoding: .utf8)
     }
 
     private func write(_ name: String, _ text: String) throws {
@@ -116,27 +124,24 @@ final class HookInstallerTests: XCTestCase {
         try write("config.toml", """
         model = "x"
 
-        [hooks.state."/Users/a/.codex/hooks.json:stop:0:0"]
+        [hooks.state."\(codexKey("Stop", 0))"]
         trusted_hash = "sha256:old"
 
-        [hooks.state."/Users/a/.codex/hooks.json:pre_tool_use:0:0"]
+        [hooks.state."\(codexKey("PreToolUse", 0))"]
         trusted_hash = "sha256:other"
         """)
-        let hashes = [
-            CodexHookEntry(key: "/Users/a/.codex/hooks.json:stop:0:0", command: "\"\(binary)\" --provider codex", hash: "sha256:new"),
-            CodexHookEntry(key: "/Users/a/.codex/hooks.json:session_start:0:0", command: "\"\(binary)\" --provider codex", hash: "sha256:added"),
-            CodexHookEntry(key: "/Users/a/.codex/hooks.json:pre_tool_use:0:0", command: "node guard.js", hash: "sha256:ignored"),
-        ]
-        let i = installer(hashes: hashes)
+        let i = installer()
         try i.install(.codex)
         XCTAssertEqual(commands(try json("hooks.json"), "Stop"), ["\"\(binary)\" --provider codex"])
         XCTAssertEqual(commands(try json("hooks.json"), "PermissionRequest"), ["\"\(binary)\" --provider codex"])
-        let toml = try String(contentsOf: dir.appendingPathComponent("config.toml"), encoding: .utf8)
-        XCTAssertEqual(toml.components(separatedBy: "[hooks.state.\"/Users/a/.codex/hooks.json:stop:0:0\"]").count, 2, "旧块只有一份")
-        XCTAssertTrue(toml.contains("trusted_hash = \"sha256:new\""))
+        let toml = try toml()
+        XCTAssertEqual(toml.components(separatedBy: "[hooks.state.\"\(codexKey("Stop", 0))\"]").count, 2, "旧块只有一份")
+        XCTAssertTrue(toml.contains("[hooks.state.\"\(codexKey("Stop", 0))\"]\ntrusted_hash = \"\(CodexTrustTests.appServer["Stop"]!)\""), toml)
         XCTAssertFalse(toml.contains("sha256:old"))
         XCTAssertTrue(toml.contains("trusted_hash = \"sha256:other\""), "别的 hook 的哈希不动")
-        XCTAssertTrue(toml.contains("[hooks.state.\"/Users/a/.codex/hooks.json:session_start:0:0\"]\ntrusted_hash = \"sha256:added\""))
+        for event in HookSide.codex.events where event != "Stop" {
+            XCTAssertTrue(toml.contains("[hooks.state.\"\(codexKey(event, 0))\"]\ntrusted_hash = \"\(CodexTrustTests.appServer[event]!)\""), event)
+        }
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("hooks.json.tally-backup").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.toml.tally-backup").path))
     }
@@ -166,43 +171,80 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertNil(try json("settings.json")["hooks"], "只剩 Tally 的话 hooks 顶层键一起删")
     }
 
-    func testCodexUninstallRetrustsRemainingHooks() throws {
+    /// 移除后同一事件里后面的 hook 序号前移，信任状态跟着挪；没信任过的不能顺手变成信任。
+    func testCodexUninstallShiftsTrustOfRemainingHooks() throws {
         try write("hooks.json", """
-        {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\\"\(binary)\\" --provider codex"}]},
-                          {"hooks":[{"type":"command","command":"node ~/.codex/hooks/diff-residue-gate.js"}]}]}}
+        {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node gate.js"}]},
+                          {"hooks":[{"type":"command","command":"\\"\(binary)\\" --provider codex"}]},
+                          {"hooks":[{"type":"command","command":"node sketchy.js"}]},
+                          {"hooks":[{"type":"command","command":"node a.js"},{"type":"command","command":"node b.js"}]}],
+                  "SessionStart":[{"hooks":[{"type":"command","command":"\\"\(binary)\\" --provider codex"}]}]}}
         """)
-        try write("config.toml", "[hooks.state.\"hooks.json:Stop:1\"]\ntrusted_hash = \"old\"\n")
-        // 移除后 diff-residue-gate 从序号 1 挪到 0，app-server 会报新键新哈希；sketchy 用户从没信任过，不能顺手给它信任
-        let i = installer(hashes: [
-            CodexHookEntry(key: "hooks.json:Stop:0", command: "node ~/.codex/hooks/diff-residue-gate.js", hash: "fresh", trusted: true),
-            CodexHookEntry(key: "hooks.json:Stop:1", command: "node sketchy.js", hash: "nope", trusted: false),
-        ])
+        try write("config.toml", """
+        model = "x"
+
+        [hooks.state."\(codexKey("Stop", 0))"]
+        trusted_hash = "sha256:gate"
+
+        [hooks.state."\(codexKey("Stop", 1))"]
+        trusted_hash = "sha256:tally"
+
+        [hooks.state."\(codexKey("Stop", 3, 0))"]
+        trusted_hash = "sha256:a"
+
+        [hooks.state."\(codexKey("Stop", 3, 1))"]
+        enabled = false
+        trusted_hash = "sha256:b"
+
+        [hooks.state."\(codexKey("SessionStart", 0))"]
+        trusted_hash = "sha256:tally-start"
+        """)
+        let i = installer()
         try i.uninstall(.codex)
         XCTAssertEqual(i.status(.codex), .missing)
-        XCTAssertEqual(commands(try json("hooks.json"), "Stop"), ["node ~/.codex/hooks/diff-residue-gate.js"])
-        let toml = try String(contentsOf: dir.appendingPathComponent("config.toml"), encoding: .utf8)
-        XCTAssertTrue(toml.contains("[hooks.state.\"hooks.json:Stop:0\"]\ntrusted_hash = \"fresh\""), toml)
-        XCTAssertFalse(toml.contains("nope"), "没信任过的不写")
+        XCTAssertEqual(commands(try json("hooks.json"), "Stop"), ["node gate.js", "node sketchy.js", "node a.js"])
+        XCTAssertEqual(try toml(), """
+        model = "x"
+
+        [hooks.state."\(codexKey("Stop", 0))"]
+        trusted_hash = "sha256:gate"
+
+        [hooks.state."\(codexKey("Stop", 2, 0))"]
+        trusted_hash = "sha256:a"
+
+        [hooks.state."\(codexKey("Stop", 2, 1))"]
+        enabled = false
+        trusted_hash = "sha256:b"
+
+        """, "前面的不动、Tally 的块删掉、后面的挪一位；sketchy 从没信任过，挪到 1 上也没有块")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("config.toml.tally-backup").path))
     }
 
     func testTrustFailureRollsBackTheJSONEdit() throws {
         let original = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"node keep.js\"}]}]}}"
         try write("hooks.json", original)
+        // config.toml 的上一级是个普通文件，写不进去
+        try write("blocker", "")
         let failing = HookInstaller(
             claudeSettings: dir.appendingPathComponent("settings.json"),
             codexHooks: dir.appendingPathComponent("hooks.json"),
-            codexConfig: dir.appendingPathComponent("config.toml"),
-            hookBinary: binary,
-            codexHashes: { throw HookInstallError.codexNotFound }
+            codexConfig: dir.appendingPathComponent("blocker/config.toml"),
+            hookBinary: binary
         )
         XCTAssertThrowsError(try failing.install(.codex))
         XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("hooks.json"), encoding: .utf8), original, "哈希写不进去就退回原样")
         XCTAssertEqual(failing.status(.codex), .missing)
+    }
 
-        let working = installer(hashes: [CodexHookEntry(key: "hooks.json:Stop:1", command: "\"\(binary)\" --provider codex", hash: "h")])
-        try working.install(.codex)
-        XCTAssertThrowsError(try failing.uninstall(.codex))
-        XCTAssertEqual(working.status(.codex), .installed, "移除的第一步就查不到 codex，文件一个字节不动")
+    /// config.toml 在但不是 UTF-8：当成空文件写回去会只剩 Tally 的几块，用户别的配置全没了。要报错、两个文件都不动。
+    func testUnreadableConfigIsNotOverwritten() throws {
+        let original = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"node keep.js\"}]}]}}"
+        try write("hooks.json", original)
+        let garbage = Data("model = \"x\"\n".utf8) + Data([0xFF, 0xFE, 0x0A])
+        try garbage.write(to: dir.appendingPathComponent("config.toml"))
+        XCTAssertThrowsError(try installer().install(.codex))
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("config.toml")), garbage)
+        XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("hooks.json"), encoding: .utf8), original)
     }
 
     func testBackupIsWrittenBeforeChange() throws {
@@ -211,103 +253,35 @@ final class HookInstallerTests: XCTestCase {
         let backup = try String(contentsOf: dir.appendingPathComponent("settings.json.tally-backup"), encoding: .utf8)
         XCTAssertEqual(backup, "{\"hooks\":{}}")
     }
+}
 
-    func testAppServerParse() throws {
-        let output = """
-        {"jsonrpc":"2.0","id":1,"result":{}}
-        {"jsonrpc":"2.0","id":2,"result":{"data":[{"hooks":[{"key":"/h.json:stop:1:0","trustStatus":"untrusted","currentHash":"sha256:abc","config":{"type":"command","command":"\\"/A/tally-hook\\" --provider codex"}}]}]}}
-        """
-        let entries = try CodexAppServer.parse(output)
-        XCTAssertEqual(entries, [CodexHookEntry(key: "/h.json:stop:1:0", command: "\"/A/tally-hook\" --provider codex", hash: "sha256:abc", trusted: false)])
-        XCTAssertThrowsError(try CodexAppServer.parse("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"))
-    }
+/// 信任哈希是照 Codex 源码自己算的，不跑 app-server。算错了 Codex 不执行 hook，界面上只剩「还没收到过事件」，所以拿真值钉住。
+final class CodexTrustTests: XCTestCase {
 
-    /// id 为 2 但带 error 的响应：要把它的话说出来。原来只认 result，
-    /// 于是「不支持这个方法」会被报成「响应里没有 id 为 2 的结果」，远端用户没法反馈到点子上。
-    func testAppServerSurfacesJSONRPCError() {
-        let output = #"{"id":2,"error":{"code":-32601,"message":"Method not found: hooks/list"}}"#
-        XCTAssertThrowsError(try CodexAppServer.parse(output)) { error in
-            XCTAssertEqual(error as? HookInstallError,
-                           .appServerFailed("hooks/list 返回错误：Method not found: hooks/list"))
+    /// `codex app-server` 的 hooks/list 对 `"/Applications/Tally.app/Contents/MacOS/tally-hook" --provider codex`、超时 5 实报的
+    /// currentHash（codex-cli 0.154.0）；另一台机器 config.toml 里同一条命令的 trusted_hash 与之逐个相同。
+    static let appServer = [
+        "SessionStart": "sha256:e47181287b4a61f12e96f670a637c456234344a7dbaecf927074fd12f73cae45",
+        "UserPromptSubmit": "sha256:7e707fd6c1b0f500342532dd4fa7adce493ffeadecd8f224024629f18135190a",
+        "PermissionRequest": "sha256:24e2f42ac9806a566637aaf8442d0c5f2d2830480b6cc6bd6f5d52c85c40aa1b",
+        "PostToolUse": "sha256:13bf6ad3f1534ce3239bd3c677361f900c5a150f285d0d379f4066c5afef1431",
+        "Stop": "sha256:413255748d3b8f05a7647ddd81b53b8c3a9d8b50eda28988a190a21b5c36c48f",
+        // SessionEnd 的超时被 Codex 压到 3 秒，哈希按 3 算
+        "SessionEnd": "sha256:aba9f1acc4dcac21ac181c3b8da4a5a1ca853338c519aeb72c07c82f6f63cc10",
+    ]
+
+    func testHashMatchesAppServer() throws {
+        let command = "\"/Applications/Tally.app/Contents/MacOS/tally-hook\" --provider codex"
+        for event in HookSide.codex.events {
+            XCTAssertEqual(try CodexTrust.hash(event: event, command: command, timeout: 5), Self.appServer[event], event)
         }
     }
 
-    /// 原来靠 `"id":2` 这个子串找结果行，响应里带空格（`"id": 2`）就整条漏掉，
-    /// 报「响应里没有 id 为 2 的结果」——用户装 Codex hook 时就撞上了这个。
-    func testAppServerParseAcceptsSpacedId() throws {
-        let output = """
-        {"jsonrpc": "2.0", "id": 1, "result": {}}
-        {"jsonrpc": "2.0", "id": 2, "result": {"data": [{"hooks": [{"key": "/h.json:stop:1:0", "trustStatus": "trusted", "currentHash": "sha256:abc", "config": {"type": "command", "command": "\\"/A/tally-hook\\" --provider codex"}}]}]}}
-        """
-        XCTAssertEqual(try CodexAppServer.parse(output).map { $0.hash }, ["sha256:abc"])
-    }
-
-    /// 远端那台机器：登录 shell 里没有 codex（登录 shell 不读 `.zshrc`，zsh 只在交互时读它），
-    /// 交互 shell 才报得出来，中间还夹着 instant prompt 那类噪声。顺带验 PATH 也一起带回来了——
-    /// codex 是 `#!/usr/bin/env node` 的脚本，node 未必和它同目录，光有 codex 路径跑不起来。
-    func testResolveFallsBackToInteractiveShellAndKeepsPath() throws {
-        let dir = try makeTemporaryDirectory()
-        let codex = try makeExecutable(dir.appendingPathComponent("codex"), body: "#!/bin/sh\n")
-        let shell = try makeExecutable(dir.appendingPathComponent("shell.sh"), body: """
-        #!/bin/sh
-        case "$1" in
-          -lc) exit 1 ;;
-          -ilc) echo 'instant prompt 噪声'; echo '\(codex.path)'; echo 'TALLY_PATH=/usr/local/bin:/usr/bin' ;;
-        esac
-        """)
-        let restore = useAsLoginShell(shell)
-        defer { restore(); try? FileManager.default.removeItem(at: dir) }
-
-        let located = try CodexAppServer.resolve()
-        XCTAssertEqual(located.codex, codex.path)
-        XCTAssertEqual(located.path, "/usr/local/bin:/usr/bin")
-    }
-
-    /// 有人把 codex 包成 shell 函数（远端那台就是，函数里换了 CODEX_HOME）：
-    /// `command -v` 只回名字不回路径，不能把「codex」当成可执行文件路径拿去跑。PATH 还是要留下。
-    func testProbeIgnoresShellFunctionButKeepsPath() throws {
-        let dir = try makeTemporaryDirectory()
-        let shell = try makeExecutable(dir.appendingPathComponent("shell.sh"), body: """
-        #!/bin/sh
-        echo 'codex'
-        echo 'TALLY_PATH=/usr/local/bin:/usr/bin'
-        """)
-        let restore = useAsLoginShell(shell)
-        defer { restore(); try? FileManager.default.removeItem(at: dir) }
-
-        let found = CodexAppServer.probe("-lc")
-        XCTAssertNil(found.codex)
-        XCTAssertEqual(found.path, "/usr/local/bin:/usr/bin")
-    }
-
-    /// app 自己的 PATH 只有 launchd 给的几个系统目录，跑 codex 会 `env: node: No such file or directory`，
-    /// 界面上却显示「没拿到信任哈希」。shell 的 PATH 打头，codex 那层目录也补上。
-    func testAppServerEnvironmentPrependsShellPathAndCodexDirectory() {
-        let environment = CodexAppServer.environment(codex: "/fake/bin/codex", path: "/usr/local/bin",
-                                                     codexHome: URL(fileURLWithPath: "/fake/home"))
-        XCTAssertEqual(environment["PATH"]?.hasPrefix("/fake/bin:/usr/local/bin:"), true)
-        // 不给 CODEX_HOME 的话 app-server 读默认的 ~/.codex，算出来的哈希对不上我们刚写的那份 hooks.json
-        XCTAssertEqual(environment["CODEX_HOME"], "/fake/home")
-    }
-
-    // MARK: 上面三个用的小工具
-
-    private func makeTemporaryDirectory() throws -> URL {
-        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
-    private func makeExecutable(_ url: URL, body: String) throws -> URL {
-        try body.write(to: url, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-        return url
-    }
-
-    private func useAsLoginShell(_ shell: URL) -> () -> Void {
-        let saved = ProcessInfo.processInfo.environment["SHELL"]
-        setenv("SHELL", shell.path, 1)
-        return { if let saved { setenv("SHELL", saved, 1) } else { unsetenv("SHELL") } }
+    func testKeyUsesSnakeCaseEvent() {
+        XCTAssertEqual(CodexTrust.key(hooksFile: "/Users/a/.codex-cli/hooks.json", event: "UserPromptSubmit", group: 1),
+                       "/Users/a/.codex-cli/hooks.json:user_prompt_submit:1:0")
+        XCTAssertEqual(HookSide.codex.events.map(CodexTrust.label),
+                       ["session_start", "user_prompt_submit", "permission_request", "post_tool_use", "stop", "session_end"])
     }
 }
 
@@ -365,12 +339,62 @@ final class CodexHomeTests: XCTestCase {
         if let saved { setenv("CODEX_HOME", saved, 1) }
     }
 
+    private var home: URL!
+
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appendingPathComponent("tally-codexhome-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    /// 在 `<家>/sessions/<年>/<月>/<日>/` 下写一个 rollout，第一行是带 originator 的 session_meta。
+    private func rollout(_ dir: String, _ day: String, _ name: String, originator: String) throws {
+        let folder = home.appendingPathComponent(dir).appendingPathComponent("sessions/" + day)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let line = #"{"timestamp":"2026-09-16T01:57:59.001Z","type":"session_meta","payload":{"id":"x","cwd":"/tmp","originator":"\#(originator)","source":"cli"}}"#
+        try (line + "\n" + #"{"type":"event_msg"}"# + "\n").write(to: folder.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
     func testFallsBackToDefaultHome() {
         withoutEnvironmentValue {
-            let expected = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
-            XCTAssertEqual(CodexHome.resolve(shellValue: nil), expected)
-            XCTAssertEqual(CodexHome.resolve(shellValue: "   "), expected)
+            let expected = home.appendingPathComponent(".codex")
+            XCTAssertEqual(CodexHome.resolve(shellValue: nil, home: home), expected)
+            XCTAssertEqual(CodexHome.resolve(shellValue: "   ", home: home), expected)
         }
+    }
+
+    /// 远端那台：隐私规则不许导出 CODEX_HOME，终端 codex 在 `~/.codex-cli`，`~/.codex` 里只有桌面版的会话。
+    /// 退回 `~/.codex` 会把 hook 装给桌面版。
+    func testPicksTerminalHomeOverDesktopHome() throws {
+        try rollout(".codex", "2026/09/16", "rollout-2026-09-16T10-00-00-d.jsonl", originator: "Codex Desktop")
+        try rollout(".codex-cli", "2026/09/14", "rollout-2026-09-14T09-10-20-a.jsonl", originator: "codex_exec")
+        withoutEnvironmentValue {
+            XCTAssertEqual(CodexHome.resolve(shellValue: nil, home: home).path,
+                           CodexHome.canonical(home.appendingPathComponent(".codex-cli")).path, "桌面版的会话再新也不选")
+        }
+    }
+
+    /// 两个家都有终端会话（比如 `~/.codex` 和旧备份 `~/.codex.bak-…`）：取最近用过的；默认的家不解软链接。
+    func testPicksMostRecentTerminalHome() throws {
+        try rollout(".codex", "2026/09/16", "rollout-2026-09-16T16-44-35-a.jsonl", originator: "codex-tui")
+        try rollout(".codex.bak-20260407", "2026/04/07", "rollout-2026-04-07T09-00-00-b.jsonl", originator: "codex-tui")
+        // 同一天里新的是桌面版，旧的才是终端：跳过桌面版接着往回找
+        try rollout(".codex-work", "2026/09/15", "rollout-2026-09-15T23-00-00-c.jsonl", originator: "Codex Desktop")
+        try rollout(".codex-work", "2026/09/15", "rollout-2026-09-15T08-00-00-d.jsonl", originator: "codex-tui")
+        XCTAssertEqual(CodexHome.terminalHome(in: home), home.appendingPathComponent(".codex"))
+        XCTAssertEqual(CodexHome.latestTerminalRollout(in: home.appendingPathComponent(".codex-work/sessions")),
+                       "rollout-2026-09-15T08-00-00-d.jsonl")
+    }
+
+    /// 只有桌面版会话、或者根本没有会话的家不算；不是 `.codex` 开头的文件夹不看。
+    func testIgnoresDesktopOnlyAndUnrelatedFolders() throws {
+        try rollout(".codex", "2026/07/31", "rollout-2026-07-31T13-39-55-a.jsonl", originator: "Codex Desktop")
+        try rollout("codex-elsewhere", "2026/09/16", "rollout-2026-09-16T10-00-00-b.jsonl", originator: "codex-tui")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".codexbar"), withIntermediateDirectories: true)
+        XCTAssertNil(CodexHome.terminalHome(in: home))
     }
 
     /// app 的环境里没有用户 shell 的变量，所以 shell 问回来的那个值必须算数。

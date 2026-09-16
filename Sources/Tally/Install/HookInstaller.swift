@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// 两侧 hook 的注册器：改 `~/.claude/settings.json` 与 `~/.codex/hooks.json`，给 Codex 写信任哈希，报状态。
@@ -35,33 +36,14 @@ enum HookStatus: Equatable {
     case missing
 }
 
-struct CodexHookEntry: Equatable {
-    let key: String
-    let command: String
-    let hash: String
-    /// app-server 报的 trustStatus 是不是 trusted。移除 Tally 后只把原本信任的写回去，没信任过的不替用户做主。
-    let trusted: Bool
-
-    init(key: String, command: String, hash: String, trusted: Bool = true) {
-        self.key = key
-        self.command = command
-        self.hash = hash
-        self.trusted = trusted
-    }
-}
-
 enum HookInstallError: LocalizedError, Equatable {
     case invalidJSON(String)
-    case codexNotFound
-    case appServerFailed(String)
     /// app 不在固定位置（磁盘映像里、或被 Gatekeeper 搬到 AppTranslocation 的临时副本）。
     case unstableLocation(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidJSON(let path): return "\(path) 不是合法的 JSON 对象，没有改动它"
-        case .codexNotFound: return "找不到 codex 命令：登录 shell、交互 shell 和常见安装目录里都没有。装了的话，把它所在目录写进 ~/.zprofile 的 PATH 再重试"
-        case .appServerFailed(let why): return "codex app-server 没拿到信任哈希：\(why)"
         case .unstableLocation:
             return "先把 Tally 拖进「应用程序」再装 hook：现在跑的这份是系统给的临时副本（从磁盘映像或下载目录直接打开会这样），它的路径重启就没了，写进配置的 hook 会失效"
         }
@@ -85,18 +67,8 @@ struct HookInstaller {
     let codexConfig: URL
     /// tally-hook 可执行文件的绝对路径。
     let hookBinary: String
-    let codexHashes: () throws -> [CodexHookEntry]
 
-    init(claudeSettings: URL, codexHooks: URL, codexConfig: URL, hookBinary: String,
-         codexHashes: @escaping () throws -> [CodexHookEntry]) {
-        self.claudeSettings = claudeSettings
-        self.codexHooks = codexHooks
-        self.codexConfig = codexConfig
-        self.hookBinary = hookBinary
-        self.codexHashes = codexHashes
-    }
-
-    /// 真实路径 + 真实的 app-server 查询。
+    /// 真实路径。
     static func live() -> HookInstaller {
         let binary = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("tally-hook").path
             ?? "/Applications/Tally.app/Contents/MacOS/tally-hook"
@@ -104,10 +76,12 @@ struct HookInstaller {
             claudeSettings: ClaudeHome.url.appendingPathComponent("settings.json"),
             codexHooks: CodexHome.url.appendingPathComponent("hooks.json"),
             codexConfig: CodexHome.url.appendingPathComponent("config.toml"),
-            hookBinary: binary,
-            codexHashes: CodexAppServer.hookEntries
+            hookBinary: binary
         )
     }
+
+    /// 写进配置的超时秒数；Codex 的信任哈希也要用它算。
+    static let timeout = 5
 
     // MARK: 期望值
 
@@ -129,7 +103,7 @@ struct HookInstaller {
     }
 
     private func expectedGroup(_ side: HookSide) -> [String: Any] {
-        ["hooks": [["type": "command", "command": expectedCommand(side), "timeout": 5]]]
+        ["hooks": [["type": "command", "command": expectedCommand(side), "timeout": Self.timeout]]]
     }
 
     // MARK: 状态
@@ -188,7 +162,7 @@ struct HookInstaller {
         try Self.save(root, to: url)
         if side == .codex {
             do {
-                try trustCodexEntries()
+                try trustCodexEntries(hooks)
             } catch {
                 // 哈希写不进去就等于没装：留一半会让状态页说「已安装」而 Codex 不跑它
                 try Self.restore(url)
@@ -200,13 +174,12 @@ struct HookInstaller {
     // MARK: 移除
 
     /// 把各事件下的 Tally 匹配组删掉，别的 hook 不动；事件数组空了就连键一起删。
-    /// Codex 侧删掉后别的 hook 序号前移、信任哈希失效，所以重新拿一遍 hooks/list 把剩下的哈希都写回去。
+    /// Codex 侧删掉后别的 hook 序号前移，信任状态要跟着挪（`shiftCodexTrust`）。
     func uninstall(_ side: HookSide) throws {
-        // 先记下移除前哪些 hook 是用户信任过的，改完只把这些写回去
-        let trustedBefore = side == .codex ? Set(try codexHashes().filter(\.trusted).map(\.command)) : []
         let url = file(for: side)
         var root = try Self.load(url)
-        var hooks = root["hooks"] as? [String: Any] ?? [:]
+        let before = root["hooks"] as? [String: Any] ?? [:]
+        var hooks = before
         for event in side.events {
             guard var groups = hooks[event] as? [[String: Any]] else { continue }
             groups.removeAll(where: Self.isTallyGroup)
@@ -217,7 +190,7 @@ struct HookInstaller {
         try Self.save(root, to: url)
         if side == .codex {
             do {
-                try retrustCodexEntries(trustedCommands: trustedBefore)
+                try shiftCodexTrust(before)
             } catch {
                 try Self.restore(url)
                 throw error
@@ -225,34 +198,77 @@ struct HookInstaller {
         }
     }
 
-    /// 移除之后序号变了，把移除前信任过的那些按新序号重写哈希；没信任过的一条不碰。
-    private func retrustCodexEntries(trustedCommands: Set<String>) throws {
-        let entries = try codexHashes().filter { !$0.command.contains("tally-hook") && trustedCommands.contains($0.command) }
-        guard !entries.isEmpty else { return }
-        var text = (try? String(contentsOf: codexConfig, encoding: .utf8)) ?? ""
-        for entry in entries {
-            text = Self.patchTrust(in: text, key: entry.key, hash: entry.hash)
+    /// 信任状态按序号记，删掉 Tally 组后同一事件里后面的 hook 序号前移：先删 Tally 组自己的块，
+    /// 再从小到大把后面的块改名到新序号。哈希不含序号，挪过去照样对得上；没信任过的本来就没有块，挪完也没有。
+    /// Tally 的块不删的话，后面的 hook 挪到这个序号上会和它重名，`config.toml` 出现两个同名表，Codex 整份读不进去。
+    private func shiftCodexTrust(_ before: [String: Any]) throws {
+        guard FileManager.default.fileExists(atPath: codexConfig.path) else { return }
+        let original = try String(contentsOf: codexConfig, encoding: .utf8)
+        var text = original
+        for event in HookSide.codex.events {
+            var removed = 0
+            for (index, group) in (before[event] as? [[String: Any]] ?? []).enumerated() {
+                if Self.isTallyGroup(group) {
+                    text = Self.removeTrust(in: text, key: CodexTrust.key(hooksFile: codexHooks.path, event: event, group: index))
+                    removed += 1
+                    continue
+                }
+                guard removed > 0 else { continue }
+                for handler in 0..<((group["hooks"] as? [Any])?.count ?? 0) {
+                    text = Self.renameTrust(in: text,
+                                            from: CodexTrust.key(hooksFile: codexHooks.path, event: event, group: index, handler: handler),
+                                            to: CodexTrust.key(hooksFile: codexHooks.path, event: event, group: index - removed, handler: handler))
+                }
+            }
+        }
+        guard text != original else { return }
+        try Self.backup(codexConfig)
+        try text.write(to: codexConfig, atomically: true, encoding: .utf8)
+    }
+
+    /// 每个事件下 Tally 组的信任哈希：同键已存在就就地改写 trusted_hash，没有才追加整块。
+    private func trustCodexEntries(_ hooks: [String: Any]) throws {
+        // 文件在但读不出来（比如夹着非 UTF-8 字节）要报错：当成空文件的话，写回去只剩 Tally 这几块，用户别的配置全没了
+        var text = FileManager.default.fileExists(atPath: codexConfig.path) ? try String(contentsOf: codexConfig, encoding: .utf8) : ""
+        for event in HookSide.codex.events {
+            guard let index = (hooks[event] as? [[String: Any]])?.firstIndex(where: Self.isTallyGroup) else { continue }
+            let hash = try CodexTrust.hash(event: event, command: expectedCommand(.codex), timeout: Self.timeout)
+            text = Self.patchTrust(in: text, key: CodexTrust.key(hooksFile: codexHooks.path, event: event, group: index), hash: hash)
         }
         try Self.backup(codexConfig)
         try text.write(to: codexConfig, atomically: true, encoding: .utf8)
     }
 
-    /// 同键已存在就就地改写 trusted_hash，没有才追加整块。
-    private func trustCodexEntries() throws {
-        let entries = try codexHashes().filter { $0.command.contains("tally-hook") }
-        guard !entries.isEmpty else { throw HookInstallError.appServerFailed("hooks/list 里没有 tally-hook 的条目") }
-        var text = (try? String(contentsOf: codexConfig, encoding: .utf8)) ?? ""
-        for entry in entries {
-            text = Self.patchTrust(in: text, key: entry.key, hash: entry.hash)
-        }
-        try Self.backup(codexConfig)
-        try text.write(to: codexConfig, atomically: true, encoding: .utf8)
+    private static func trustHeader(_ key: String) -> String {
+        "[hooks.state.\"\(key)\"]"
+    }
+
+    private static func trustHeaderIndex(_ lines: [String], _ key: String) -> Int? {
+        lines.firstIndex { $0.trimmingCharacters(in: .whitespaces) == trustHeader(key) }
+    }
+
+    /// 删掉整块：表头到下一个表头之前。
+    static func removeTrust(in text: String, key: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        guard let start = trustHeaderIndex(lines, key) else { return text }
+        var end = start + 1
+        while end < lines.count, !lines[end].trimmingCharacters(in: .whitespaces).hasPrefix("[") { end += 1 }
+        lines.removeSubrange(start..<end)
+        return lines.joined(separator: "\n")
+    }
+
+    /// 只改表头，块里的 trusted_hash、enabled 原样跟着走。
+    static func renameTrust(in text: String, from old: String, to new: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        guard let index = trustHeaderIndex(lines, old) else { return text }
+        lines[index] = trustHeader(new)
+        return lines.joined(separator: "\n")
     }
 
     static func patchTrust(in text: String, key: String, hash: String) -> String {
-        let header = "[hooks.state.\"\(key)\"]"
+        let header = trustHeader(key)
         var lines = text.components(separatedBy: "\n")
-        if let index = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == header }) {
+        if let index = trustHeaderIndex(lines, key) {
             var cursor = index + 1
             while cursor < lines.count {
                 let line = lines[cursor].trimmingCharacters(in: .whitespaces)
@@ -319,139 +335,44 @@ struct HookInstaller {
         let command = side == .codex ? "\"\(hookBinary)\" --provider codex" : "\"\(hookBinary)\""
         let file = side == .claude ? ClaudeHome.url.appendingPathComponent("settings.json").path : CodexHome.url.appendingPathComponent("hooks.json").path
         var text = "在 \(file) 的 hooks 下，给 \(side.events.joined(separator: "、")) 各加一条：\n"
-        text += "{ \"hooks\": [ { \"type\": \"command\", \"command\": \"\(command.replacingOccurrences(of: "\"", with: "\\\""))\", \"timeout\": 5 } ] }\n"
+        text += "{ \"hooks\": [ { \"type\": \"command\", \"command\": \"\(command.replacingOccurrences(of: "\"", with: "\\\""))\", \"timeout\": \(timeout) } ] }\n"
         if side == .codex {
-            text += "然后用 codex app-server 的 hooks/list 拿每条的 key 与 currentHash，写进 \(CodexHome.url.appendingPathComponent("config.toml").path)：\n[hooks.state.\"<key>\"]\ntrusted_hash = \"<currentHash>\"\n"
+            text += "然后在 \(CodexHome.url.appendingPathComponent("config.toml").path) 里给每条写信任哈希，<序号> 是这条在该事件数组里的位置（从 0 数）：\n"
+            for event in side.events {
+                let hash = (try? CodexTrust.hash(event: event, command: command, timeout: timeout)) ?? "<哈希>"
+                text += "[hooks.state.\"\(file):\(CodexTrust.label(event)):<序号>:0\"]\ntrusted_hash = \"\(hash)\"\n"
+            }
         }
         return text
     }
 }
 
-/// 通过 `codex app-server` 拿 hooks/list。协议见 ~/.codex/hooks/README.md「信任」一节。
-enum CodexAppServer {
+/// Codex 给每条 hook 记的信任键与哈希，照 Codex 源码自己算，不跑 `codex app-server`（docs/hooks.md「安装」）：
+/// 有人把 codex 包进隐私检查脚本，`app-server` 子命令直接被拒。
+enum CodexTrust {
 
-    /// 常见安装目录，shell 都问不出来时按顺序试。
-    static var candidates: [String] {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
-            + ["/.local/bin/codex", "/.bun/bin/codex", "/.cargo/bin/codex",
-               "/.npm-global/bin/codex", "/.volta/bin/codex"].map { home + $0 }
+    /// `config.toml` 里 `[hooks.state."<键>"]` 的键。
+    static func key(hooksFile: String, event: String, group: Int, handler: Int = 0) -> String {
+        "\(hooksFile):\(label(event)):\(group):\(handler)"
     }
 
-    /// 找 codex，并带回跑它要用的 PATH。三级找：登录 shell → 交互登录 shell → 常见安装目录。
-    ///
-    /// 要问 shell 是因为 app 自己只有 launchd 给的那几个系统目录。两级 shell 是因为登录 shell **不读 `.zshrc`**
-    /// （zsh 只在交互时读），nvm、volta、改过 npm prefix 的机器把 PATH 写在那儿。
-    /// PATH 要一起带回来：codex 常是 `#!/usr/bin/env node` 的脚本，而 node 不一定和 codex 同目录
-    /// （实测有台机器 codex 在 `~/.local/bin`、node 在 `/usr/local/bin`），只补 codex 那层目录仍然是
-    /// `env: node: No such file or directory`，报到界面上却成了「没拿到信任哈希」。
-    static func resolve() throws -> (codex: String, path: String?) {
-        var path: String?
-        for flags in ["-lc", "-ilc"] {
-            let found = probe(flags)
-            if let shellPath = found.path { path = shellPath }   // 交互那次的 PATH 更全，后来的盖前面的
-            if let codex = found.codex { return (codex, path) }
-        }
-        if let codex = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return (codex, path)
-        }
-        throw HookInstallError.codexNotFound
-    }
-
-    /// 一次 shell 调用同时问「codex 在哪」和「PATH 是什么」：交互 shell 起一次要一秒，不值当问两遍。
-    /// codex 按行挑真能执行的那条（`codex` 被包成 shell 函数时 `command -v` 只回名字，正好滤掉），PATH 认标记。
-    static func probe(_ flags: String) -> (codex: String?, path: String?) {
-        let lines = LoginShell.lines(flags, "command -v codex; echo TALLY_PATH=$PATH")
-        return (lines.last { FileManager.default.isExecutableFile(atPath: $0) },
-                LoginShell.value(lines, marker: "TALLY_PATH"))
-    }
-
-    /// 跑 app-server 用的环境：shell 的 PATH 打头，再补上 codex 自己那层目录；
-    /// CODEX_HOME 也要给，否则 app-server 读的是默认的 `~/.codex`，算出来的哈希对不上我们刚写的那份 hooks.json。
-    static func environment(codex: String, path: String?, codexHome: URL = CodexHome.url) -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
-        let directory = (codex as NSString).deletingLastPathComponent
-        environment["PATH"] = [directory, path, environment["PATH"]].compactMap { $0 }.joined(separator: ":")
-        environment["CODEX_HOME"] = codexHome.path
-        return environment
-    }
-
-    /// 等 id 为 2 的那条结果最多等这么久。app-server 起来要读配置、探远程控制状态，慢机器上几秒起步。
-    static let deadline: TimeInterval = 20
-
-    static func hookEntries() throws -> [CodexHookEntry] {
-        let located = try resolve()
-        let request = """
-        {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"tally","version":"1"}}}
-        {"jsonrpc":"2.0","id":2,"method":"hooks/list","params":{"cwds":["/tmp"]}}
-
-        """
-        // 边跑边读，读到 id 为 2 的那条就停。
-        // 原来是「睡 4 秒 → 关 stdin → 等它自己退 → 一次性读」，两头都会坏事：
-        // 慢机器上 4 秒还没答完就被 terminate；hook 多的机器输出超过管道缓冲（64 KB）会把 app-server 堵死，
-        // 我们再 terminate，读到的是半截——两种都表现为「响应里没有 id 为 2 的结果」。
-        // 读法交给 Subprocess：它的截止时间对「一声不吭」也生效，原来循环里的 availableData 会一直阻塞。
-        let result = try Subprocess.run(URL(fileURLWithPath: located.codex), ["app-server"],
-                                        environment: environment(codex: located.codex, path: located.path),
-                                        input: Data(request.utf8), deadline: Self.deadline) { stdout in
-            let text = String(decoding: stdout, as: UTF8.self)
-            return text.contains("\"id\":2") || text.contains("\"id\": 2")
-        }
-        let output = String(decoding: result.stdout, as: UTF8.self)
-        let errors = String(decoding: result.stderr, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            return try parse(output)
-        } catch let error as HookInstallError {
-            // 把现场带上：只说「没有 id 为 2 的结果」的话，远端用户没法告诉我们到底发生了什么
-            guard case .appServerFailed(let why) = error else { throw error }
-            var detail = why
-            if result.timedOut { detail += "；等了 \(Int(Self.deadline)) 秒没等到" }
-            if !errors.isEmpty { detail += "；stderr：" + errors.prefix(200) }
-            if output.isEmpty {
-                detail += "；app-server 一个字节都没输出"
-            } else {
-                detail += "；收到 " + String(output.count) + " 字符，开头是 " + output.prefix(120)
-            }
-            throw HookInstallError.appServerFailed(detail)
+    /// `UserPromptSubmit` → `user_prompt_submit`。
+    static func label(_ event: String) -> String {
+        event.reduce(into: "") { result, character in
+            if character.isUppercase, !result.isEmpty { result += "_" }
+            result += character.lowercased()
         }
     }
 
-    static func parse(_ output: String) throws -> [CodexHookEntry] {
-        // 按解析出来的 id 判，不按 `"id":2` 这个子串：格式化过的响应（`"id": 2`）会漏掉
-        for line in output.split(separator: "\n") where line.hasPrefix("{") {
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  (object["id"] as? NSNumber)?.intValue == 2
-            else { continue }
-            // 这条就是回给 hooks/list 的：出错了要把它的话说出来，
-            // 不然「不支持这个方法」会被报成「响应里没有 id 为 2 的结果」，谁也不知道发生了什么
-            if let failure = object["error"] as? [String: Any] {
-                let message = (failure["message"] as? String) ?? "\(failure)"
-                throw HookInstallError.appServerFailed("hooks/list 返回错误：" + message)
-            }
-            guard let result = object["result"] as? [String: Any],
-                  let data = result["data"] as? [[String: Any]]
-            else { continue }
-            var entries: [CodexHookEntry] = []
-            for group in data {
-                for hook in group["hooks"] as? [[String: Any]] ?? [] {
-                    guard let key = hook["key"] as? String, let hash = hook["currentHash"] as? String else { continue }
-                    let command = Self.command(in: hook)
-                    entries.append(CodexHookEntry(key: key, command: command, hash: hash,
-                                                  trusted: hook["trustStatus"] as? String == "trusted"))
-                }
-            }
-            return entries
-        }
-        throw HookInstallError.appServerFailed("响应里没有 id 为 2 的结果")
-    }
-
-    /// 命令文本在 hook 对象里的位置随版本变，从整个对象里找字符串值。
-    static func command(in hook: [String: Any]) -> String {
-        if let direct = hook["command"] as? String { return direct }
-        for value in hook.values {
-            if let nested = value as? [String: Any], let found = nested["command"] as? String { return found }
-        }
-        return (try? JSONSerialization.data(withJSONObject: hook)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+    /// `sha256:` 加按键排序的紧凑 JSON 的 sha256。只算 Tally 这种 hook：没有 matcher 和 statusMessage（空值不进 JSON）、不异步。
+    /// 超时按 Codex 归一化之后的值算：SessionEnd 被压到 1–3 秒。哈希不含 hooks.json 路径与序号。
+    static func hash(event: String, command: String, timeout: Int) throws -> String {
+        let seconds = event == "SessionEnd" ? min(max(timeout, 1), 3) : max(timeout, 1)
+        let identity: [String: Any] = [
+            "event_name": label(event),
+            "hooks": [["type": "command", "command": command, "timeout": seconds, "async": false]],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys, .withoutEscapingSlashes])
+        return "sha256:" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

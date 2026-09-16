@@ -18,20 +18,15 @@ enum Subprocess {
         var status: Int32?
     }
 
-    /// 同步跑完再返回，别在主线程上调用长的。
-    /// - Parameters:
-    ///   - input: 写进 stdin 的内容，写完 stdin 一直开着到结束（app-server 在 stdin 关掉时会退出）；nil 就不接管 stdin。
-    ///   - until: 看 stdout 目前收到的全部内容，返回 true 就不再等、随即结束子进程；nil 表示等它自己退出。
+    /// 同步跑完再返回，别在主线程上调用长的。不接管 stdin。
     static func run(_ executable: URL, _ arguments: [String], environment: [String: String]? = nil,
-                    input: Data? = nil, deadline: TimeInterval, until: ((Data) -> Bool)? = nil) throws -> Result {
+                    deadline: TimeInterval) throws -> Result {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
         if let environment { process.environment = environment }
-        let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        if input != nil { process.standardInput = stdinPipe }
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
@@ -65,18 +60,12 @@ enum Subprocess {
         }
 
         try process.run()
-        if let input {
-            // 子进程要是一起来就退了，往它 stdin 写会收到 SIGPIPE，默认动作是把 Tally 整个带走；
-            // 关掉这个信号，用会抛错的 write，写不进去就当没写（它的输出和退出码会说明发生了什么）
-            _ = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
-            try? stdinPipe.fileHandleForWriting.write(contentsOf: input)
-        }
 
         var end = DispatchTime.now() + deadline
         var timedOut = false
         while true {
-            let state = lock.withLock { (done: until?(out) ?? false, exited: exited, closed: outClosed) }
-            if state.done || (state.exited && state.closed) { break }
+            let state = lock.withLock { (exited: exited, closed: outClosed) }
+            if state.exited && state.closed { break }
             // 进程退了而 stdout 还没关：多半是它起的后台进程占着管道，输出其实已经齐了，别为它等满截止时间
             if state.exited { end = min(end, .now() + 0.5) }
             if wake.wait(timeout: end) == .timedOut {
@@ -102,7 +91,6 @@ enum Subprocess {
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
-        if input != nil { try? stdinPipe.fileHandleForWriting.close() }
         let (stdout, stderr, didExit) = lock.withLock { (out, err, exited) }
         // 没退出时读 terminationStatus 会抛 ObjC 异常，先看 didExit
         let status = didExit && process.terminationReason == .exit ? process.terminationStatus : nil

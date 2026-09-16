@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// 设置页「hook」两行的状态与动作。安装是用户点了按钮才做，Codex 那侧要跑 app-server，放后台。
+/// 设置页「hook」两行的状态与动作。安装是用户点了按钮才做，读写配置文件放后台。
 @MainActor
 @Observable
 final class HookInstallModel {
@@ -87,7 +87,7 @@ final class HookInstallModel {
         }
     }
 
-    /// 移除注册；Codex 侧还要重写别的 hook 的信任哈希，放后台。
+    /// 移除注册；Codex 侧还要把别的 hook 的信任状态挪到新序号，放后台。
     func uninstall(_ side: HookSide) {
         guard !busy.contains(side) else { return }
         busy.insert(side)
@@ -149,7 +149,7 @@ enum HookSelfTest {
         var environment = ProcessInfo.processInfo.environment
         environment["TALLY_SESSIONS_DIR"] = sessions.path
         environment["TALLY_SELFTEST_INPUT"] = input.path
-        // stdin 走文件重定向：hook 要把 stdin 读到结束，Subprocess 给的管道一直开着，直接喂会等到 900 ms 自退、什么都不写
+        // stdin 走文件重定向：hook 要把 stdin 读到结束，读不到结束就等到 900 ms 自退、什么都不写
         // exec 让 hook 顶替 sh：被信号杀掉时才看得出来，不然退出状态会变成 sh 的 128+n
         let arguments = ["-c", "exec \(command) < \"$TALLY_SELFTEST_INPUT\""]
         let started = Date()

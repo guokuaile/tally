@@ -1,7 +1,7 @@
 import XCTest
 @testable import Tally
 
-/// 真起子进程：截止时间、提前停、管道灌满、不理 SIGTERM、后台进程占着 stdout，这些只有真进程才测得出来。
+/// 真起子进程：截止时间、管道灌满、不理 SIGTERM、后台进程占着 stdout，这些只有真进程才测得出来。
 final class SubprocessTests: XCTestCase {
 
     private let sh = URL(fileURLWithPath: "/bin/sh")
@@ -18,15 +18,6 @@ final class SubprocessTests: XCTestCase {
         XCTAssertTrue(result.timedOut)
         XCTAssertNil(result.status)
         XCTAssertLessThan(elapsed, 2.5)
-    }
-
-    func testStopsAsSoonAsTheAnswerArrives() throws {
-        let (result, elapsed) = try timed {
-            try Subprocess.run(sh, ["-c", "echo ready; sleep 5"], deadline: 10) { String(decoding: $0, as: UTF8.self).contains("ready") }
-        }
-        XCTAssertFalse(result.timedOut)
-        XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), "ready\n")
-        XCTAssertLessThan(elapsed, 2.5, "等到了就结束子进程，不陪它睡满")
     }
 
     func testStderrFloodDoesNotBlockTheChild() throws {
@@ -50,12 +41,5 @@ final class SubprocessTests: XCTestCase {
         XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), "hi\n")
         XCTAssertFalse(result.timedOut)
         XCTAssertLessThan(elapsed, 3)
-    }
-
-    func testInputReachesTheChild() throws {
-        let result = try Subprocess.run(URL(fileURLWithPath: "/bin/cat"), [], input: Data("hello\n".utf8), deadline: 5) {
-            String(decoding: $0, as: UTF8.self).contains("hello")
-        }
-        XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), "hello\n")
     }
 }
