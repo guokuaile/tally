@@ -5,8 +5,8 @@ import Foundation
 /// 底线：只读 accessToken 与 expiresAt，不碰刷新用的那个 token，不调刷新接口，401 也不调，
 /// 不重试，不往凭据文件或钥匙串写一个字节。分享版没有 statusline 缓存时靠它。
 ///
-/// token 读到就存在 `TokenBox` 里，一个进程只读一次：新版 Claude Code 不写 `<Claude 的家>/.credentials.json`，
-/// 只放钥匙串，而 Tally 是 ad-hoc 签名——每次刷新都读一次钥匙串，系统就每次都弹「Tally 想要使用…」。
+/// token 读到就存在 `TokenBox` 里，不每轮都起一次 `security`；凭据被改写（切账号、重新登录、8 小时一次的刷新）才重读：
+/// 切账号不会让旧账号的 token 过期，只等过期或 401 的话，切号之后查的一直是上一个账号，怎么刷新都不变。
 enum ClaudeQuotaResult: Equatable {
     case limits(ClaudeLimits)
     case tokenExpired
@@ -22,6 +22,8 @@ struct ClaudeQuotaReadOnly {
     let keychainItem: () -> String?
     /// 引用类型：这个 struct 被 provider 存着复制来复制去，缓存挂在盒子里才留得住。
     let tokenBox: TokenBox
+    /// 凭据最后一次被改写的时刻，只看属性不取值；测试注入假的。
+    let credentialStamp: () -> Date?
     /// 429 之后按接口退避；真 app 传落盘的 `QuotaBackoff.shared`。
     let backoff: QuotaBackoff
     static let backoffKey = "claude-oauth-usage"
@@ -31,12 +33,22 @@ struct ClaudeQuotaReadOnly {
          // 没设 CLAUDE_CONFIG_DIR 时按前缀挑最新的那条（老行为）；设了就是带哈希后缀的那一条，不会拿到别的账号
          keychainItem: @escaping () -> String? = { KeychainReader.freshestGenericPassword(servicePrefix: ClaudeHome.keychainService(ClaudeHome.rawValue))?.secret },
          tokenBox: TokenBox = TokenBox(),
+         credentialStamp: (() -> Date?)? = nil,
          backoff: QuotaBackoff = QuotaBackoff()) {
         self.session = session
         self.credentialsFile = credentialsFile
         self.keychainItem = keychainItem
         self.tokenBox = tokenBox
+        self.credentialStamp = credentialStamp ?? { Self.liveCredentialStamp(file: credentialsFile) }
         self.backoff = backoff
+    }
+
+    /// 凭据文件的 mtime 与钥匙串那条项的修改时间取晚的。不盯 `~/.claude.json` 的 accountUuid：
+    /// `/login` 先后写两处，卡在中间读会把旧 token 再存一遍。
+    static func liveCredentialStamp(file: URL) -> Date? {
+        let fileDate = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
+        let keychainDate = KeychainReader.freshestGenericPasswordItem(servicePrefix: ClaudeHome.keychainService(ClaudeHome.rawValue))?.modified
+        return [fileDate, keychainDate].compactMap { $0 }.max()
     }
 
     /// 存住已经读到的 token。读失败（文件没有、钥匙串被拒）也记一笔，10 分钟内不再读，
@@ -47,8 +59,31 @@ struct ClaudeQuotaReadOnly {
         private let lock = NSLock()
         private var token: Token?
         private var lastRead: Date = .distantPast
+        /// 存着的 token 是凭据在哪个时刻的样子。
+        private var stamp: Date?
 
         init() {}
+
+        /// 凭据的改写时刻和记着的不一样：记下新的，扔掉 token，读失败的冷却也作废（刚登录完不该再等十分钟）。返回 true 表示刚扔。
+        /// nil 是这一次没看到（钥匙串查询偶发失败、已退出登录），不是「变了」：当成变了会白扔一次 token、那条周窗口闪一下；
+        /// 退出登录的 token 自己会过期或吃 401。
+        func adopt(stamp: Date?) -> Bool {
+            lock.withLock {
+                guard let stamp, stamp != self.stamp else { return false }
+                self.stamp = stamp
+                token = nil
+                lastRead = .distantPast
+                return true
+            }
+        }
+
+        /// 手动刷新：扔掉重读，不等冷却。
+        func reset() {
+            lock.withLock {
+                token = nil
+                lastRead = .distantPast
+            }
+        }
 
         func cached() -> Token? { lock.withLock { token } }
 
@@ -56,10 +91,14 @@ struct ClaudeQuotaReadOnly {
             lock.withLock { token == nil && now.timeIntervalSince(lastRead) > Self.retryInterval }
         }
 
-        func store(_ token: Token?, now: Date) {
+        /// `stamp` 是开始读之前看到的改写时刻。读到一半别的一轮认出凭据换了（记着的时刻已经往前走），手里这份可能是上一个账号的，不存：
+        /// 存了的话时刻对得上、token 却是旧的，之后再也不会触发重读。返回 false 表示没存。
+        func store(_ token: Token?, readUnder stamp: Date?, now: Date) -> Bool {
             lock.withLock {
+                guard stamp == nil || stamp == self.stamp else { return false }
                 self.token = token
                 lastRead = now
+                return true
             }
         }
 
@@ -80,14 +119,21 @@ struct ClaudeQuotaReadOnly {
     /// 凭据文件里没过期的 token 优先，没有或已过期就问钥匙串；钥匙串也没有时交回文件里那个（过期的），好让界面说「登录已过期」。
     /// 存住的 token 直接用；过期了才扔掉重读（那时用户多半已经重新登录，钥匙串里是新的）。
     func loadToken(now: Date = .now) -> Token? {
+        let stamp = credentialStamp()
+        _ = tokenBox.adopt(stamp: stamp)
         if let token = tokenBox.cached() {
             guard token.isExpired(at: now) else { return token }
             tokenBox.clear()
         }
         guard tokenBox.shouldRead(now: now) else { return nil }
         let token = readToken(now: now)
-        tokenBox.store(token, now: now)
-        return token
+        return tokenBox.store(token, readUnder: stamp, now: now) ? token : nil
+    }
+
+    /// 凭据被改写过就扔掉存着的 token。返回 true 表示刚扔：提供方拿它清掉上一个账号的周窗口。
+    @discardableResult
+    func dropTokenIfCredentialsChanged() -> Bool {
+        tokenBox.adopt(stamp: credentialStamp())
     }
 
     private func readToken(now: Date) -> Token? {

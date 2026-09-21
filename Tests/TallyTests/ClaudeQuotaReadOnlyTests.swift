@@ -212,6 +212,131 @@ final class ClaudeQuotaReadOnlyTests: XCTestCase {
         XCTAssertEqual(box.current.first?.label, "Fable", "取失败沿用上一次的值")
     }
 
+    // 切账号：凭据被改写，存着的 token 和上一个账号的周窗口都得扔
+
+    private func payload(_ token: String) -> String {
+        #"{"claudeAiOauth":{"accessToken":"\#(token)"}}"#
+    }
+
+    private func scopedBody(_ percent: Int) -> Data {
+        Data(#"{"limits":[{"kind":"weekly_scoped","percent":\#(percent),"resets_at":"2099-01-01T00:00:00Z","scope":{"model":{"display_name":"Fable"}}}]}"#.utf8)
+    }
+
+    func testCredentialRewriteDropsCachedToken() {
+        var secret = payload("old-account")
+        var stamp = Date(timeIntervalSince1970: 1_000)
+        let client = ClaudeQuotaReadOnly(credentialsFile: dir.appendingPathComponent("nope.json"),
+                                         keychainItem: { secret }, credentialStamp: { stamp })
+        let now = Date()
+        XCTAssertEqual(client.loadToken(now: now)?.accessToken, "old-account")
+        secret = payload("new-account")
+        XCTAssertEqual(client.loadToken(now: now.addingTimeInterval(60))?.accessToken, "old-account", "改写时刻没变就不重读")
+        stamp = Date(timeIntervalSince1970: 2_000)
+        XCTAssertEqual(client.loadToken(now: now.addingTimeInterval(120))?.accessToken, "new-account",
+                       "切账号不会让旧 token 过期，只等过期的话查的一直是上一个账号")
+    }
+
+    func testCredentialRewriteLiftsFailedReadCooldown() {
+        var secret: String?
+        var stamp: Date?
+        let client = ClaudeQuotaReadOnly(credentialsFile: dir.appendingPathComponent("nope.json"),
+                                         keychainItem: { secret }, credentialStamp: { stamp })
+        let now = Date()
+        XCTAssertNil(client.loadToken(now: now))
+        secret = payload("fresh-login")
+        XCTAssertNil(client.loadToken(now: now.addingTimeInterval(30)), "凭据没动，冷却照旧")
+        stamp = Date(timeIntervalSince1970: 2_000)
+        XCTAssertEqual(client.loadToken(now: now.addingTimeInterval(31))?.accessToken, "fresh-login", "刚登录完不该再等十分钟")
+    }
+
+    func testTokenReadAcrossACredentialRewriteIsNotKept() {
+        var secret = payload("old-account")
+        var stamp = Date(timeIntervalSince1970: 1_000)
+        var reads = 0
+        var client: ClaudeQuotaReadOnly!
+        client = ClaudeQuotaReadOnly(credentialsFile: dir.appendingPathComponent("nope.json"), keychainItem: {
+            reads += 1
+            let read = secret
+            if reads == 1 {
+                // 读到一半切了账号，另一轮快照先认出了新的改写时刻
+                secret = self.payload("new-account")
+                stamp = Date(timeIntervalSince1970: 2_000)
+                client.dropTokenIfCredentialsChanged()
+            }
+            return read
+        }, credentialStamp: { stamp })
+        let now = Date()
+        XCTAssertNil(client.loadToken(now: now), "读的时候凭据已经换了，这份不算数")
+        XCTAssertEqual(client.loadToken(now: now.addingTimeInterval(1))?.accessToken, "new-account",
+                       "旧 token 要是配着新时刻存下了，之后再也不会重读")
+    }
+
+    func testUnreadableStampIsNotAChange() {
+        var reads = 0
+        var stamp: Date? = Date(timeIntervalSince1970: 1_000)
+        let client = ClaudeQuotaReadOnly(credentialsFile: dir.appendingPathComponent("nope.json"),
+                                         keychainItem: { reads += 1; return self.payload("tok") }, credentialStamp: { stamp })
+        let now = Date()
+        _ = client.loadToken(now: now)
+        stamp = nil
+        XCTAssertFalse(client.dropTokenIfCredentialsChanged(), "这一次没看到不等于变了")
+        stamp = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(client.loadToken(now: now.addingTimeInterval(60))?.accessToken, "tok")
+        XCTAssertEqual(reads, 1, "钥匙串查询偶发失败不该白扔一次 token")
+    }
+
+    private func provider(client: ClaudeQuotaReadOnly, box: ClaudeUsageProvider.ScopedLimitsBox) throws -> ClaudeUsageProvider {
+        let root = dir.appendingPathComponent("projects")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("p"), withIntermediateDirectories: true)
+        try Data().write(to: root.appendingPathComponent("p/a.jsonl"))
+        // 没有 statusline 缓存：每轮都问接口，和分享出去的机器一样
+        return ClaudeUsageProvider(root: root, limits: ClaudeLimitsCache(directory: dir.appendingPathComponent("no-cache")),
+                                   quota: client, scopedBox: box, scan: UsageScanCache())
+    }
+
+    func testAccountSwitchQueriesNewTokenAndDropsOldAccountsScopedWindow() async throws {
+        var secret = payload("old-account")
+        var stamp = Date(timeIntervalSince1970: 1_000)
+        let client = ClaudeQuotaReadOnly(session: session(), credentialsFile: dir.appendingPathComponent("nope.json"),
+                                         keychainItem: { secret }, credentialStamp: { stamp })
+        let claude = try provider(client: client, box: ClaudeUsageProvider.ScopedLimitsBox())
+        let now = Date()
+        StubURLProtocol.body = scopedBody(90)
+        let before = try await claude.fetchSnapshot(now: now)
+        XCTAssertEqual(before.scopedLimits.first?.limit.used, 90)
+
+        // 切到另一个账号，碰巧这一轮接口还不通
+        secret = payload("new-account")
+        stamp = Date(timeIntervalSince1970: 2_000)
+        StubURLProtocol.status = 500
+        let failed = try await claude.fetchSnapshot(now: now.addingTimeInterval(61))
+        XCTAssertEqual(StubURLProtocol.requests.last?.value(forHTTPHeaderField: "Authorization"), "Bearer new-account")
+        XCTAssertTrue(failed.scopedLimits.isEmpty, "上一个账号的 90% 不能挂在新账号名下")
+
+        StubURLProtocol.status = 200
+        StubURLProtocol.body = scopedBody(6)
+        let after = try await claude.fetchSnapshot(now: now.addingTimeInterval(122))
+        XCTAssertEqual(after.scopedLimits.first?.limit.used, 6)
+    }
+
+    func testForceFreshRereadsTokenAndSkipsScopedThrottleKeepingValue() throws {
+        var reads = 0
+        let client = ClaudeQuotaReadOnly(credentialsFile: dir.appendingPathComponent("nope.json"),
+                                         keychainItem: { reads += 1; return self.payload("tok") }, credentialStamp: { nil })
+        let box = ClaudeUsageProvider.ScopedLimitsBox()
+        let claude = try provider(client: client, box: box)
+        let now = Date()
+        _ = client.loadToken(now: now)
+        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 40, limit: 100))], now: now)
+        XCTAssertFalse(box.needsFetch(now: now.addingTimeInterval(5)))
+
+        claude.forceFresh()
+        XCTAssertTrue(box.needsFetch(now: now.addingTimeInterval(5)), "手动刷新不等 10 分钟节流")
+        XCTAssertEqual(box.current.first?.limit.used, 40, "值留着，取到再换，不然每点一次那行闪一下")
+        _ = client.loadToken(now: now.addingTimeInterval(5))
+        XCTAssertEqual(reads, 2, "手动刷新重读凭据")
+    }
+
     func testScopedUpdateCallbackOnlyOnSuccess() {
         let box = ClaudeUsageProvider.ScopedLimitsBox()
         var got: [[ScopedLimit]] = []

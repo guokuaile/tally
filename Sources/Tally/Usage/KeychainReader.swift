@@ -1,5 +1,5 @@
 // 移植自 Atoll（https://github.com/Ebullioscopic/Atoll），Copyright (C) 2024-2026 Atoll Contributors，GPL-3.0，见仓库 LICENSE 与 NOTICE。
-// Tally 改动：删掉 Atoll 的 updateGenericPassword（永不写钥匙串）；`genericPassword` 与 `freshestGenericPassword` 的取值都改走 /usr/bin/security，不用 SecItemCopyMatching。
+// Tally 改动：删掉 Atoll 的 updateGenericPassword（永不写钥匙串）；`genericPassword` 与 `freshestGenericPassword` 的取值都改走 /usr/bin/security，不用 SecItemCopyMatching；拆出只取属性的 `freshestGenericPasswordItem`。
 import Foundation
 import Security
 
@@ -17,6 +17,14 @@ enum KeychainReader {
     // a hash. The enumeration requests attributes only (no kSecReturnData), so nothing is
     // decrypted here; the chosen item's secret is read by `secretViaSecurityCLI`.
     static func freshestGenericPassword(servicePrefix: String) -> (service: String, account: String?, secret: String)? {
+        guard let freshest = freshestGenericPasswordItem(servicePrefix: servicePrefix),
+              let secret = secretViaSecurityCLI(service: freshest.service, account: freshest.account) else { return nil }
+        return (freshest.service, freshest.account, secret)
+    }
+
+    /// 只挑出那条项和它的修改时间，不取值：不解密、不弹框、不起子进程。
+    /// 修改时间拿来判「凭据换过没有」（切账号、重新登录、刷新 token 都会重写这条项）。
+    static func freshestGenericPasswordItem(servicePrefix: String) -> (service: String, account: String?, modified: Date)? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecReturnAttributes as String: true,
@@ -26,7 +34,7 @@ enum KeychainReader {
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let items = result as? [[String: Any]] else { return nil }
 
-        let freshest = items
+        return items
             .compactMap { attrs -> (service: String, account: String?, modified: Date)? in
                 guard let service = attrs[kSecAttrService as String] as? String,
                       service.hasPrefix(servicePrefix),
@@ -35,9 +43,6 @@ enum KeychainReader {
                 return (service, attrs[kSecAttrAccount as String] as? String, modified)
             }
             .max { $0.modified < $1.modified }
-
-        guard let freshest, let secret = secretViaSecurityCLI(service: freshest.service, account: freshest.account) else { return nil }
-        return (freshest.service, freshest.account, secret)
     }
 
     /// 取值借 Apple 自己的 `security`，不用 `SecItemCopyMatching`：后者要 Tally 的 cdhash 在那条项的

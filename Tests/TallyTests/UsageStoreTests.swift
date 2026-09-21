@@ -294,13 +294,13 @@ final class ClaudeTokenBoxTests: XCTestCase {
         var reads = 0
         let missing = URL(fileURLWithPath: "/nonexistent/.credentials.json")
         let payload = #"{"claudeAiOauth":{"accessToken":"abc","expiresAt":\#(Int(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000))}}"#
-        let client = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { reads += 1; return payload })
+        let client = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { reads += 1; return payload }, credentialStamp: { nil })
         let now = Date()
         XCTAssertEqual(client.loadToken(now: now)?.accessToken, "abc")
         XCTAssertEqual(reads, 1)
         _ = client.loadToken(now: now.addingTimeInterval(300))
         _ = client.loadToken(now: now.addingTimeInterval(3000))
-        XCTAssertEqual(reads, 1, "一个进程只读一次钥匙串，不然每轮刷新都弹授权框")
+        XCTAssertEqual(reads, 1, "凭据没被改写就不重读")
 
         // token 过期：扔掉重读一次
         client.tokenBox.clear()
@@ -308,10 +308,43 @@ final class ClaudeTokenBoxTests: XCTestCase {
         XCTAssertEqual(reads, 2)
     }
 
+    /// 只有手动那一轮重读凭据；定时和展开面板的照旧用存着的。
+    @MainActor
+    func testOnlyManualRefreshRereadsCredentials() async throws {
+        var reads = 0
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tally-manual-\(UUID().uuidString)")
+        let root = dir.appendingPathComponent("projects")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("p"), withIntermediateDirectories: true)
+        try Data().write(to: root.appendingPathComponent("p/a.jsonl"))
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubURLProtocol.self]
+        StubURLProtocol.status = 200
+        StubURLProtocol.body = Data("{}".utf8)
+        let client = ClaudeQuotaReadOnly(session: URLSession(configuration: config), credentialsFile: dir.appendingPathComponent("nope.json"),
+                                         keychainItem: { reads += 1; return #"{"claudeAiOauth":{"accessToken":"tok"}}"# }, credentialStamp: { nil })
+        let claude = ClaudeUsageProvider(root: root, limits: ClaudeLimitsCache(directory: dir.appendingPathComponent("no-cache")),
+                                         quota: client, scopedBox: .init(), scan: UsageScanCache())
+        let h = Harness(providers: [claude])
+        h.store.providersChanged()
+        _ = await h.store.refreshAndWait(reason: .timer)
+        h.now = h.now.addingTimeInterval(61)
+        _ = await h.store.refreshAndWait(reason: .panelOpened)
+        XCTAssertEqual(reads, 1)
+        h.now = h.now.addingTimeInterval(61)
+        _ = await h.store.refreshAndWait(reason: .manual)
+        XCTAssertEqual(reads, 2)
+        // 被 60 秒节流挡掉的手动刷新不动存着的 token
+        h.now = h.now.addingTimeInterval(5)
+        _ = await h.store.refreshAndWait(reason: .manual)
+        h.now = h.now.addingTimeInterval(61)
+        _ = await h.store.refreshAndWait(reason: .timer)
+        XCTAssertEqual(reads, 2)
+    }
+
     func testFailedReadIsNotRetriedEveryRefresh() {
         var reads = 0
         let missing = URL(fileURLWithPath: "/nonexistent/.credentials.json")
-        let client = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { reads += 1; return nil })
+        let client = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { reads += 1; return nil }, credentialStamp: { nil })
         let now = Date()
         XCTAssertNil(client.loadToken(now: now))
         XCTAssertEqual(reads, 1)

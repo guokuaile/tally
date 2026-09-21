@@ -1,5 +1,5 @@
 // 移植自 Atoll（https://github.com/Ebullioscopic/Atoll），Copyright (C) 2024-2026 Atoll Contributors，GPL-3.0，见仓库 LICENSE 与 NOTICE。
-// Tally 改动：配额不再调会回写凭据的客户端；先读 statusline 缓存，没有或陈旧再用只读客户端；按模型分的周窗口只有接口有，单独按 10 分钟节流取；日志走 UsageScanCache 增量扫描；projects 与 .claude.json 跟着 ClaudeHome（CLAUDE_CONFIG_DIR）。
+// Tally 改动：配额不再调会回写凭据的客户端；先读 statusline 缓存，没有或陈旧再用只读客户端；按模型分的周窗口只有接口有，单独按 10 分钟节流取；凭据被改写（切账号）时清掉那条窗口重取，手动刷新不等节流；日志走 UsageScanCache 增量扫描；projects 与 .claude.json 跟着 ClaudeHome（CLAUDE_CONFIG_DIR）。
 import Foundation
 
 struct ClaudeUsageProvider: UsageProvider {
@@ -60,6 +60,27 @@ struct ClaudeUsageProvider: UsageProvider {
         }
 
         var current: [ScopedLimit] { lock.withLock { value } }
+
+        /// 凭据换了人：盒子里那条是上一个账号的，扔掉并立刻重取。
+        /// 清之前发出去、清之后才回来的那次请求会把上一个账号的值写回来，最多挂到下一次取（10 分钟）。
+        /// 要撞上得是一次请求横跨两轮快照，而请求 10 秒超时、两轮至少隔 60 秒；真撞上了给 record 加轮次号。
+        func reset() {
+            lock.withLock {
+                value = []
+                nextFetch = .distantPast
+            }
+        }
+
+        /// 手动刷新：不等节流。值留着，取到再换——清掉的话每点一次那行都闪一下。
+        func refetchNow() {
+            lock.withLock { nextFetch = .distantPast }
+        }
+    }
+
+    /// 手动刷新是「现在就要真值」：存着的 token 扔掉重读，那条按模型分的窗口不等 10 分钟节流。429 退避不豁免。
+    func forceFresh() {
+        quota.tokenBox.reset()
+        scopedBox.refetchNow()
     }
 
     func fetchSnapshot(now: Date) async throws -> UsageSnapshot {
@@ -69,6 +90,8 @@ struct ClaudeUsageProvider: UsageProvider {
         let files = jsonlFiles(under: root)
         guard !files.isEmpty else { throw UsageError.notFound("No Claude usage logs found") }
         var snapshot = scan.aggregate(files: files, now: now)
+        // 每轮都比一次，不能只在要问接口时才比：缓存新鲜时十分钟才问一次，切了账号那条窗口会挂着上一个账号的数
+        if quota.dropTokenIfCredentialsChanged() { scopedBox.reset() }
         let cache = limits.read(now: now)
         let live: ClaudeQuotaResult?
         if Self.cacheIsFresh(cache) {

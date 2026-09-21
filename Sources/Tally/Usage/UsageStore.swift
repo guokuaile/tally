@@ -141,7 +141,7 @@ final class UsageStore {
     /// 三种理由都受 60 秒最短间隔约束，被跳过的调用不重置计时。返回 false 表示被跳过。
     @discardableResult
     func refresh(reason: Reason) -> Bool {
-        guard beginRefreshIfAllowed() else { return false }
+        guard beginRefreshIfAllowed(reason) else { return false }
         let providers = enabledProviders
         let pass = generation
         Task { await runRefresh(providers: providers, pass: pass) }
@@ -150,12 +150,12 @@ final class UsageStore {
 
     /// 测试用：同步等刷新跑完。
     func refreshAndWait(reason: Reason) async -> Bool {
-        guard beginRefreshIfAllowed() else { return false }
+        guard beginRefreshIfAllowed(reason) else { return false }
         await runRefresh(providers: enabledProviders, pass: generation)
         return true
     }
 
-    private func beginRefreshIfAllowed() -> Bool {
+    private func beginRefreshIfAllowed(_ reason: Reason) -> Bool {
         let now = clock()
         if let hold = wakeHoldUntil, now < hold { return false }
         if let last = lastRefreshStart, now.timeIntervalSince(last) < Self.minInterval { return false }
@@ -164,6 +164,10 @@ final class UsageStore {
         lastRefreshed = now
         isRefreshing = true
         generation += 1
+        // 手动刷新是「现在就要真值」：放行了才叫，被节流挡掉的那次不动存着的 token
+        if reason == .manual {
+            for provider in enabledProviders { (provider as? ClaudeUsageProvider)?.forceFresh() }
+        }
         return true
     }
 
