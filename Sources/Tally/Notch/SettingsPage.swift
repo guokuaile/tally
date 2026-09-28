@@ -297,6 +297,33 @@ struct AlertSettings: View {
 }
 
 /// 文件架：开关、存放位置、清空。
+/// 「音乐」：页开不开、页签常不常驻；助手起不来时把原因亮出来。
+struct MusicSettings: View {
+    var preferences = PreferencesStore.shared
+    var monitor = NowPlayingMonitor.shared
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("「音乐」页", isOn: preferenceToggle(\.musicEnabled))
+                if let failure = monitor.failure {
+                    Text(failure)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } footer: {
+                Text("系统「正在播放」的那首歌：封面、歌名、歌手，上一曲 / 播放暂停 / 下一曲。Apple Music、Spotify、酷狗、网易云、浏览器里的视频都认，不弹授权。读的是系统的私有接口，要借 /usr/bin/perl 才读得到；哪天系统不让了，这一页会自己藏起来，别的功能不受影响。")
+            }
+            Section {
+                Toggle("页签常驻", isOn: preferenceToggle(\.musicResident))
+                    .disabled(!preferences.prefs.musicEnabled)
+            } footer: {
+                Text("开着：音乐页签和别的页一样一直在。关着：有东西在播（暂停着也算）才出现，播放器退出后消失。")
+            }
+        }
+    }
+}
+
 struct ShelfSettings: View {
     var store = ShelfStore.shared
     var preferences = PreferencesStore.shared
@@ -315,6 +342,8 @@ struct ShelfSettings: View {
             Section {
                 Toggle("新截图自动放进文件架", isOn: screenshotsBinding)
                     .disabled(!preferences.prefs.shelfEnabled)
+                Toggle("收进截图时提示", isOn: preferenceToggle(\.screenshotPeek))
+                    .disabled(!preferences.prefs.shelfEnabled || !preferences.prefs.screenshotsToShelf)
                 if preferences.prefs.screenshotsToShelf, let folder = preferences.prefs.screenshotFolder {
                     HStack {
                         Text("截图文件夹")

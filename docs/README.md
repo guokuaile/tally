@@ -10,6 +10,7 @@
 | [system.md](system.md) | 「系统」页：硬件、电池健康、压力、内存大户、废纸篓 |
 | [apps.md](apps.md) | 「应用」页：在跑的 app、Dock 看不见的怎么认、打开与退出 |
 | [shelf.md](shelf.md) | 「文件架」页：拖到刘海暂存、`open -a Tally` 与新截图自动放进来、拖出、AirDrop、文件与截图分别到点清理 |
+| [music.md](music.md) | 「音乐」页：系统「正在播放」怎么读到（借 /usr/bin/perl 加载自带的小 dylib）、助手的约定、页签常驻与否、失效怎么藏 |
 | [hooks.md](hooks.md) | hook 的注册与移除、Codex 信任哈希、自检、发版（Release + Homebrew）与新版本提示、卸载 |
 | [monitors.md](monitors.md) | 跟着设置开关起停的常驻监听与小工具：保持唤醒、电池事件、摄像头 / 麦克风占用、截屏隐藏 |
 
@@ -17,9 +18,9 @@
 
 - 只在带刘海的内建屏上显示；合盖只剩外接屏时面板隐藏，提醒改发系统通知（设置里可关）。不做外接屏上的面板；菜单栏只有一个可选的小恐龙（设置里开，默认关，见 [monitors.md](monitors.md)），不做菜单栏菜单。
 - 面板永远纯黑（试过毛玻璃，看着更差，删了）；宽度固定 620（两侧各 19 是肩部弧线），高度跟着内容走。
-- 一切数据都在本机：会话来自 Claude Code / Codex 的 hook，用量来自本地日志与各家官方接口（Claude 只读登录留下的 token，不刷新不回写），网络 / 系统 / 应用全走 macOS 公开 API。不收集、不上传。
+- 一切数据都在本机：会话来自 Claude Code / Codex 的 hook，用量来自本地日志与各家官方接口（Claude 只读登录留下的 token，不刷新不回写），网络 / 系统 / 应用全走 macOS 公开 API。不收集、不上传。唯一的例外是「音乐」页：系统「正在播放」只有私有框架 MediaRemote 给，还得借 `/usr/bin/perl` 才读得到（[music.md](music.md)）；它自检、失效就整页藏起来，别处不许再开这个口子。
 - 不做自动更新（只提示有新版本）、不做 Developer ID 签名与公证、不做沙盒（要读 `~/.claude`、`~/.codex`）、不做多语言。
-- 依赖 macOS 15+、Apple Silicon（arm64 单架构二进制）、带刘海的内建屏；零第三方依赖。用量数据层移植自 Atoll（GPL-3），所以整个仓库 GPL-3，清单在 `NOTICE`。
+- 依赖 macOS 15+、Apple Silicon（arm64 单架构二进制）、带刘海的内建屏；零第三方依赖（音乐页交给 perl 加载的那个 dylib 也是自己写的一个 `.m`，不是打包别人的二进制）。用量数据层移植自 Atoll（GPL-3），所以整个仓库 GPL-3，清单在 `NOTICE`。
 
 ## 验证的通用约定
 

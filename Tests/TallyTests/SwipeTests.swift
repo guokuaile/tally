@@ -49,7 +49,7 @@ final class SwipeTests: XCTestCase {
     }
 
     func testShelfTabIsLastWhenEnabled() {
-        let pages = LaunchOptions.Page.visible(shelf: true)
+        let pages = LaunchOptions.Page.visible(shelf: true, music: false)
         XCTAssertEqual(SwipeTracker.page(after: .apps, direction: .next, in: pages), .shelf)
         XCTAssertNil(SwipeTracker.page(after: .shelf, direction: .next, in: pages))
     }
@@ -61,7 +61,7 @@ final class SwipeTests: XCTestCase {
     }
 
     func testPagingStopsAtEnds() {
-        let pages = LaunchOptions.Page.visible(shelf: false)
+        let pages = LaunchOptions.Page.visible(shelf: false, music: false)
         XCTAssertEqual(SwipeTracker.page(after: .ai, direction: .next, in: pages), .network)
         XCTAssertEqual(SwipeTracker.page(after: .network, direction: .previous, in: pages), .ai)
         XCTAssertNil(SwipeTracker.page(after: .ai, direction: .previous, in: pages))

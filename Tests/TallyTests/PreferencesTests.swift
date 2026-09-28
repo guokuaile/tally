@@ -67,6 +67,15 @@ final class PreferencesTests: XCTestCase {
         XCTAssertTrue(prefs.notifyWithoutNotch, "没有刘海屏时改发通知默认开：合盖接外接屏的人不然只剩一声响")
         XCTAssertFalse(prefs.screenshotsToShelf, "截图进文件架默认关：要用户点选文件夹才有授权")
         XCTAssertNil(prefs.screenshotFolder)
+        XCTAssertTrue(prefs.screenshotPeek, "收进截图时提示默认开：升级后行为不变")
+        XCTAssertTrue(prefs.musicEnabled, "音乐页默认开")
+        XCTAssertFalse(prefs.musicResident, "页签默认不常驻：有东西在播才出现")
+        let music = try JSONDecoder().decode(Preferences.self, from: Data(#"{"musicEnabled":false,"musicResident":true,"lastPage":"music"}"#.utf8))
+        XCTAssertFalse(music.musicEnabled)
+        XCTAssertTrue(music.musicResident)
+        XCTAssertEqual(music.lastPage, "music", "音乐是面板页，记得住")
+        let quiet = try JSONDecoder().decode(Preferences.self, from: Data(#"{"screenshotPeek":false}"#.utf8))
+        XCTAssertFalse(quiet.screenshotPeek, "关掉能落盘读回来")
         // 手改成离谱的秒数要夹回来，不然提示条要么永不收要么一闪而过
         let wild = try JSONDecoder().decode(Preferences.self, from: Data(#"{"peekSessionSeconds":999,"peekBatterySeconds":0,"peekTapAction":"乱写的"}"#.utf8))
         XCTAssertEqual(wild.peekSessionSeconds, 30)
@@ -87,9 +96,10 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(bogus.hotKeyEnabled)
         let removed = try JSONDecoder().decode(Preferences.self, from: Data(#"{"lastPage":"tasks"}"#.utf8))
         XCTAssertEqual(removed.lastPage, "ai", "任务页删掉后存过它的文件回落 ai")
-        XCTAssertEqual(LaunchOptions.Page.panelPages, [.ai, .network, .system, .apps, .shelf])
-        XCTAssertEqual(LaunchOptions.Page.visible(shelf: false), [.ai, .network, .system, .apps])
-        XCTAssertEqual(LaunchOptions.Page.visible(shelf: true), LaunchOptions.Page.panelPages)
+        XCTAssertEqual(LaunchOptions.Page.panelPages, [.ai, .network, .system, .apps, .shelf, .music])
+        XCTAssertEqual(LaunchOptions.Page.visible(shelf: false, music: false), [.ai, .network, .system, .apps])
+        XCTAssertEqual(LaunchOptions.Page.visible(shelf: true, music: true), LaunchOptions.Page.panelPages)
+        XCTAssertEqual(LaunchOptions.Page.visible(shelf: false, music: true).last, .music, "音乐排最后：它出现、消失不挪别的页签")
     }
 
     func testEnabledKeyPathsWrite() {

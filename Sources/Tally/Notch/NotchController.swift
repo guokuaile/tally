@@ -304,6 +304,7 @@ final class NotchController {
         state.peekTapped = { [weak self] in self?.peekTapped() }
         BatteryWatcher.shared.onEvent = { [weak self] event in self?.showPeek(.battery(event)) }
         ScreenshotWatcher.shared.onScreenshots = { [weak self] urls in self?.receiveFiles(urls, kind: .screenshot) }
+        NowPlayingMonitor.shared.visibilityChanged = { [weak self] in self?.musicVisibilityChanged() }
         // 点菜单栏小恐龙：展开到「系统」页，不钉住，看完移开就收。恐龙离面板一百多 pt，光标根本不在面板上，
         // 不给宽限的话第一次轮询就排收起、0.25 s 就收了，所以把恐龙到刘海这段菜单栏记成宽限区
         StrideMonitor.shared.onClick = { [weak self] button in
@@ -342,8 +343,9 @@ final class NotchController {
             state.page = page
             open(pinned: true)
         } else {
+            // 上一页这会儿不在页签里（文件架关了；音乐不常驻、刚启动还没读到在播什么）就先落在 AI 页
             let last = LaunchOptions.Page(rawValue: PreferencesStore.shared.prefs.lastPage) ?? .ai
-            state.page = last == .shelf && !PreferencesStore.shared.prefs.shelfEnabled ? .ai : last
+            state.page = LaunchOptions.Page.visibleNow.contains(last) ? last : .ai
         }
         if DemoMode.isOn { scheduleDemoPeeks() }
     }
@@ -372,7 +374,8 @@ final class NotchController {
         PrivacyWatcher.shared.setEnabled(prefs.privacyDots)
         ShelfStore.shared.setEnabled(prefs.shelfEnabled)
         ShelfStore.shared.retentionChanged()
-        if !prefs.shelfEnabled, state.page == .shelf { state.select(.ai) }
+        NowPlayingMonitor.shared.setEnabled(prefs.musicEnabled)
+        leaveHiddenPage()
         if !prefs.keepAwakeButton { KeepAwake.shared.stop() }
         UpdateChecker.shared.setEnabled(prefs.checkUpdates)
         StrideMonitor.shared.apply(enabled: prefs.strideEnabled, showsValue: prefs.strideShowsValue)
@@ -382,6 +385,21 @@ final class NotchController {
             ScreenshotWatcher.shared.stop()
         }
         setFullScreenWatching(prefs.hideInFullScreen)
+    }
+
+    /// 音乐页签出现或消失。消失：停在那页就回 AI 页。出现：上次停的就是音乐页、只是启动那一刻助手还没报上来
+    /// 才先落在 AI 页的，这时切回去——`lastPage` 只有启动时那次降级不会跟着改，人自己点过别的页它早就不是 music 了。
+    private func musicVisibilityChanged() {
+        leaveHiddenPage()
+        if PreferencesStore.shared.prefs.lastPage == LaunchOptions.Page.music.rawValue, state.page != .music,
+           LaunchOptions.Page.visibleNow.contains(.music) {
+            state.select(.music)
+        }
+    }
+
+    /// 正停着的那页从页签里消失了（文件架关了；音乐关了、播放器退了、助手起不来）：回 AI 页。
+    private func leaveHiddenPage() {
+        if !LaunchOptions.Page.visibleNow.contains(state.page) { state.select(.ai) }
     }
 
     // MARK: 全屏 app 时隐藏
@@ -596,8 +614,11 @@ final class NotchController {
     func receiveFiles(_ urls: [URL], kind: ShelfKind = .file) {
         // 演示模式不收也不弹「放进文件架」：文件架是编的，说放进去了却看不到
         guard !DemoMode.isOn else { return }
-        let enabled = PreferencesStore.shared.prefs.shelfEnabled
-        showPeek(.shelf(names: urls.map(\.lastPathComponent), enabled: enabled))
+        let prefs = PreferencesStore.shared.prefs
+        let enabled = prefs.shelfEnabled
+        if kind != .screenshot || prefs.screenshotPeek {
+            showPeek(.shelf(names: urls.map(\.lastPathComponent), enabled: enabled))
+        }
         guard enabled else { return }
         Task { await ShelfStore.shared.add(urls: urls, kind: kind) }
     }
@@ -779,7 +800,7 @@ final class NotchController {
                 self.state.openSettings?()
             case .page(let index):
                 // 超出页签数的键也吞掉：放过去的话面板里没有接键盘的控件，系统会「嘟」一声
-                let pages = LaunchOptions.Page.visible(shelf: prefs.shelfEnabled)
+                let pages = LaunchOptions.Page.visibleNow
                 if pages.indices.contains(index) { self.state.select(pages[index]) }
             case .session(let index):
                 self.jumpToSession(at: index)
@@ -811,7 +832,7 @@ final class NotchController {
 
     private func turnPage(_ direction: SwipeTracker.Direction) {
         guard let page = SwipeTracker.page(after: state.page, direction: direction,
-                                           in: LaunchOptions.Page.visible(shelf: PreferencesStore.shared.prefs.shelfEnabled)) else { return }
+                                           in: LaunchOptions.Page.visibleNow) else { return }
         state.select(page)
     }
 

@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
-// Tally 改动：去掉 Defaults 与远程拉取（含 merge），只读 bundle 里的 pricing.json；日志走 Log。
+// Tally 改动：去掉 Defaults 与远程拉取（含 merge），只读 bundle 里的 pricing.json；日志走 Log；模型 id 尾部的 [1m] 去掉再查表。
 
 import Foundation
 
@@ -158,6 +158,9 @@ final class ModelPricingManager {
 
         var s = raw.lowercased()
         if let slash = s.lastIndex(of: "/") { s = String(s[s.index(after: slash)...]) } // drop provider prefix
+        // Claude Code 开 1M 上下文时写的 id 是 "claude-opus-5[1m]"：同一个模型，Opus 4.8 起 1M 上下文按标准价没有长上下文加价，
+        // 表里不另开一行，去掉标记按同名模型计。不去掉的话这家开了 1M 的会话整周都是「+未定价」。
+        if s.hasSuffix("[1m]") { s.removeLast(4) }
         push(s)
 
         // Drop a trailing date stamp like "-20260528".

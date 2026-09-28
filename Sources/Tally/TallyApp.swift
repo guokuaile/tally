@@ -26,7 +26,7 @@ struct TallyApp: App {
 
 /// 启动参数。
 ///
-/// `--open <page>`：`ai` / `network` / `system` / `apps` / `shelf` 让面板启动即展开到那页且不自动收起（截图验证用，不写 lastPage）；`settings` 打开设置窗口。
+/// `--open <page>`：`ai` / `network` / `system` / `apps` / `shelf` / `music` 让面板启动即展开到那页且不自动收起（截图验证用，不写 lastPage）；`settings` 打开设置窗口。
 /// `sessions` / `usage` 是旧名字，都算 `ai`。`--install-hooks`：不开面板，同步给两侧装 hook，结果打到 stdout 后退出。
 /// `--demo`：每一页换成编出来的数据，录 README 截图用，可和 `--open` 一起用（`DemoMode`，docs/panel.md「演示模式」）。
 struct LaunchOptions: Equatable {
@@ -36,6 +36,7 @@ struct LaunchOptions: Equatable {
         case system
         case apps
         case shelf
+        case music
         case settings
 
         var title: String {
@@ -45,6 +46,7 @@ struct LaunchOptions: Equatable {
             case .system: return "系统"
             case .apps: return "应用"
             case .shelf: return "文件架"
+            case .music: return "音乐"
             case .settings: return "设置"
             }
         }
@@ -57,16 +59,23 @@ struct LaunchOptions: Equatable {
             case .system: return "cpu"
             case .apps: return "square.stack.3d.up"
             case .shelf: return "tray.full"
+            case .music: return "music.note"
             case .settings: return "gearshape"
             }
         }
 
-        /// 面板里有页签的页，顺序固定；设置不是面板页。文件架要看开关，见 `visible(shelf:)`。
-        static let panelPages: [Page] = [.ai, .network, .system, .apps, .shelf]
+        /// 面板里有页签的页，顺序固定；设置不是面板页。文件架、音乐要看开关，见 `visible(shelf:music:)`。
+        /// 音乐排最后：它会随播放出现、消失，排中间的话别的页签跟着挪位置，数字键对应的页也跟着变。
+        static let panelPages: [Page] = [.ai, .network, .system, .apps, .shelf, .music]
 
-        /// 页签上实际画出来的页。
-        static func visible(shelf: Bool) -> [Page] {
-            shelf ? panelPages : panelPages.filter { $0 != .shelf }
+        /// 页签上实际画出来的页。`music` 是 `NowPlayingMonitor.pageVisible`（开关、常驻、有没有在播、助手起没起来）。
+        static func visible(shelf: Bool, music: Bool) -> [Page] {
+            panelPages.filter { ($0 != .shelf || shelf) && ($0 != .music || music) }
+        }
+
+        /// 按当前设置和播放状态算。
+        @MainActor static var visibleNow: [Page] {
+            visible(shelf: PreferencesStore.shared.prefs.shelfEnabled, music: NowPlayingMonitor.shared.pageVisible)
         }
 
         init?(argument: String) {
@@ -76,6 +85,7 @@ struct LaunchOptions: Equatable {
             case "system": self = .system
             case "apps": self = .apps
             case "shelf": self = .shelf
+            case "music": self = .music
             case "settings": self = .settings
             default: return nil
             }

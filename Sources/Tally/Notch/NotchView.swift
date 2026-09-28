@@ -48,7 +48,7 @@ struct NotchView: View {
         VStack(alignment: .leading, spacing: 6) {
             // 三段：页签靠左、按钮靠右，中间给物理刘海留空，不然第四颗页签正好钻到刘海底下（照 Atoll 的标题行）
             HStack(spacing: 0) {
-                TabBar(pages: LaunchOptions.Page.visible(shelf: preferences.prefs.shelfEnabled), selected: state.page) { state.select($0) }
+                TabBar(pages: LaunchOptions.Page.visibleNow, selected: state.page) { state.select($0) }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 // 定高：Color 在 HStack 里竖向也贪婪，不限高会把整个标题行撑到面板中间
                 Color.clear
@@ -96,6 +96,8 @@ struct NotchView: View {
             AppsPage()
         case .shelf:
             ShelfPage()
+        case .music:
+            MusicPage()
         }
     }
 }
@@ -108,6 +110,7 @@ struct PageTitle: View {
     var system = SystemStore.shared
     var apps = RunningAppsStore.shared
     var shelf = ShelfStore.shared
+    var music = NowPlayingMonitor.shared
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -145,6 +148,8 @@ struct PageTitle: View {
             let prefs = PreferencesStore.shared.prefs
             return PageSummary.shelf(count: shelf.items.count, fileMinutes: prefs.shelfFileRetentionMinutes,
                                      screenshotMinutes: prefs.shelfScreenshotRetentionMinutes)
+        case .music:
+            return NowPlayingFeed.summary(music.track, player: music.player?.localizedName)
         }
     }
 }
@@ -291,6 +296,7 @@ struct RefreshControl: View {
         case .system: SystemStore.shared.refreshNow()
         case .apps: RunningAppsStore.shared.refreshNow()
         case .shelf: ShelfStore.shared.start()
+        case .music: NowPlayingMonitor.shared.refreshNow()
         }
     }
 }

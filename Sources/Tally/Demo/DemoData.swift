@@ -23,6 +23,8 @@ enum DemoData {
         prefs.notifyWithoutNotch = false
         // 摄像头 / 麦克风占用点读的是真设备状态：录屏时正开着会议的话，假界面里会冒出一个真图标
         prefs.privacyDots = false
+        // 「正在播放」也是真机状态：录 README 时不该出现你正在听的歌
+        prefs.musicEnabled = false
         prefs.launchAtLogin = false
         prefs.hoverToOpen = true
         prefs.shelfEnabled = true

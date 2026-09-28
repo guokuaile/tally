@@ -74,6 +74,12 @@ struct Preferences: Codable, Equatable {
     var notifyWithoutNotch = true
     /// 新截图自动放进文件架；文件夹是用户在选择面板里点过的那个（点过才有读它的授权）。
     var screenshotsToShelf = false
+    /// 「音乐」页：系统「正在播放」的那首歌和上一曲 / 播放暂停 / 下一曲（docs/music.md）。关掉不起助手进程。
+    var musicEnabled = true
+    /// 音乐页签常驻；关着时有「正在播放」的会话才出现。
+    var musicResident = false
+    /// 收进截图时垂提示条。一天截几十张的人嫌吵，关掉照收不弹；拖进来的、open -a 放进来的不归它管。
+    var screenshotPeek = true
     var screenshotFolder: String?
     /// 每天问一次 GitHub 有没有新版本；只提示不替换。
     var checkUpdates = true
@@ -138,6 +144,9 @@ struct Preferences: Codable, Equatable {
         strideShowsValue = try c.decodeIfPresent(Bool.self, forKey: .strideShowsValue) ?? d.strideShowsValue
         notifyWithoutNotch = try c.decodeIfPresent(Bool.self, forKey: .notifyWithoutNotch) ?? d.notifyWithoutNotch
         screenshotsToShelf = try c.decodeIfPresent(Bool.self, forKey: .screenshotsToShelf) ?? d.screenshotsToShelf
+        screenshotPeek = try c.decodeIfPresent(Bool.self, forKey: .screenshotPeek) ?? d.screenshotPeek
+        musicEnabled = try c.decodeIfPresent(Bool.self, forKey: .musicEnabled) ?? d.musicEnabled
+        musicResident = try c.decodeIfPresent(Bool.self, forKey: .musicResident) ?? d.musicResident
         screenshotFolder = try c.decodeIfPresent(String.self, forKey: .screenshotFolder)
         checkUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkUpdates) ?? d.checkUpdates
         updateNotifiedVersion = try c.decodeIfPresent(String.self, forKey: .updateNotifiedVersion)

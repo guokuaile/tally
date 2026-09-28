@@ -58,4 +58,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+「音乐」页的助手 Sources/TallyMedia/helper.m 是自己写的，做法（把 dylib 交给 /usr/bin/perl 加载、在它的进程里调
+MediaRemote、stdout 出 JSON、stdin 收命令、stdin 关闭即退出）参考了：
+- cyclop（https://github.com/akalikbergenov/cyclop），MIT License，Copyright (c) 2026 akalikbergenov
+- mediaremote-adapter（https://github.com/ungive/mediaremote-adapter），BSD 3-Clause License，
+  Copyright (c) 2025, Jonas van den Berg and contributors
+
 Claude、OpenAI、Cursor、Antigravity、DeepSeek、Kimi、智谱 GLM / Z.ai 的名称与标志归各自所有者，放在这里只用来标明是哪家的会话与用量。
