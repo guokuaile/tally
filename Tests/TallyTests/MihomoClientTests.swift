@@ -10,7 +10,8 @@ final class MihomoClientTests: XCTestCase {
         private let fd: Int32
         private(set) var request = ""
 
-        init(response: String, delay: TimeInterval = 0) throws {
+        /// `tail` 不为空时分两次写：先 `response`，隔 `tailDelay` 再写 `tail` 并立刻关连接，模拟对端收尾那一下。
+        init(response: String, delay: TimeInterval = 0, tail: String? = nil, tailDelay: TimeInterval = 0) throws {
             path = NSTemporaryDirectory() + "tally-\(UUID().uuidString.prefix(8)).sock"
             fd = socket(AF_UNIX, SOCK_STREAM, 0)
             var addr = sockaddr_un()
@@ -42,6 +43,10 @@ final class MihomoClientTests: XCTestCase {
                 self.request = String(decoding: head, as: UTF8.self)
                 if delay > 0 { Thread.sleep(forTimeInterval: delay) }
                 _ = response.withCString { write(client, $0, strlen($0)) }
+                if let tail {
+                    Thread.sleep(forTimeInterval: tailDelay)
+                    _ = tail.withCString { write(client, $0, strlen($0)) }
+                }
                 shutdown(client, SHUT_WR)
                 close(client)
             }.start()
@@ -91,6 +96,38 @@ final class MihomoClientTests: XCTestCase {
         XCTAssertEqual(result.lines, [#"{"up":1}"#, #"{"up":2}"#, #"{"up":3}"#])
         XCTAssertEqual(result.events, ["line", "line", "line", "close"])
         XCTAssertNil(result.error)
+    }
+
+    /// 对端写完最后一截就关连接：Unix socket 上 NWConnection 把对端关连接报成 `.failed`（POSIXError 50），而且会先于
+    /// 最后那次 receive 回调到达。主线程忙着时两者都排在队里，状态更新先出队，当场判失败就把完整的响应判成了没响应。
+    func testPeerCloseRacingWithFinalChunkStillSucceeds() throws {
+        func chunk(_ s: String) -> String { String(s.utf8.count, radix: 16) + "\r\n" + s + "\r\n" }
+        let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + chunk("{\"proxies\":1}\n")
+        let server = try OneShotServer(response: head, tail: chunk("{\"proxies\":2}") + "0\r\n\r\n", tailDelay: 0.1)
+        let client = MihomoClient(socketPath: server.path, timeout: 8)
+        var lines: [String] = []
+        var closeError: Error?
+        let closed = expectation(description: "closed")
+        client.get("/proxies", onLine: { data in
+            lines.append(String(decoding: data, as: UTF8.self))
+            // 第一行到手就把主线程占住，让对端的收尾数据和「连接关了」的状态更新一起排队
+            if lines.count == 1 { Thread.sleep(forTimeInterval: 0.4) }
+        }, onClose: { error in
+            closeError = error
+            closed.fulfill()
+        })
+        wait(for: [closed], timeout: 5)
+        XCTAssertNil(closeError.map { String(describing: $0) })
+        XCTAssertEqual(lines, [#"{"proxies":1}"#, #"{"proxies":2}"#], "收尾那一截照常交付")
+    }
+
+    /// 对端没写完就关连接：`.failed` 记下后由挂着的 receive 收尾，收不齐要立刻按它失败，不能等到超时。
+    func testPeerCloseBeforeBodyCompletesFailsPromptly() throws {
+        let started = Date()
+        let result = try run("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"mode\":", path: "/configs", timeout: 6)
+        XCTAssertNotNil(result.error, "收不齐不算成功")
+        XCTAssertNotEqual(result.error as? MihomoError, .timeout, "对端关了就该结束，不等超时")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
     }
 
     func testNon2xxIsAnErrorWithoutLines() throws {

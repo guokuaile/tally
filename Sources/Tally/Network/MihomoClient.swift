@@ -53,6 +53,10 @@ final class MihomoClient: MihomoRequesting {
         var decoder = ChunkedDecoder()
         var lines = LineSplitter()
         var closed = false
+        var ready = false
+        /// 连上之后对端关连接报的是 `.failed`，且常先于最后一截数据的 receive 回调到达（见 docs/network.md）：
+        /// 当场判失败会把完整的响应判成没响应，所以记下来交给挂着的 receive 收尾，收齐了照常成功，收不齐再按它失败。
+        var peerFailure: Error?
 
         func finish(_ error: Error?) {
             guard !closed else { return }
@@ -79,7 +83,7 @@ final class MihomoClient: MihomoRequesting {
         func receive() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 32 * 1024) { data, _, isComplete, error in
                 if let error {
-                    finish(error)
+                    finish(peerFailure ?? error)
                     return
                 }
                 if let data, !data.isEmpty {
@@ -112,7 +116,8 @@ final class MihomoClient: MihomoRequesting {
                     }
                 }
                 if isComplete {
-                    finish(nil)
+                    // 走到这里 body 自己的框定（Content-Length / chunked 结尾）还没说完，对端先关了：有记下的失败就按它报
+                    finish(peerFailure)
                     return
                 }
                 receive()
@@ -122,13 +127,15 @@ final class MihomoClient: MihomoRequesting {
         conn.stateUpdateHandler = { state in
             switch state {
             case .ready:
+                ready = true
                 let req = "GET \(path) HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
                 conn.send(content: Data(req.utf8), completion: .contentProcessed { sendError in
                     if let sendError { finish(sendError) }
                 })
                 receive()
             case .failed(let error):
-                finish(error)
+                // 连都没连上就没有挂着的 receive，只能当场失败；连上过的交给 receive 收尾（见 peerFailure）
+                if ready { peerFailure = error } else { finish(error) }
             // socket 文件在但没人听时 NWConnection 停在 .waiting 自旋，直接判失败让上层按节奏重连
             case .waiting(let error):
                 finish(error)
