@@ -176,6 +176,16 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         displayOrder(sessions, now: now).filter { $0.state != .ended }
     }
 
+    /// 这一页里同一目录下有不止一个会话时，行上要多标 tty 才分得清：同目录跑同一个 skill 的两条，标题只差 URL 尾巴。
+    public static func crowdedCWDs(_ sessions: [SessionRecord]) -> Set<String> {
+        var seen: Set<String> = []
+        var crowded: Set<String> = []
+        for session in sessions where !seen.insert(session.cwd).inserted {
+            crowded.insert(session.cwd)
+        }
+        return crowded
+    }
+
     /// 闭合态徽标计数用：在等我，且没失联。
     public func countsAsWaiting(now: Date) -> Bool {
         isWaiting && !isStale(now: now)

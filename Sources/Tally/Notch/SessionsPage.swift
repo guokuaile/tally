@@ -24,6 +24,7 @@ struct SessionsPage: View {
             }
             .frame(maxWidth: .infinity, minHeight: 72, maxHeight: .infinity)
         } else {
+            let crowded = SessionRecord.crowdedCWDs(rows)
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, session in
@@ -32,7 +33,8 @@ struct SessionsPage: View {
                         }
                         // ⌘N 按没关闭的会话的显示顺序数，所以编号就是行号；已关闭那一页没有键
                         SessionRow(session: session, now: now,
-                                   shortcut: !showingClosed && jump.shortcutHints ? PanelKey.sessionShortcutLabel(index) : nil)
+                                   shortcut: !showingClosed && jump.shortcutHints ? PanelKey.sessionShortcutLabel(index) : nil,
+                                   tty: crowded.contains(session.cwd) ? session.tty : nil)
                     }
                 }
             }
@@ -68,6 +70,8 @@ struct SessionRow: View {
     let now: Date
     /// 按住 ⌘ 时行尾显示的编号（⌘1…⌘9、⌘0），nil 不显示。
     let shortcut: String?
+    /// 同目录有别的会话时跟在目录名后面的终端号，nil 不显示。
+    let tty: String?
     var jump = SessionJump.shared
     @State private var hovered = false
 
@@ -99,11 +103,13 @@ struct SessionRow: View {
                 StateIcon(state: session.state, stale: stale, backgroundWork: session.backgroundWork != nil)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
+                        // 从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上
                         Text(session.displayTitle)
                             .font(.system(size: 12, weight: .medium))
                             .italic(stale)
                             .foregroundStyle(stale || ended ? .white.opacity(0.45) : .white)
                             .lineLimit(1)
+                            .truncationMode(.middle)
                         ProviderTag(session: session)
                         // tmux 里的会话点了先切 pane 再带外层终端，标出来免得以为跳错了地方
                         if session.term == "tmux" {
@@ -115,7 +121,7 @@ struct SessionRow: View {
                         }
                     }
                     HStack(spacing: 6) {
-                        Text(session.cwdLabel)
+                        Text(tty.map { "\(session.cwdLabel) · \($0)" } ?? session.cwdLabel)
                         Text(Self.relative.localizedString(for: session.updatedDate, relativeTo: now))
                         if stale { Text("失联") }
                         if session.state == .compacting { Text("压缩上下文中") }

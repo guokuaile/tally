@@ -28,6 +28,16 @@ final class SessionOrderTests: XCTestCase {
                        "⌘N 不数已关闭的：按到它会开新终端")
     }
 
+    func testCrowdedCWDsOnlyWhereADirectoryRepeats() {
+        // 同目录跑同一个 skill 的两条标题只差 URL 尾巴，行上得多标 tty；单独一条的目录不标
+        let now = Date()
+        var a = record("a", .running, age: 1, now: now); a.cwd = "/vault/note"
+        var b = record("b", .done, age: 2, now: now); b.cwd = "/vault/note"
+        var c = record("c", .running, age: 3, now: now); c.cwd = "/work/tally"
+        XCTAssertEqual(SessionRecord.crowdedCWDs([a, b, c]), ["/vault/note"])
+        XCTAssertEqual(SessionRecord.crowdedCWDs([a, c]), [])
+    }
+
     func testGroupOfEachState() {
         let now = Date()
         XCTAssertEqual(record("a", .waitingPermission, age: 0, now: now).group(now: now), .waiting)
