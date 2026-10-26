@@ -49,6 +49,10 @@ final class StrideRuleTests: XCTestCase {
         XCTAssertEqual(StrideRule.framesPerSecond(mood: .sprint, cpu: 0.02), 8, "内存顶上来的冲刺按冲刺的最低帧率")
         XCTAssertEqual(StrideRule.framesPerSecond(mood: .sprint, cpu: 0.90), 10, "封顶 10")
         XCTAssertEqual(StrideRule.framesPerSecond(mood: .angry, cpu: 0.01), 10)
+        for mood in StrideMood.allCases {
+            XCTAssertEqual(StrideRule.framesPerSecond(mood: mood, cpu: 0.90, lowPower: true), 2)
+        }
+        XCTAssertEqual(StrideRule.framesPerSecond(mood: .angry, cpu: 0.90, lowPower: false), 10)
     }
 
     func testSwitchTimingAndLabels() {

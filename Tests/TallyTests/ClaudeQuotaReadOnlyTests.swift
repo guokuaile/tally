@@ -21,7 +21,88 @@ final class StubURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class PendingScopedProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var pending: [PendingScopedProtocol] = []
+    static var count: Int { lock.withLock { pending.count } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { Self.lock.withLock { Self.pending.append(self) } }
+    override func stopLoading() {}
+
+    static func complete(_ index: Int, percent: Int) {
+        let instance = lock.withLock { pending[index] }
+        let response = HTTPURLResponse(url: instance.request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let body = Data(#"{"limits":[{"kind":"weekly_scoped","percent":\#(percent),"resets_at":"2099-01-01T00:00:00Z","scope":{"model":{"display_name":"Fable"}}}]}"#.utf8)
+        instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
+        instance.client?.urlProtocol(instance, didLoad: body)
+        instance.client?.urlProtocolDidFinishLoading(instance)
+    }
+}
+
 final class ClaudeQuotaReadOnlyTests: XCTestCase {
+
+    private func waitFor(_ condition: () -> Bool) async throws {
+        for _ in 0..<1000 {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        throw NSError(domain: "Timed out waiting for scoped request", code: 1)
+    }
+
+    func testOlderScopedRequestCannotReplaceNewerWindowOrNotify() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PendingScopedProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let box = ClaudeUsageProvider.ScopedLimitsBox()
+        let lock = NSLock()
+        var notifications: [Double] = []
+        box.setOnUpdate { _, scoped in
+            lock.withLock { notifications.append(scoped[0].limit.used) }
+        }
+        let client = ClaudeQuotaReadOnly(session: session, credentialsFile: dir.appendingPathComponent("nope.json"),
+                                         keychainItem: { #"{"claudeAiOauth":{"accessToken":"tok"}}"# }, credentialStamp: { nil })
+        let claude = try provider(client: client, box: box)
+        let first = Task { try await claude.fetchSnapshot(now: Date()) }
+        try await waitFor { PendingScopedProtocol.count == 1 }
+        box.refetchNow()
+        let second = Task { try await claude.fetchSnapshot(now: Date()) }
+        try await waitFor { PendingScopedProtocol.count == 2 }
+        PendingScopedProtocol.complete(1, percent: 6)
+        _ = try await second.value
+        PendingScopedProtocol.complete(0, percent: 90)
+        _ = try await first.value
+        XCTAssertEqual(box.current.first?.limit.used, 6)
+        XCTAssertEqual(lock.withLock { notifications }, [6])
+    }
+
+    func testAccountResetInvalidatesPendingScopedCompletion() throws {
+        let box = ClaudeUsageProvider.ScopedLimitsBox()
+        var notifications = 0
+        box.setOnUpdate { _, _ in notifications += 1 }
+        let oldAccount = try XCTUnwrap(box.beginRequest(owner: nil))
+        box.reset()
+        let newAccount = try XCTUnwrap(box.beginRequest(owner: nil))
+        let fresh = [ScopedLimit(label: "Fable", limit: UsageLimit(used: 6, limit: 100))]
+        let stale = [ScopedLimit(label: "Fable", limit: UsageLimit(used: 90, limit: 100))]
+        box.record(fresh, now: Date(), request: newAccount)
+        box.record(stale, now: Date(), request: oldAccount)
+        XCTAssertEqual(box.current.first?.limit.used, 6)
+        XCTAssertEqual(notifications, 1)
+    }
+
+    func testOldScanCannotClaimScopedRequestOrResetNewAccount() throws {
+        let box = ClaudeUsageProvider.ScopedLimitsBox()
+        box.activateOwner(1)
+        box.activateOwner(2)
+        let current = try XCTUnwrap(box.beginRequest(owner: 2))
+        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 6, limit: 100))], now: Date(), request: current)
+        XCTAssertNil(box.beginRequest(owner: 1))
+        box.reset(owner: 1)
+        XCTAssertEqual(box.current.first?.limit.used, 6)
+    }
 
     private var dir: URL!
     private let sample = #"{"five_hour":{"utilization":23.5,"resets_at":"2026-09-08T13:20:00Z"},"seven_day":{"utilization":31.0,"resets_at":"2026-09-11T06:00:00+08:00"}}"#
@@ -196,17 +277,17 @@ final class ClaudeQuotaReadOnlyTests: XCTestCase {
         XCTAssertTrue(ClaudeQuotaReadOnly.scopedLimits(from: ["limits": [["kind": "weekly_scoped", "percent": 50]]]).isEmpty, "没有 scope.model.display_name 不要")
     }
 
-    func testScopedBoxThrottlesSuccessAndRetriesFailureSooner() {
+    func testScopedBoxThrottlesSuccessAndRetriesFailureSooner() throws {
         let box = ClaudeUsageProvider.ScopedLimitsBox()
         let now = Date()
         XCTAssertTrue(box.needsFetch(now: now), "第一次总要取")
-        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 100, limit: 100))], now: now)
+        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 100, limit: 100))], now: now, request: try XCTUnwrap(box.beginRequest(owner: nil)))
         XCTAssertFalse(box.needsFetch(now: now.addingTimeInterval(599)), "取到了隔 10 分钟再取")
         XCTAssertTrue(box.needsFetch(now: now.addingTimeInterval(601)))
         XCTAssertEqual(box.current.first?.label, "Fable")
         // 没拿到也要记时间（免得 token 过期后每次刷新都读凭据），但只隔 1 分钟——代理偶发断连不该让这条消失十分钟
         let failedAt = now.addingTimeInterval(601)
-        box.record(nil, now: failedAt)
+        box.record(nil, now: failedAt, request: try XCTUnwrap(box.beginRequest(owner: nil)))
         XCTAssertFalse(box.needsFetch(now: failedAt.addingTimeInterval(59)))
         XCTAssertTrue(box.needsFetch(now: failedAt.addingTimeInterval(61)))
         XCTAssertEqual(box.current.first?.label, "Fable", "取失败沿用上一次的值")
@@ -327,7 +408,7 @@ final class ClaudeQuotaReadOnlyTests: XCTestCase {
         let claude = try provider(client: client, box: box)
         let now = Date()
         _ = client.loadToken(now: now)
-        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 40, limit: 100))], now: now)
+        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 40, limit: 100))], now: now, request: try XCTUnwrap(box.beginRequest(owner: nil)))
         XCTAssertFalse(box.needsFetch(now: now.addingTimeInterval(5)))
 
         claude.forceFresh()
@@ -337,13 +418,13 @@ final class ClaudeQuotaReadOnlyTests: XCTestCase {
         XCTAssertEqual(reads, 2, "手动刷新重读凭据")
     }
 
-    func testScopedUpdateCallbackOnlyOnSuccess() {
+    func testScopedUpdateCallbackOnlyOnSuccess() throws {
         let box = ClaudeUsageProvider.ScopedLimitsBox()
         var got: [[ScopedLimit]] = []
-        box.setOnUpdate { got.append($0) }
-        box.record(nil, now: Date())
+        box.setOnUpdate { _, scoped in got.append(scoped) }
+        box.record(nil, now: Date(), request: try XCTUnwrap(box.beginRequest(owner: nil)))
         XCTAssertTrue(got.isEmpty, "没取到不通知界面")
-        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 100, limit: 100))], now: Date())
+        box.record([ScopedLimit(label: "Fable", limit: UsageLimit(used: 100, limit: 100))], now: Date(), request: try XCTUnwrap(box.beginRequest(owner: nil)))
         XCTAssertEqual(got.count, 1)
         XCTAssertEqual(got.first?.first?.label, "Fable")
     }

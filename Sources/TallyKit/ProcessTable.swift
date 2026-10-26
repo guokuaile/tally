@@ -65,6 +65,17 @@ public struct SysctlProcessTable: ProcessTable {
         return length > 0 ? String(cString: buffer) : ""
     }
 
+    /// The managed app-server runs Codex hooks for every TUI, so its PID cannot identify a session.
+    /// The TUI process itself keeps the directory from which it was launched.
+    public static func workingDirectory(of pid: Int32) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        return withUnsafePointer(to: &info.pvi_cdir.vip_path) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
+    }
+
     /// KERN_PROCARGS2：前 4 字节是 argc，然后是可执行路径、若干个 NUL、再是各参数。
     public func arguments(of pid: Int32) -> [String] {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]

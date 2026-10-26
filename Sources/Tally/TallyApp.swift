@@ -118,8 +118,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var notch: NotchController?
     /// `open -a Tally <文件>` 顺带把 app 拉起来时，文件比 didFinishLaunching 先到，控制器还没建：先攒着。
     private var pendingFiles: [URL] = []
+    private var terminationSignal: DispatchSourceSignal?
+    private var awaitingTermination = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Installation sends SIGTERM; route it through the same awaited cleanup as Quit.
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        // terminateLater spins a nested run loop; never enter it from a main-queue block.
+        source.setEventHandler { RunLoop.main.perform { NSApp.terminate(nil) } }
+        source.resume()
+        terminationSignal = source
         let options = LaunchOptions.parse(CommandLine.arguments)
         Log.debug("启动，openPage=\(options.openPage?.rawValue ?? "nil") demo=\(options.demo)")
         // 演示模式不装 hook：那会改真的 ~/.claude 与 ~/.codex 配置
@@ -153,9 +162,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !awaitingTermination else { return .terminateLater }
+        awaitingTermination = true
+        let restoration = LidSleepBlocker.shared.disable()
+        Task { @MainActor in
+            let restored = await restoration.value
+            if restored {
+                sender.reply(toApplicationShouldTerminate: true)
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "未能恢复合盖休眠"
+                alert.informativeText = LidSleepBlocker.shared.failure ?? "系统可能仍保持唤醒。"
+                alert.addButton(withTitle: "留下重试")
+                alert.addButton(withTitle: "仍然退出")
+                sender.activate(ignoringOtherApps: true)
+                let shouldQuit = NotchPanel.steppingAside { alert.runModal() } == .alertSecondButtonReturn
+                if !shouldQuit { self.awaitingTermination = false }
+                sender.reply(toApplicationShouldTerminate: shouldQuit)
+            }
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // 合盖不休眠是系统级的持久设置，不在这儿收掉的话，退出 Tally 之后机器再也不休眠
-        LidSleepBlocker.shared.disable()
         UsageStore.shared.flushScanCaches()
     }
 

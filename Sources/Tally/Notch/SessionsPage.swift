@@ -96,7 +96,7 @@ struct SessionRow: View {
 
     private func content(stale: Bool, ended: Bool) -> some View {
             HStack(spacing: 8) {
-                StateIcon(state: session.state, stale: stale)
+                StateIcon(state: session.state, stale: stale, backgroundWork: session.backgroundWork != nil)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
                         Text(session.displayTitle)
@@ -107,12 +107,11 @@ struct SessionRow: View {
                         ProviderTag(session: session)
                         // tmux 里的会话点了先切 pane 再带外层终端，标出来免得以为跳错了地方
                         if session.term == "tmux" {
-                            Text("tmux")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.7))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.14)))
+                            RowTag(text: "tmux", tint: .white.opacity(0.7))
+                        }
+                        // 主回合完了后台还有活：放标题旁、绿底绿字，灰字那栏太弱看不出来
+                        if let work = session.backgroundWork {
+                            RowTag(text: work == .agents ? "后台 agent 在跑" : "后台命令在跑", tint: .green)
                         }
                     }
                     HStack(spacing: 6) {
@@ -199,6 +198,8 @@ final class SessionJump {
             return "找不到窗口"
         } catch TerminalLocator.Failure.notRunning(let app) {
             return "\(app) 没在跑"
+        } catch TerminalLocator.Failure.directoryMissing {
+            return "会话目录不在了"
         } catch TerminalLocator.Failure.needsAutomationPermission(let app) {
             // 拒过之后系统不再弹框，只能自己把设置面板指出来
             TerminalLocator.openAutomationSettings()
@@ -227,10 +228,26 @@ struct ProviderTag: View {
     }
 }
 
-/// 状态图标：等审批橙、等输入黄、忙灰、压缩中青、完成绿、失联灰、已关闭灰。
+/// 标题旁的小标签：tmux、后台还在跑。
+struct RowTag: View {
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(RoundedRectangle(cornerRadius: 3).fill(tint.opacity(0.18)))
+    }
+}
+
+/// 状态图标：等审批橙、等输入黄、忙灰、压缩中青、完成绿（主回合完了后台还有活是绿色虚线圆：在跑的形状、完成的颜色）、失联灰、已关闭灰。
 struct StateIcon: View {
     let state: SessionRecord.State
     let stale: Bool
+    let backgroundWork: Bool
 
     var body: some View {
         Image(systemName: symbol)
@@ -246,7 +263,7 @@ struct StateIcon: View {
         case .waitingInput: return "questionmark.circle.fill"
         case .running: return "circle.dotted"
         case .compacting: return "arrow.triangle.2.circlepath"
-        case .done: return "checkmark.circle.fill"
+        case .done: return backgroundWork ? "circle.dotted" : "checkmark.circle.fill"
         case .ended: return "arrow.uturn.backward.circle"
         }
     }

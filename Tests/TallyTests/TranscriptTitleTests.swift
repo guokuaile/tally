@@ -150,4 +150,62 @@ final class TranscriptTitleTests: XCTestCase {
         XCTAssertEqual(TranscriptTitle.turnEnd(in: try tempFile([prompt, interrupt].joined(separator: "\n") + "\n")), .interrupted)
         XCTAssertNil(TranscriptTitle.turnEnd(in: URL(fileURLWithPath: "/nonexistent/x.jsonl")))
     }
+
+    // MARK: 第一句话
+
+    private func userLine(_ content: String, meta: Bool = false, sidechain: Bool = false) -> String {
+        let escaped = content.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: "\\n")
+        return "{\"type\":\"user\",\"isMeta\":\(meta),\"isSidechain\":\(sidechain),\"message\":{\"role\":\"user\",\"content\":\"\(escaped)\"}}"
+    }
+
+    private func codexUserLine(_ text: String) -> String {
+        let escaped = text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: "\\n")
+        return "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"\(escaped)\"}]}}"
+    }
+
+    func testFirstPromptClaudeTakesFirstMainlineUserText() {
+        let text = ["{\"type\":\"file-history-snapshot\"}", userLine("注入", meta: true), userLine("子 agent", sidechain: true),
+                    "{\"type\":\"user\",\"isCompactSummary\":true,\"message\":{\"role\":\"user\",\"content\":\"This session is being continued from a previous conversation\"}}",
+                    userLine(" 看下 codex 的安装\n还在跑吗 "), userLine("第二句")].joined(separator: "\n")
+        XCTAssertEqual(TranscriptTitle.parseFirstPrompt(text, provider: "claude"), "看下 codex 的安装 还在跑吗")
+    }
+
+    func testFirstPromptClaudeSlashCommandBecomesNameAndArgs() {
+        let text = userLine("<command-message>obsidian-article-review</command-message>\n<command-name>/obsidian-article-review</command-name>\n<command-args>https://x.y/z</command-args>")
+        XCTAssertEqual(TranscriptTitle.parseFirstPrompt(text, provider: "claude"), "/obsidian-article-review https://x.y/z")
+        XCTAssertEqual(TranscriptTitle.parseFirstPrompt(userLine("<command-name>/clear</command-name>\n<command-args></command-args>"), provider: "claude"), "/clear")
+    }
+
+    func testFirstPromptClaudeContentBlocksAndClip() {
+        let long = String(repeating: "长", count: 100)
+        let line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\(long)\"},{\"type\":\"text\",\"text\":\"尾\"}]}}"
+        XCTAssertEqual(TranscriptTitle.parseFirstPrompt(line, provider: "claude"), String(repeating: "长", count: TranscriptTitle.promptCharacters))
+        let toolResult = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"x\"}]}}"
+        XCTAssertNil(TranscriptTitle.parseFirstPrompt(toolResult, provider: "claude"))
+    }
+
+    func testFirstPromptSkipsInjectedAngleBracketTexts() {
+        XCTAssertNil(TranscriptTitle.parseFirstPrompt(userLine("<local-command-stdout>x</local-command-stdout>"), provider: "claude"))
+        XCTAssertNil(TranscriptTitle.parseFirstPrompt("", provider: "codex"))
+    }
+
+    func testFirstPromptCodexSkipsAgentsAndEnvironmentMessages() {
+        let text = ["{\"type\":\"session_meta\",\"payload\":{\"role\":\"user\"}}",
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"You are Codex\"}]}}",
+                    codexUserLine("# AGENTS.md instructions\n\n<INSTRUCTIONS>…"),
+                    codexUserLine("<environment_context>cwd</environment_context>"),
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"老格式\"}}",
+                    codexUserLine("目前 macOS 升级了，检查下影响"),
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"半行"].joined(separator: "\n")
+        XCTAssertEqual(TranscriptTitle.parseFirstPrompt(text, provider: "codex"), "目前 macOS 升级了，检查下影响")
+    }
+
+    func testFirstPromptReadsFileHeadAndIgnoresTruncatedLine() throws {
+        let fine = try tempFile(userLine("开头") + "\n")
+        XCTAssertEqual(TranscriptTitle.firstPrompt(in: fine, provider: "claude"), "开头")
+        // 第一条非 meta 的 user 记录超过 1 MB，被切在中间：跳过，不拿半行当标题
+        let cut = try tempFile(userLine("注入", meta: true) + "\n" + userLine(String(repeating: "x", count: TranscriptTitle.headBytes)) + "\n")
+        XCTAssertNil(TranscriptTitle.firstPrompt(in: cut, provider: "claude"))
+        XCTAssertNil(TranscriptTitle.firstPrompt(in: URL(fileURLWithPath: "/nonexistent/x.jsonl"), provider: "codex"))
+    }
 }

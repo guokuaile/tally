@@ -24,6 +24,8 @@ enum TerminalLocator {
         /// 所以要和「找不到窗口」分开，单独告诉用户去哪儿开。
         case needsAutomationPermission(String)
         case scriptFailed(String)
+        /// 接着聊时会话目录已经不存在：不开终端，行里直说，别混进「定位失败」。
+        case directoryMissing
     }
 
     static let vscode = "com.microsoft.VSCode"

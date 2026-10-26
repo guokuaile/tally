@@ -128,7 +128,7 @@ enum TokenFormat {
     }
 }
 
-/// 两行：「今日 $x · 24.1M」「本周 $y · 312M」。token 是输入加输出（输入含缓存读写）。
+/// 两行：「今日 $x · 24.1M」「本周 $y · 312M」。价格不全时只显示 token。
 /// 排成两行而不是挤一行：左格只有 150pt，一行放不下两个窗口的费用加 token。
 struct UsageFigures: View {
     let today: UsageTotals
@@ -147,11 +147,10 @@ struct UsageFigures: View {
     private func line(_ label: String, _ totals: UsageTotals) -> some View {
         HStack(spacing: 3) {
             Text(label).foregroundStyle(.white.opacity(0.45))
-            Text(String(format: "$%.2f", totals.costUSD)).font(.metric(10, .medium))
-            if totals.hasUnpricedModel {
-                Text("+未定价").foregroundStyle(.orange)
+            if !totals.hasUnpricedModel {
+                Text(String(format: "$%.2f", totals.costUSD)).font(.metric(10, .medium))
+                Text("·").foregroundStyle(.white.opacity(0.3))
             }
-            Text("·").foregroundStyle(.white.opacity(0.3))
             Text(TokenFormat.short(totals.inputTokens + totals.outputTokens))
                 .font(.metric(10, .regular))
                 .foregroundStyle(.white.opacity(0.55))

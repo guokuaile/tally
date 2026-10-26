@@ -45,6 +45,8 @@ final class UsageStore {
     private var liveLimits: [ProviderID: LiveLimits] = [:]
     /// 刷新轮次号：放行卡住的那一轮之后，它迟到的结果不许再写。
     private var generation = 0
+    private var nextRequestID = 0
+    private var currentRequests: [ProviderID: Int] = [:]
     /// 配额涨过 80%、用完、重置时叫一声，控制器拿它弹提示条。
     var quotaAlert: ((QuotaEvent) -> Void)?
     private var quotaTracker = QuotaAlertTracker()
@@ -72,8 +74,11 @@ final class UsageStore {
             NewAPIUsageProvider(backoff: .shared),
         ]
         // 按模型分的周窗口是后台取的，取到就直接补进已有快照，不用等下一轮刷新
-        scopedBox.setOnUpdate { scoped in
-            Task { @MainActor in UsageStore.shared.applyClaudeScopedLimits(scoped) }
+        scopedBox.setOnUpdate { [weak scopedBox] request, scoped in
+            Task { @MainActor in
+                guard scopedBox?.isCurrent(request) == true else { return }
+                UsageStore.shared.applyClaudeScopedLimits(scoped)
+            }
         }
         self.clock = clock
         self.preferences = preferences ?? { PreferencesStore.shared.prefs }
@@ -122,20 +127,27 @@ final class UsageStore {
         let enabled = enabledProviders
         let ids = Set(enabled.map(\.id))
         results = results.filter { ids.contains($0.key) }
+        currentRequests = currentRequests.filter { ids.contains($0.key) }
+        if !ids.contains(.claude) {
+            for provider in allProviders { (provider as? ClaudeUsageProvider)?.scopedBox.invalidateRequests() }
+        }
         let added = enabled.filter { results[$0.id] == nil }
         for provider in added {
             results[provider.id] = .loading
         }
         guard lastRefreshStart != nil, !added.isEmpty else { return }
-        Task { await runRefresh(providers: added, pass: nil) }
+        let requests = requestIDs(for: added)
+        Task { await runRefresh(providers: added, pass: nil, requests: requests) }
     }
 
     /// 设置里改完某家的凭据点「现在查一次」：只重查这一家，不占 60 秒节流也不碰 `isRefreshing`（和新开启一家同一条路）。
     /// 没开着的不查。
-    func refetch(_ id: ProviderID) {
-        guard let provider = enabledProviders.first(where: { $0.id == id }) else { return }
+    @discardableResult
+    func refetch(_ id: ProviderID) -> Task<Void, Never>? {
+        guard let provider = enabledProviders.first(where: { $0.id == id }) else { return nil }
         results[id] = .loading
-        Task { await runRefresh(providers: [provider], pass: nil) }
+        let requests = requestIDs(for: [provider])
+        return Task { await runRefresh(providers: [provider], pass: nil, requests: requests) }
     }
 
     /// 三种理由都受 60 秒最短间隔约束，被跳过的调用不重置计时。返回 false 表示被跳过。
@@ -144,15 +156,28 @@ final class UsageStore {
         guard beginRefreshIfAllowed(reason) else { return false }
         let providers = enabledProviders
         let pass = generation
-        Task { await runRefresh(providers: providers, pass: pass) }
+        let requests = requestIDs(for: providers)
+        Task { await runRefresh(providers: providers, pass: pass, requests: requests) }
         return true
     }
 
     /// 测试用：同步等刷新跑完。
     func refreshAndWait(reason: Reason) async -> Bool {
         guard beginRefreshIfAllowed(reason) else { return false }
-        await runRefresh(providers: enabledProviders, pass: generation)
+        let providers = enabledProviders
+        await runRefresh(providers: providers, pass: generation, requests: requestIDs(for: providers))
         return true
+    }
+
+    private func requestIDs(for providers: [UsageProvider]) -> [ProviderID: Int] {
+        var requests: [ProviderID: Int] = [:]
+        for provider in providers {
+            nextRequestID += 1
+            currentRequests[provider.id] = nextRequestID
+            requests[provider.id] = nextRequestID
+            (provider as? ClaudeUsageProvider)?.scopedBox.activateOwner(nextRequestID)
+        }
+        return requests
     }
 
     private func beginRefreshIfAllowed(_ reason: Reason) -> Bool {
@@ -171,18 +196,25 @@ final class UsageStore {
         return true
     }
 
-    /// 各家并发，各自失败各自报，不覆盖别家的成功结果。`pass` 是这一轮的轮次号，已被放行的旧轮次写不进来；
-    /// nil 是开启某家时的单独刷新，不管轮次。
-    private func runRefresh(providers: [UsageProvider], pass: Int?) async {
+    /// Each provider writes only its latest request; `pass` still owns the full refresh state.
+    private func runRefresh(providers: [UsageProvider], pass: Int?, requests: [ProviderID: Int]) async {
         let now = clock()
         await withTaskGroup(of: (ProviderID, UsageResult).self) { group in
             for provider in providers {
                 group.addTask {
-                    do { return (provider.id, .success(try await provider.fetchSnapshot(now: now))) }
+                    do {
+                        let snapshot: UsageSnapshot
+                        if let claude = provider as? ClaudeUsageProvider {
+                            snapshot = try await claude.fetchSnapshot(now: now, owner: requests[provider.id])
+                        } else {
+                            snapshot = try await provider.fetchSnapshot(now: now)
+                        }
+                        return (provider.id, .success(snapshot))
+                    }
                     catch { return (provider.id, .failure(error.localizedDescription)) }
                 }
             }
-            for await (id, result) in group where results[id] != nil && (pass == nil || pass == generation) {
+            for await (id, result) in group where results[id] != nil && currentRequests[id] == requests[id] && (pass == nil || pass == generation) {
                 if case .success(let snapshot) = result, !snapshot.limitsStale,
                    snapshot.sessionLimit != nil || snapshot.weekLimit != nil {
                     liveLimits[id] = LiveLimits(session: snapshot.sessionLimit, week: snapshot.weekLimit, at: now)

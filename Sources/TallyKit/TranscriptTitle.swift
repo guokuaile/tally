@@ -162,6 +162,77 @@ public enum TranscriptTitle {
         return String(firstLine[start..<end])
     }
 
+    /// 没有标题时顶上的「第一句话」：用户在会话里敲的第一条提示。Codex 从不设标题，Claude 的 ai-title 要等第一回合结束才写，
+    /// 这之前列表里只剩目录名，同一目录下的几个会话分不清。读文件头 1 MB：Claude 的第一条 user 记录在 10 KB 上下，
+    /// Codex 的 rollout 前面排着系统提示、工具表、AGENTS.md、world_state，用户那句在 180 KB 上下（本机实测）。
+    public static let headBytes = 1024 * 1024
+    /// 第一句话最多留这么多字：行里只显示得下一行，弹出的提示也只要个由头。
+    public static let promptCharacters = 80
+
+    public static func firstPrompt(in url: URL, provider: String) -> String? {
+        guard let head = head(of: url, bytes: headBytes) else { return nil }
+        return parseFirstPrompt(head, provider: provider)
+    }
+
+    /// Claude：第一条主链、非 isMeta、非压缩摘要（`isCompactSummary`，续接时那段「This session is continued…」）的 user 记录里的文字；斜杠命令存成 `<command-message>` / `<command-name>` / `<command-args>` 三段，
+    /// 取成「/名字 参数」。Codex：第一条 role 为 user 的 message（`response_item`；老版本另有 `event_msg` 的 `user_message`，新版没有，不认它）。
+    /// 两家都跳过以 `<` 起头的：Codex 把 `<environment_context>`、`<user_instructions>` 这类也记成 user 消息（`# AGENTS.md instructions` 同理），
+    /// Claude 的 `<local-command-stdout>` 没标 isMeta。用户自己以 `<` 开头的提示会被一起跳过，退回目录名。
+    /// 最后一行可能被 1 MB 切断，解析失败就跳过。
+    public static func parseFirstPrompt(_ text: String, provider: String) -> String? {
+        let codex = provider == "codex"
+        let marker = codex ? "\"role\":\"user\"" : "\"type\":\"user\""
+        for line in text.split(separator: "\n") where line.contains(marker) {
+            guard let data = line.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let raw: String
+            if codex {
+                guard object["type"] as? String == "response_item",
+                      let payload = object["payload"] as? [String: Any],
+                      payload["type"] as? String == "message", payload["role"] as? String == "user"
+                else { continue }
+                raw = joinedText(payload["content"])
+            } else {
+                guard object["type"] as? String == "user",
+                      object["isSidechain"] as? Bool != true, object["isMeta"] as? Bool != true,
+                      object["isCompactSummary"] as? Bool != true
+                else { continue }
+                raw = joinedText((object["message"] as? [String: Any])?["content"])
+            }
+            if let command = slashCommand(raw) { return clipPrompt(command) }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("<"), !trimmed.hasPrefix("# AGENTS.md") else { continue }
+            return clipPrompt(trimmed)
+        }
+        return nil
+    }
+
+    /// 字符串原样；内容块数组取每块的 `text`（Claude 的 `text`、Codex 的 `input_text`），`tool_result` 没有这个键，自然落空。
+    private static func joinedText(_ content: Any?) -> String {
+        if let text = content as? String { return text }
+        return ((content as? [[String: Any]]) ?? []).compactMap { $0["text"] as? String }.joined(separator: " ")
+    }
+
+    private static func slashCommand(_ text: String) -> String? {
+        guard let name = tagged(text, "command-name") else { return nil }
+        guard let args = tagged(text, "command-args") else { return name }
+        return "\(name) \(args)"
+    }
+
+    private static func tagged(_ text: String, _ tag: String) -> String? {
+        guard let open = text.range(of: "<\(tag)>"),
+              let close = text[open.upperBound...].range(of: "</\(tag)>")
+        else { return nil }
+        let value = text[open.upperBound..<close.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    /// 空白（含换行）折成一个空格，再截到 `promptCharacters` 个字。
+    private static func clipPrompt(_ text: String) -> String {
+        String(text.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(promptCharacters))
+    }
+
     /// 文件头 `bytes` 字节。
     private static func head(of url: URL, bytes: Int = tailBytes) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }

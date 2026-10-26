@@ -15,6 +15,23 @@ private struct FakeProvider: UsageProvider {
     }
 }
 
+private final class PendingUsageProvider: UsageProvider, @unchecked Sendable {
+    let id: ProviderID = .glm
+    private let lock = NSLock()
+    private var pending: [CheckedContinuation<UsageSnapshot, Never>] = []
+    var count: Int { lock.withLock { pending.count } }
+
+    func fetchSnapshot(now: Date) async throws -> UsageSnapshot {
+        await withCheckedContinuation { continuation in lock.withLock { pending.append(continuation) } }
+    }
+
+    func complete(_ index: Int, used: Double) {
+        var snapshot = UsageSnapshot()
+        snapshot.sessionLimit = UsageLimit(used: used, limit: 100)
+        lock.withLock { pending[index] }.resume(returning: snapshot)
+    }
+}
+
 /// 可拨的时钟和可改的开关，给 UsageStore 注入。
 @MainActor
 private final class Harness {
@@ -32,6 +49,109 @@ private final class Harness {
 }
 
 final class UsageStoreTests: XCTestCase {
+
+    @MainActor
+    func testClaudeRefetchInvalidatesScopedRequestBeforeSlowScanStarts() async throws {
+        let box = ClaudeUsageProvider.ScopedLimitsBox()
+        var notifications = 0
+        box.setOnUpdate { _, _ in notifications += 1 }
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let quota = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { nil }, credentialStamp: { nil })
+        let claude = ClaudeUsageProvider(root: missing, limits: ClaudeLimitsCache(directory: missing), quota: quota,
+                                         scopedBox: box, scan: UsageScanCache())
+        let h = Harness(providers: [claude])
+        h.store.providersChanged()
+        let oldRequest = try XCTUnwrap(box.beginRequest(owner: nil))
+        let newRequest = try XCTUnwrap(h.store.refetch(.claude))
+        let stale = [ScopedLimit(label: "Fable", limit: UsageLimit(used: 90, limit: 100))]
+        box.record(stale, now: Date(), request: oldRequest)
+        await newRequest.value
+        XCTAssertTrue(box.current.isEmpty)
+        XCTAssertEqual(notifications, 0)
+    }
+
+    @MainActor
+    private func waitFor(_ condition: () -> Bool) async throws {
+        for _ in 0..<1000 {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        throw NSError(domain: "Timed out waiting for request", code: 1)
+    }
+
+    @MainActor
+    func testOlderSingleRefreshCannotOverwriteNewerSingleRefresh() async throws {
+        let provider = PendingUsageProvider()
+        let h = Harness(providers: [provider])
+        h.prefs.enableGLM = true
+        h.store.providersChanged()
+        let old = try XCTUnwrap(h.store.refetch(.glm))
+        try await waitFor { provider.count == 1 }
+        let newer = try XCTUnwrap(h.store.refetch(.glm))
+        try await waitFor { provider.count == 2 }
+        provider.complete(1, used: 90)
+        await newer.value
+        provider.complete(0, used: 10)
+        await old.value
+        guard case .success(let snapshot)? = h.store.results[.glm] else { return XCTFail("Missing result") }
+        XCTAssertEqual(snapshot.sessionLimit?.used, 90)
+    }
+
+    @MainActor
+    func testFullAndSingleRefreshRespectLatestRequestInBothDirections() async throws {
+        for singleFirst in [true, false] {
+            let provider = PendingUsageProvider()
+            let h = Harness(providers: [provider])
+            h.prefs.enableGLM = true
+            h.store.providersChanged()
+            let first: Task<Void, Never>
+            let second: Task<Void, Never>
+            if singleFirst {
+                first = try XCTUnwrap(h.store.refetch(.glm))
+                try await waitFor { provider.count == 1 }
+                second = Task { _ = await h.store.refreshAndWait(reason: .timer) }
+            } else {
+                first = Task { _ = await h.store.refreshAndWait(reason: .timer) }
+                try await waitFor { provider.count == 1 }
+                second = try XCTUnwrap(h.store.refetch(.glm))
+            }
+            try await waitFor { provider.count == 2 }
+            provider.complete(1, used: 90)
+            await second.value
+            provider.complete(0, used: 10)
+            await first.value
+            guard case .success(let snapshot)? = h.store.results[.glm] else { return XCTFail("Missing result") }
+            XCTAssertEqual(snapshot.sessionLimit?.used, 90)
+        }
+    }
+
+    @MainActor
+    func testDisabledProviderOldRequestCannotOverwriteReenabledProvider() async throws {
+        let provider = PendingUsageProvider()
+        let h = Harness(providers: [provider])
+        h.prefs.enableGLM = true
+        h.store.providersChanged()
+        let initial = Task { _ = await h.store.refreshAndWait(reason: .timer) }
+        try await waitFor { provider.count == 1 }
+        provider.complete(0, used: 30)
+        await initial.value
+        let old = try XCTUnwrap(h.store.refetch(.glm))
+        try await waitFor { provider.count == 2 }
+        h.prefs.enableGLM = false
+        h.store.providersChanged()
+        h.prefs.enableGLM = true
+        h.store.providersChanged()
+        try await waitFor { provider.count == 3 }
+        provider.complete(2, used: 90)
+        try await waitFor {
+            if case .success(let snapshot)? = h.store.results[.glm] { return snapshot.sessionLimit?.used == 90 }
+            return false
+        }
+        provider.complete(1, used: 10)
+        await old.value
+        guard case .success(let snapshot)? = h.store.results[.glm] else { return XCTFail("Missing result") }
+        XCTAssertEqual(snapshot.sessionLimit?.used, 90)
+    }
 
     @MainActor
     func testSecondRefreshWithinSixtySecondsIsSkippedAndDoesNotResetClock() async {

@@ -78,6 +78,25 @@ final class SessionLifecycleTests: XCTestCase {
         return try JSONDecoder().decode(SessionRecord.self, from: Data(contentsOf: file))
     }
 
+    /// 没标题的会话用第一句话顶上：Codex 从不写标题，用户还没敲字时退回目录名，敲了之后下一次读目录就补上。
+    @MainActor
+    func testUntitledSessionGetsFirstPromptOnceTyped() throws {
+        let transcript = transcripts.appendingPathComponent("codex.jsonl")
+        try "{\"type\":\"session_meta\",\"payload\":{\"originator\":\"codex-tui\"}}\n".write(to: transcript, atomically: true, encoding: .utf8)
+        let record = SessionRecord(sessionId: "codex", provider: "codex", pid: 999_999, state: .ended, cwd: "/tmp/x", title: nil,
+                                   transcriptPath: transcript.path, message: nil, updatedAt: 1)
+        try JSONEncoder().encode(record).write(to: directory.appendingPathComponent("codex.json"))
+        let store = makeStore()
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.displayTitle, "x")
+        let handle = try FileHandle(forWritingTo: transcript)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"看下安装\"}]}}\n".utf8))
+        try handle.close()
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.displayTitle, "看下安装")
+    }
+
     @MainActor
     func testDeadInteractiveSessionBecomesEndedAndScriptedOneIsDeleted() throws {
         try write("interactive", state: .done)
@@ -124,6 +143,36 @@ final class SessionLifecycleTests: XCTestCase {
     }
 
     @MainActor
+    func testCodexDaemonPidDoesNotKeepClosedTUISessionsInRecent() throws {
+        let cwd = transcripts.path
+        for (id, updatedAt) in [("old", 1.0), ("middle", 2.0), ("current", 3.0)] {
+            let transcript = transcripts.appendingPathComponent("\(id).jsonl")
+            try #"{"type":"session_meta","payload":{"originator":"codex-tui","source":"vscode"}}"#
+                .write(to: transcript, atomically: true, encoding: .utf8)
+            let record = SessionRecord(sessionId: id, provider: "codex", pid: Int(ProcessInfo.processInfo.processIdentifier),
+                                       state: .done, cwd: cwd, title: id, transcriptPath: transcript.path,
+                                       message: nil, updatedAt: updatedAt)
+            try JSONEncoder().encode(record).write(to: directory.appendingPathComponent("\(id).json"))
+        }
+        var active = 1
+        let store = SessionStore(directory: directory, claudeSessions: transcripts,
+                                 keepClosed: { true }, closedLimit: { 10 },
+                                 activeCodexTUIByCWD: { [unowned self] in [self.transcripts.path: active] })
+        store.reload()
+        XCTAssertEqual(try onDisk("old")?.state, .done, "An idle older session may be the live TUI")
+        XCTAssertEqual(try onDisk("middle")?.state, .done)
+        XCTAssertEqual(try onDisk("current")?.state, .done, "A newer session may have exited without SessionEnd")
+        XCTAssertEqual(SessionRecord.shortcutOrder(store.sessions, now: Date()).count, 3)
+
+        active = 0
+        store.reload()
+        XCTAssertEqual(try onDisk("old")?.state, .ended)
+        XCTAssertEqual(try onDisk("middle")?.state, .ended)
+        XCTAssertEqual(try onDisk("current")?.state, .ended, "The daemon survives after the last TUI exits")
+        XCTAssertTrue(SessionRecord.shortcutOrder(store.sessions, now: Date()).isEmpty)
+    }
+
+    @MainActor
     func testCompactingAndEndedNeverAlert() {
         func record(_ state: SessionRecord.State) -> SessionRecord {
             SessionRecord(sessionId: "a", state: state, cwd: "/tmp", title: nil, transcriptPath: "", message: nil, updatedAt: 1)
@@ -162,6 +211,7 @@ final class SessionResumeTests: XCTestCase {
     }
 
     func testCommandPerProviderWithQuoting() {
+        XCTAssertEqual(SessionResume.resumeCommand(for: record(provider: "claude", cwd: "/x")), "claude --resume 'abc-123'")
         XCTAssertEqual(SessionResume.command(for: record(provider: "claude", cwd: "/Users/me/my repo")),
                        "cd '/Users/me/my repo' && claude --resume 'abc-123'")
         XCTAssertEqual(SessionResume.command(for: record(provider: "codex", cwd: "/tmp/it's")),
@@ -170,6 +220,24 @@ final class SessionResumeTests: XCTestCase {
 
     func testAppleScriptStringEscapesQuotesAndBackslashes() {
         XCTAssertEqual(SessionResume.appleScriptString(#"cd "a\b""#), #""cd \"a\\b\"""#)
-        XCTAssertTrue(SessionResume.ghosttyScript("claude --resume 'x'").contains(#"set initial input of cfg to "claude --resume 'x'" & linefeed"#))
+    }
+
+    /// Ghostty 的 initial input 里不能有非 ASCII（它按字节转义再按码点解析，中文会二次编码），目录只能走 initial working directory。
+    func testGhosttyScriptKeepsDirectoryOutOfInitialInput() {
+        let script = SessionResume.ghosttyScript(cwd: "/Users/me/电脑壁纸", command: "claude --resume 'x'")
+        XCTAssertTrue(script.contains(#"set initial working directory of cfg to "/Users/me/电脑壁纸""#))
+        XCTAssertTrue(script.contains(#"set initial input of cfg to "claude --resume 'x'" & linefeed"#))
+        XCTAssertFalse(script.contains("cd "))
+    }
+
+    /// 目录没了就不开终端：Ghostty / tmux 拿到不存在的目录会退回默认目录再跑 resume，报的会是「找不到会话」。
+    @MainActor
+    func testRunRefusesMissingDirectory() async {
+        do {
+            try await SessionResume.run(record(provider: "claude", cwd: "/nonexistent/\(UUID().uuidString)"))
+            XCTFail("should throw before opening a terminal")
+        } catch {
+            XCTAssertEqual(error as? TerminalLocator.Failure, .directoryMissing)
+        }
     }
 }

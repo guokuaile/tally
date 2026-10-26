@@ -184,10 +184,10 @@ final class SessionTurnEndTests: XCTestCase {
     }
 
     /// 模拟 hook 写的状态文件 + 此刻的 transcript。
-    private func write(state: SessionRecord.State, provider: String = "claude", transcript lines: [String]) throws {
+    private func write(state: SessionRecord.State, provider: String = "claude", updatedAt: Double = 1, transcript lines: [String]) throws {
         try (lines.joined(separator: "\n") + "\n").write(to: transcript, atomically: true, encoding: .utf8)
         let record = SessionRecord(sessionId: "s1", provider: provider, pid: Int(ProcessInfo.processInfo.processIdentifier),
-                                   state: state, cwd: "/tmp/x", title: "t", transcriptPath: transcript.path, message: nil, updatedAt: 1)
+                                   state: state, cwd: "/tmp/x", title: "t", transcriptPath: transcript.path, message: nil, updatedAt: updatedAt)
         try JSONEncoder().encode(record).write(to: directory.appendingPathComponent("s1.json"))
     }
 
@@ -297,6 +297,64 @@ final class SessionTurnEndTests: XCTestCase {
         store.reload()
         XCTAssertEqual(store.sessions.first?.state, .done)
         XCTAssertTrue(alerts.isEmpty, "打断不弹")
+    }
+
+    @MainActor
+    func testDoneRecordShowsBackgroundWorkFromClaudeCodeStatus() throws {
+        // 主回合 Stop 写了 done，后台 agent 还在跑：Claude Code 的 status 留在 busy；只剩后台命令是 shell（docs/ai.md「后台还在跑」）
+        var alerts: [SessionRecord] = []
+        let store = makeStore()
+        store.sessionAlert = { alerts.append($0) }
+
+        try write(state: .running, transcript: [prompt])
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertNil(store.sessions.first?.backgroundWork, "忙着的记录不标：busy 是主回合自己")
+
+        try write(state: .done, transcript: [prompt])
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .done)
+        XCTAssertEqual(store.sessions.first?.backgroundWork, .agents)
+        XCTAssertEqual(alerts.count, 1, "完成提示只在 Stop 那次弹")
+
+        try writeClaudeStatus("shell")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.backgroundWork, .shells)
+
+        try writeClaudeStatus("idle")
+        store.reload()
+        XCTAssertNil(store.sessions.first?.backgroundWork, "后台的活干完了")
+        XCTAssertEqual(alerts.count, 1)
+
+        try writeClaudeStatus("busy", sessionId: "someone-else")
+        store.reload()
+        XCTAssertNil(store.sessions.first?.backgroundWork, "pid 被复用、sessionId 对不上不算")
+
+        try write(state: .done, provider: "codex", transcript: [prompt])
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertNil(store.sessions.first?.backgroundWork, "Codex 没有这种状态文件，碰巧同 pid 也不读")
+    }
+
+    @MainActor
+    func testFreshDoneDoesNotTrustStaleBusyAndInterruptRoundNeverLabels() throws {
+        // Stop 刚落地：上一回合的 busy 要等所有 Stop hook 跑完才换成 idle（本机实测 45 ms，门禁类 hook 能拖几秒），刚写的 done 读到 busy 不算
+        let store = makeStore()
+        try write(state: .done, updatedAt: Date().timeIntervalSince1970 * 1000, transcript: [prompt])
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertNil(store.sessions.first?.backgroundWork, "宽限期内的 busy 是上一回合的")
+
+        try writeClaudeStatus("shell")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.backgroundWork, .shells, "shell 是主回合空闲时才写的，当场算")
+
+        // 按 Esc 打断、下一句话刚发：app 按 transcript 补判成 done，这时的 busy 是新回合的，hook 的 running 马上就到
+        try write(state: .running, transcript: [prompt, interrupt])
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .done)
+        XCTAssertNil(store.sessions.first?.backgroundWork, "补判那轮不标，只认盘上已经是 done 的")
     }
 
     @MainActor

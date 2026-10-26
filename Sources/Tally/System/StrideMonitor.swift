@@ -28,6 +28,7 @@ final class StrideMonitor: NSObject {
     private var composedKey = ""
     private var appearanceObservation: NSKeyValueObservation?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var powerObserver: NSObjectProtocol?
     /// 屏幕睡了、切走了用户会话：停表，没人看的动画不画。
     private var paused = false
 
@@ -64,6 +65,11 @@ final class StrideMonitor: NSObject {
                 Task { @MainActor in self?.setPaused(pause) }
             }
         }
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.scheduleFrames() }
+        }
         // 采样和换帧分开：采样固定 2 秒，帧率跟着状态走。挂 .common，拖东西、开菜单时也照走
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.sample() }
@@ -86,6 +92,8 @@ final class StrideMonitor: NSObject {
         appearanceObservation = nil
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         workspaceObservers = []
+        if let powerObserver { NotificationCenter.default.removeObserver(powerObserver) }
+        powerObserver = nil
         NSStatusBar.system.removeStatusItem(item)
         self.item = nil
         frames = [:]
@@ -159,7 +167,8 @@ final class StrideMonitor: NSObject {
             frameTimer = nil
             return
         }
-        let interval = 1 / StrideRule.framesPerSecond(mood: mood, cpu: cpu ?? 0)
+        let interval = 1 / StrideRule.framesPerSecond(mood: mood, cpu: cpu ?? 0,
+                                                      lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
         if let frameTimer, abs(frameTimer.timeInterval - interval) < 0.001 { return }
         frameTimer?.invalidate()
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in

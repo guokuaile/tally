@@ -184,6 +184,18 @@ struct Peek: Equatable {
         return Peek(id: id, style: .shelf, tint: .mint, label: "放进文件架", title: title, subtitle: "展开面板到文件架取用")
     }
 
+    static func shelf(result: ShelfStore.AddResult, now: Date = Date()) -> Peek? {
+        guard !result.cancelled else { return nil }
+        if !result.failed.isEmpty {
+            return Peek(id: "shelf-error-\(UUID().uuidString)", style: .shelf, tint: .orange,
+                        label: result.stored.isEmpty ? "未能放进文件架" : "部分文件未收进",
+                        title: result.failed.joined(separator: "、"),
+                        subtitle: "成功 \(result.stored.count) 项，失败 \(result.failed.count) 项 · 展开文件架查看原因")
+        }
+        guard !result.stored.isEmpty else { return nil }
+        return shelf(names: result.stored, enabled: true, now: now)
+    }
+
     /// 电源文案：把电池当成一个会说话的小家伙。
     static func battery(_ event: BatteryEvent, now: Date = Date()) -> Peek {
         let id = "battery-\(Int(now.timeIntervalSince1970 * 1000))"
@@ -615,12 +627,18 @@ final class NotchController {
         // 演示模式不收也不弹「放进文件架」：文件架是编的，说放进去了却看不到
         guard !DemoMode.isOn else { return }
         let prefs = PreferencesStore.shared.prefs
-        let enabled = prefs.shelfEnabled
-        if kind != .screenshot || prefs.screenshotPeek {
-            showPeek(.shelf(names: urls.map(\.lastPathComponent), enabled: enabled))
+        guard prefs.shelfEnabled else {
+            if kind != .screenshot || prefs.screenshotPeek {
+                showPeek(.shelf(names: urls.map(\.lastPathComponent), enabled: false))
+            }
+            return
         }
-        guard enabled else { return }
-        Task { await ShelfStore.shared.add(urls: urls, kind: kind) }
+        Task { [weak self] in
+            let result = await ShelfStore.shared.add(urls: urls, kind: kind)
+            guard kind != .screenshot || PreferencesStore.shared.prefs.screenshotPeek,
+                  let peek = Peek.shelf(result: result) else { return }
+            self?.showPeek(peek)
+        }
     }
 
     /// 会话提示：那个会话的终端标签就在前台时不响也不弹（人正看着它）；不然按设置响一声，再垂提示条。

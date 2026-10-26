@@ -79,7 +79,8 @@ enum StrideRule {
 
     /// 每秒几帧：睡觉 2、生气 10；跑步和冲刺都是 8→10，随 CPU 在本档里的位置线性变快（内存顶上来的冲刺按 8）。
     /// 跑步原来从 4 起，一圈 8 帧要走 2 秒，看着像散步。封顶 10：Stride 实测菜单栏换图 10 fps 约 2% CPU。
-    static func framesPerSecond(mood: StrideMood, cpu: Double) -> Double {
+    static func framesPerSecond(mood: StrideMood, cpu: Double, lowPower: Bool = false) -> Double {
+        if lowPower { return 2 }
         func position(_ low: Double, _ high: Double) -> Double { min(max((cpu - low) / (high - low), 0), 1) }
         switch mood {
         case .sleep: return 2

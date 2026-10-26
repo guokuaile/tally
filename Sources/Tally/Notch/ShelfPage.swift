@@ -22,6 +22,15 @@ struct ShelfPage: View {
                     HeaderButton(symbol: "trash", help: "清空文件架") { store.clear() }
                 }
             }
+            if store.pendingAdds > 0 {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("正在收进文件架…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let failure = store.failure {
+                Text(failure).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            }
             if store.items.isEmpty {
                 // 拖放靶子给足高度：空着时只有一条细框，页矮得像残页，也不好拖中
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -54,20 +63,36 @@ private struct ShelfItemView: View {
     let item: ShelfItem
     var store: ShelfStore
     @State private var hovered = false
+    @State private var dragging = false
     @State private var box = ShelfDragBox()
 
     var body: some View {
         let url = store.fileURL(item)
+        let image = store.thumbnails[item.id]
+        let isImage = store.previewIDs.contains(item.id) && image != nil &&
+            (item.kind == .screenshot || UTType(filenameExtension: (item.name as NSString).pathExtension)?.conforms(to: .image) == true)
         VStack(spacing: 4) {
             Group {
-                if let image = store.thumbnails[item.id] {
+                if isImage, let image {
+                    GeometryReader { geometry in
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                    }
+                    .frame(height: 76)
+                } else if let image {
                     Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                        .frame(width: 44, height: 76)
                 } else {
                     Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable()
+                        .frame(width: 44, height: 44)
+                        .frame(height: 76)
                 }
             }
-            .frame(width: 44, height: 44)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .accessibilityHidden(true)
             Text(item.name)
                 .font(.system(size: 10))
                 .foregroundStyle(.white)
@@ -80,6 +105,11 @@ private struct ShelfItemView: View {
         .padding(6)
         .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(hovered ? 0.10 : 0.04)))
+        .scaleEffect(dragging ? 1.04 : hovered ? 1.02 : 1)
+        .shadow(color: .black.opacity(dragging || hovered ? 0.4 : 0.12), radius: dragging || hovered ? 9 : 2, y: dragging || hovered ? 4 : 1)
+        .zIndex(dragging ? 2 : hovered ? 1 : 0)
+        .animation(.easeOut(duration: 0.16), value: hovered)
+        .animation(.easeOut(duration: 0.16), value: dragging)
         .overlay(alignment: .topTrailing) {
             if hovered {
                 Button { store.remove(item) } label: {
@@ -93,7 +123,9 @@ private struct ShelfItemView: View {
         }
         .contentShape(Rectangle())
         // 拖出去交的是来源文件本身（来源没了才退回架上这份），所以 .move 之后只剩「把架上这份清掉」
-        .background(ShelfDragSource(url: store.cutURL(item), box: box) { store.remove(item) })
+        .background(ShelfDragSource(url: store.cutURL(item), preview: isImage ? image : nil, box: box,
+                                   onStarted: { dragging = true }, onEnded: { dragging = false },
+                                   onMoved: { store.remove(item) }))
         .onHover { hovered = $0 }
         .onTapGesture { NSWorkspace.shared.open(url) }
         // 拖放会话由 AppKit 起（见 ShelfDragSource），这里只负责「手按着动了」这一下；
@@ -133,7 +165,10 @@ private struct ShelfItemView: View {
 /// `.background` 里且不参与命中测试，点开、悬停、右键照旧归 SwiftUI，只借它当 `NSDraggingSource`。
 private struct ShelfDragSource: NSViewRepresentable {
     let url: URL
+    let preview: NSImage?
     let box: ShelfDragBox
+    let onStarted: () -> Void
+    let onEnded: () -> Void
     let onMoved: () -> Void
 
     func makeNSView(context: Context) -> ShelfDragSourceView {
@@ -145,6 +180,9 @@ private struct ShelfDragSource: NSViewRepresentable {
     func updateNSView(_ view: ShelfDragSourceView, context: Context) {
         box.view = view
         view.url = url
+        view.preview = preview
+        view.onStarted = onStarted
+        view.onEnded = onEnded
         view.onMoved = onMoved
     }
 }
@@ -156,6 +194,9 @@ private final class ShelfDragBox {
 
 private final class ShelfDragSourceView: NSView, NSDraggingSource {
     var url: URL?
+    var preview: NSImage?
+    var onStarted: (() -> Void)?
+    var onEnded: (() -> Void)?
     var onMoved: (() -> Void)?
     private var dragging = false
 
@@ -169,6 +210,7 @@ private final class ShelfDragSourceView: NSView, NSDraggingSource {
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         dragging = false
+        onEnded?()
         Log.debug("文件架拖出结束 operation=\(operation.rawValue)")
         guard operation == .move else { return }
         onMoved?()
@@ -183,9 +225,12 @@ private final class ShelfDragSourceView: NSView, NSDraggingSource {
             return
         }
         let item = NSDraggingItem(pasteboardWriter: url as NSURL)
-        item.setDraggingFrame(NSRect(x: bounds.midX - 22, y: bounds.midY - 22, width: 44, height: 44),
-                              contents: NSWorkspace.shared.icon(forFile: url.path))
+        let image = preview ?? NSWorkspace.shared.icon(forFile: url.path)
+        let side: CGFloat = preview == nil ? 44 : 76
+        item.setDraggingFrame(NSRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2, width: side, height: side),
+                              contents: image)
         dragging = true
+        onStarted?()
         beginDraggingSession(with: [item], event: event, source: self)
     }
 }

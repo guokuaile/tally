@@ -189,12 +189,16 @@ struct PanelSettings: View {
                         }
                     }
                 ))
+                .disabled(lid.busy)
                 Toggle("合盖不休眠的免密规则", isOn: Binding(
                     get: { lid.passwordless },
                     set: { on in
                         Task { _ = on ? await lid.installPasswordless() : await lid.removePasswordless() }
                     }
                 ))
+                .disabled(lid.busy)
+                if lid.busy { ProgressView().controlSize(.small) }
+                if let failure = lid.failure { Text(failure).font(.caption).foregroundStyle(.orange) }
                 Toggle("保持唤醒时屏幕也常亮", isOn: Binding(
                     get: { PreferencesStore.shared.prefs.keepAwakeDisplay },
                     set: { on in

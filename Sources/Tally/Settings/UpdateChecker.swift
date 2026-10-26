@@ -29,6 +29,7 @@ final class UpdateChecker {
     private let session: URLSession
     private let currentVersion: String
     private var timer: Timer?
+    private var generation = 0
 
     init(session: URLSession = URLSession(configuration: .ephemeral),
          currentVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0") {
@@ -39,6 +40,8 @@ final class UpdateChecker {
     /// 幂等：开着就保证有定时器并立刻查一次，关掉就停并清掉结果。
     func setEnabled(_ on: Bool) {
         guard on else {
+            generation += 1
+            checking = false
             timer?.invalidate()
             timer = nil
             available = nil
@@ -46,22 +49,33 @@ final class UpdateChecker {
             return
         }
         guard timer == nil else { return }
+        generation += 1
+        checking = false
+        let epoch = generation
         timer = Timer.scheduledTimer(withTimeInterval: Self.interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.check() }
+            Task { @MainActor in
+                guard let self, self.generation == epoch else { return }
+                await self.check()
+            }
         }
-        Task { await check() }
+        Task {
+            guard generation == epoch else { return }
+            await check()
+        }
     }
 
     func check() async {
         guard !checking else { return }
         checking = true
-        defer { checking = false }
+        let epoch = generation
+        defer { if generation == epoch { checking = false } }
         var request = URLRequest(url: Self.latestURL)
         request.timeoutInterval = 10
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Tally", forHTTPHeaderField: "User-Agent")
         do {
             let (data, response) = try await session.data(for: request)
+            guard generation == epoch else { return }
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             lastChecked = Date()
             switch status {
@@ -81,6 +95,7 @@ final class UpdateChecker {
                 problem = status == 403 || status == 429 ? "GitHub 限流了，过一会儿再查" : "检查新版本失败（HTTP \(status)）"
             }
         } catch {
+            guard generation == epoch else { return }
             problem = "检查新版本失败：\(error.localizedDescription)"
         }
     }

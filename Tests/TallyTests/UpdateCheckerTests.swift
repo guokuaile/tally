@@ -1,8 +1,106 @@
 import XCTest
 @testable import Tally
 
+private final class PendingReleaseProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var requests: [PendingReleaseProtocol] = []
+    static var count: Int { lock.withLock { requests.count } }
+    static func reset() { lock.withLock { requests = [] } }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { Self.lock.withLock { Self.requests.append(self) } }
+    override func stopLoading() {}
+
+    static func complete(_ index: Int, version: String? = nil) {
+        let instance = lock.withLock { requests[index] }
+        if let version {
+            let response = HTTPURLResponse(url: instance.request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            instance.client?.urlProtocol(instance, didReceive: response, cacheStoragePolicy: .notAllowed)
+            let body = Data(#"{"tag_name":"v\#(version)","html_url":"https://example.invalid/release"}"#.utf8)
+            instance.client?.urlProtocol(instance, didLoad: body)
+            instance.client?.urlProtocolDidFinishLoading(instance)
+        } else {
+            instance.client?.urlProtocol(instance, didFailWithError: URLError(.cannotConnectToHost))
+        }
+    }
+}
+
 /// 新版本提示（docs/hooks.md「发版与更新」）。
 final class UpdateCheckerTests: XCTestCase {
+
+    @MainActor
+    private func waitFor(_ condition: () -> Bool) async throws {
+        for _ in 0..<1000 {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        throw NSError(domain: "Timed out waiting for update request", code: 1)
+    }
+
+    @MainActor
+    func testDisableInvalidatesLateSuccessAndAllowsReenable() async throws {
+        PendingReleaseProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PendingReleaseProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let checker = UpdateChecker(session: session, currentVersion: "1.0.0")
+        var notified: [String] = []
+        checker.onNewVersion = { notified.append($0.version) }
+        checker.setEnabled(true)
+        try await waitFor { PendingReleaseProtocol.count == 1 }
+        checker.setEnabled(false)
+        XCTAssertFalse(checker.checking)
+        checker.setEnabled(true)
+        try await waitFor { PendingReleaseProtocol.count == 2 }
+        PendingReleaseProtocol.complete(1, version: "3.0.0")
+        try await waitFor { checker.available?.version == "3.0.0" }
+        PendingReleaseProtocol.complete(0, version: "2.0.0")
+        try await waitFor { !checker.checking }
+        XCTAssertEqual(checker.available?.version, "3.0.0")
+        XCTAssertEqual(notified, ["3.0.0"])
+        checker.setEnabled(false)
+    }
+
+    @MainActor
+    func testDisableInvalidatesLateError() async throws {
+        PendingReleaseProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PendingReleaseProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let checker = UpdateChecker(session: session, currentVersion: "1.0.0")
+        let request = Task { await checker.check() }
+        try await waitFor { PendingReleaseProtocol.count == 1 }
+        checker.setEnabled(false)
+        PendingReleaseProtocol.complete(0)
+        await request.value
+        XCTAssertNil(checker.problem)
+        XCTAssertNil(checker.lastChecked)
+        XCTAssertFalse(checker.checking)
+    }
+
+    @MainActor
+    func testDisableInvalidatesLateSuccess() async throws {
+        PendingReleaseProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [PendingReleaseProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let checker = UpdateChecker(session: session, currentVersion: "1.0.0")
+        var notifications = 0
+        checker.onNewVersion = { _ in notifications += 1 }
+        let request = Task { await checker.check() }
+        try await waitFor { PendingReleaseProtocol.count == 1 }
+        checker.setEnabled(false)
+        PendingReleaseProtocol.complete(0, version: "2.0.0")
+        await request.value
+        XCTAssertNil(checker.available)
+        XCTAssertNil(checker.lastChecked)
+        XCTAssertEqual(notifications, 0)
+        XCTAssertFalse(checker.checking)
+    }
 
     func testVersionComparison() {
         XCTAssertTrue(UpdateChecker.isNewer("v1.0.1", than: "1.0.0"))

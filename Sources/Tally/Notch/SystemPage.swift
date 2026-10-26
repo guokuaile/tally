@@ -212,7 +212,7 @@ private struct KeepAwakeCard: View {
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 pill("合盖也不休眠", on: lid.isActive) { toggleLid() }
-                    .disabled(authorizing)
+                    .disabled(authorizing || lid.busy)
                 pill("屏幕也常亮", on: preferences.prefs.keepAwakeDisplay) {
                     let on = !preferences.prefs.keepAwakeDisplay
                     preferences.prefs.keepAwakeDisplay = on
@@ -243,7 +243,7 @@ private struct KeepAwakeCard: View {
                         authorizing = true
                         Task { _ = await lid.clearResidue(); authorizing = false }
                     }
-                    .disabled(authorizing)
+                    .disabled(authorizing || lid.busy)
                 }
             }
         }
@@ -253,7 +253,7 @@ private struct KeepAwakeCard: View {
 
     private var customLabel: String { custom.map(KeepAwake.durationLabel) ?? "自定义" }
 
-    /// 开要一次管理员密码，关只是删个标记文件（看门狗几秒内抹回去），所以只有开这一路要转圈。
+    // Both directions wait for the system command before updating the toggle.
     private func toggleLid() {
         if lid.isActive {
             lid.disable()

@@ -34,12 +34,14 @@ struct ClaudeUsageProvider: UsageProvider {
         private let lock = NSLock()
         private var value: [ScopedLimit] = []
         private var nextFetch: Date = .distantPast
-        private var onUpdate: (([ScopedLimit]) -> Void)?
+        private var requestID = 0
+        private var owner: Int?
+        private var onUpdate: ((Int, [ScopedLimit]) -> Void)?
 
         init() {}
 
         /// 后台那次取到值时叫一声，界面立刻补上这条，不用等下一轮刷新（进程刚起来时差 5 分钟太久）。
-        func setOnUpdate(_ handler: @escaping ([ScopedLimit]) -> Void) {
+        func setOnUpdate(_ handler: @escaping (Int, [ScopedLimit]) -> Void) {
             lock.withLock { onUpdate = handler }
         }
 
@@ -47,25 +49,52 @@ struct ClaudeUsageProvider: UsageProvider {
             lock.withLock { now >= nextFetch }
         }
 
+        func beginRequest(owner: Int?) -> Int? {
+            lock.withLock {
+                guard owner == self.owner else { return nil }
+                requestID += 1
+                return requestID
+            }
+        }
+
+        func activateOwner(_ owner: Int) {
+            lock.withLock {
+                requestID += 1
+                self.owner = owner
+            }
+        }
+
+        func invalidateRequests() {
+            lock.withLock {
+                requestID += 1
+                owner = nil
+            }
+        }
+
+        func isCurrent(_ request: Int) -> Bool {
+            lock.withLock { request == requestID }
+        }
+
         /// value 为 nil 表示这一轮没拿到，只记尝试时间。
-        func record(_ value: [ScopedLimit]?, now: Date) {
-            let handler: (([ScopedLimit]) -> Void)?
+        func record(_ value: [ScopedLimit]?, now: Date, request: Int) {
+            let handler: ((Int, [ScopedLimit]) -> Void)?
             let latest: [ScopedLimit]
             (handler, latest) = lock.withLock {
+                guard request == requestID else { return (nil, self.value) }
                 nextFetch = now.addingTimeInterval(value == nil ? Self.retryInterval : Self.interval)
                 if let value { self.value = value }
                 return (onUpdate, self.value)
             }
-            if value != nil { handler?(latest) }
+            if value != nil, let handler { handler(request, latest) }
         }
 
         var current: [ScopedLimit] { lock.withLock { value } }
 
         /// 凭据换了人：盒子里那条是上一个账号的，扔掉并立刻重取。
-        /// 清之前发出去、清之后才回来的那次请求会把上一个账号的值写回来，最多挂到下一次取（10 分钟）。
-        /// 要撞上得是一次请求横跨两轮快照，而请求 10 秒超时、两轮至少隔 60 秒；真撞上了给 record 加轮次号。
-        func reset() {
+        func reset(owner: Int? = nil) {
             lock.withLock {
+                guard owner == self.owner else { return }
+                requestID += 1
                 value = []
                 nextFetch = .distantPast
             }
@@ -73,7 +102,10 @@ struct ClaudeUsageProvider: UsageProvider {
 
         /// 手动刷新：不等节流。值留着，取到再换——清掉的话每点一次那行都闪一下。
         func refetchNow() {
-            lock.withLock { nextFetch = .distantPast }
+            lock.withLock {
+                requestID += 1
+                nextFetch = .distantPast
+            }
         }
     }
 
@@ -84,6 +116,10 @@ struct ClaudeUsageProvider: UsageProvider {
     }
 
     func fetchSnapshot(now: Date) async throws -> UsageSnapshot {
+        try await fetchSnapshot(now: now, owner: nil)
+    }
+
+    func fetchSnapshot(now: Date, owner: Int?) async throws -> UsageSnapshot {
         guard FileManager.default.fileExists(atPath: root.path) else {
             throw UsageError.notFound("没找到 \(root.path)：没装 Claude Code，或 CLAUDE_CONFIG_DIR 指到了别处")
         }
@@ -91,32 +127,35 @@ struct ClaudeUsageProvider: UsageProvider {
         guard !files.isEmpty else { throw UsageError.notFound("No Claude usage logs found") }
         var snapshot = scan.aggregate(files: files, now: now)
         // 每轮都比一次，不能只在要问接口时才比：缓存新鲜时十分钟才问一次，切了账号那条窗口会挂着上一个账号的数
-        if quota.dropTokenIfCredentialsChanged() { scopedBox.reset() }
+        if quota.dropTokenIfCredentialsChanged() { scopedBox.reset(owner: owner) }
         let cache = limits.read(now: now)
         let live: ClaudeQuotaResult?
         if Self.cacheIsFresh(cache) {
             // 缓存够用，两条配额不等网络。那条按模型分的窗口只有接口有，扔后台取，下一轮刷新才用上：
             // 1 GB 日志本来就要解析好几秒，再串一个网络往返（代理抽风时更久）整行会一直「加载中」。
             live = nil
-            if scopedBox.needsFetch(now: now) {
+            if scopedBox.needsFetch(now: now), let request = scopedBox.beginRequest(owner: owner) {
                 let box = scopedBox
                 let client = quota
                 Task.detached(priority: .utility) {
                     if case .limits(let fetched) = await client.fetch(now: Date()) {
-                        box.record(fetched.scoped, now: Date())
+                        box.record(fetched.scoped, now: Date(), request: request)
                     } else {
-                        box.record(nil, now: Date())
+                        box.record(nil, now: Date(), request: request)
                     }
                 }
             }
         } else {
             // 缓存本来就得问接口，顺带把那条窗口一起收了
+            let request = scopedBox.beginRequest(owner: owner)
             let result = await quota.fetch(now: now)
             live = result
-            if case .limits(let fetched) = result {
-                scopedBox.record(fetched.scoped, now: now)
-            } else {
-                scopedBox.record(nil, now: now)
+            if let request {
+                if case .limits(let fetched) = result {
+                    scopedBox.record(fetched.scoped, now: now, request: request)
+                } else {
+                    scopedBox.record(nil, now: now, request: request)
+                }
             }
         }
         let resolved = Self.resolveLimits(cache: cache, live: live, now: now)

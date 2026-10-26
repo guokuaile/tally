@@ -68,7 +68,7 @@ Codex 侧删掉后，同一事件里排在 Tally 组后面的 hook 序号前移�
 
 ## 发版与更新
 
-发版（脚本只留在维护者本地）一次做完：编 app → 打 DMG → 以 `Tally.dmg` 为名传到公开仓库的 Release（tag `v<CFBundleShortVersionString>`，打在公开仓库 main 最新的提交上，所以先让公开仓库是这次要发的代码）→ 算 sha256，写进 `guokuaile/homebrew-tally` 的 `Casks/tally.rb` 推上去（仓库不存在就建）。版本号三段式；同一个 tag 发过就报错退出。
+发版（脚本只留在维护者本地）一次做完：版本号只在 `Resources/Info.plist` 一处，当前版本已经发过就自动抬一级（默认 patch，可传 `minor` / `major` / 具体版本号）并提交「版本抬到 x.y.z」，手动抬过还没发的直接用 → 推私有仓库 → 把 HEAD 的文件树以快照提交同步到公开仓库 main（不带私有历史）→ 编 app → 打 DMG → 以 `Tally.dmg` 为名传到公开仓库的 Release（tag `v<版本>`，打在公开仓库 main 最新的提交上）→ 算 sha256，写进 `guokuaile/homebrew-tally` 的 `Casks/tally.rb` 推上去（仓库不存在就建）→ 重装本机，不然本机跑的还是旧版本号，「检查新版本」会对着刚发的这版提示升级。只发已提交的代码，工作区不干净就退出；指定的版本已经发过也退出。
 
 - **资源名固定 `Tally.dmg`**：README 的下载按钮指着 `releases/latest/download/Tally.dmg`，GitHub 按资源名 302 到最新那个 Release。cask 的 url 却按 tag 钉死：指 latest 的话，下一次发版 sha256 就对不上。
 - **cask 装完清隔离标记**（`postflight_steps` 跑 `xattr -dr com.apple.quarantine`）：DMG 是 ad-hoc 签名、没公证，不清的话每次装、每次升级都要去系统设置点「仍要打开」（macOS 15 起右键打开那条路没了）。Homebrew 官方仓库不收这样的 cask（要求过 Gatekeeper），第三方 tap 可以，boring.notch 同样这么做；`--no-quarantine` 参数 Homebrew 6 起已经没有。
@@ -77,6 +77,8 @@ Codex 侧删掉后，同一事件里排在 Tally 组后面的 hook 序号前移�
 DMG 本身：Tally.app + Applications 快捷方式 + 「首次打开必读.txt」，强制重签成 ad-hoc（理由见 [panel.md](panel.md)「打包与安装」）。装好后在设置里点两个「安装」；首次点会话行弹终端自动化授权；查配额不弹钥匙串框（取值走 `/usr/bin/security`，理由见 `ai.md`）。GPL-3：发 DMG 的同时源码要能拿到，仓库公开即可。
 
 **新版本提示**（`UpdateChecker`，设置「通用 → 检查新版本」，默认开）：启动时和之后每 24 小时 `GET https://api.github.com/repos/guokuaile/tally/releases/latest`（不带 token，匿名额度一小时 60 次，远用不完），`tag_name` 去掉开头的 `v` 和 `-` / `+` 后缀、按点拆成整数补零逐段比，比 `CFBundleShortVersionString` 新就在设置「通用」显示一行、刘海垂一条「有新版本」（同一个版本只垂一次，记在 `Preferences.updateNotifiedVersion`）。有 `/opt/homebrew/Caskroom/tally`（或 `/usr/local/…`）就说 `brew upgrade --cask tally`，否则给 Release 页的「去下载」。404（还没发过版）不算失败；403 / 429 说限流；别的失败原因显示在设置里。只提示不替换：DMG 是 ad-hoc 签名，下载下来验不了真假，自动换掉等于替人跑一个没法验证的程序。
+
+关掉检查时立即清空显示并使正在进行的检查失效；旧请求随后成功或失败都不能回写或提示。再次开启会立即发起新检查，不受旧请求的 `checking` 状态阻挡，24 小时周期不变。
 
 ## 验证
 

@@ -265,3 +265,118 @@ final class PrivacyWatcherTests: XCTestCase {
         XCTAssertFalse(watcher.microphoneInUse)
     }
 }
+
+extension LidSleepBlockerTests {
+    @MainActor
+    func testFailedDisablePreservesActiveState() async {
+        let blocker = LidSleepBlocker(isActive: true, sleepCommand: { _ in false })
+        let success = await blocker.disable().value
+        XCTAssertFalse(success)
+        XCTAssertTrue(blocker.isActive, "Failed system command must not report a disabled state")
+        XCTAssertNotNil(blocker.failure)
+    }
+}
+
+private actor LidAuditGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    private(set) var sleepChanges: [Bool] = []
+    func record(_ on: Bool) { sleepChanges.append(on) }
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
+}
+
+extension LidSleepBlockerTests {
+    @MainActor
+    func testDisableQueuedDuringEnableWinsWithoutRestartingKeepAwake() async {
+        let gate = LidAuditGate()
+        let started = expectation(description: "system enable started")
+        var keptAwake = false
+        let blocker = LidSleepBlocker(sleepCommand: { on in
+            await gate.record(on)
+            if on { started.fulfill(); await gate.wait() }
+            return true
+        }, command: { _, _ in .init(stdout: Data(), stderr: Data(), timedOut: false, status: 0) },
+        keepAwake: { keptAwake = true })
+        let enabling = Task { await blocker.enable() }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(blocker.busy)
+        let disabling = blocker.disable()
+        await gate.release()
+        _ = await enabling.value
+        let success = await disabling.value
+        let changes = await gate.sleepChanges
+        XCTAssertTrue(success)
+        XCTAssertEqual(changes, [true, false])
+        XCTAssertFalse(blocker.isActive)
+        XCTAssertFalse(blocker.busy)
+        XCTAssertFalse(keptAwake, "A late enable must not restart an already stopped idle assertion")
+    }
+
+    @MainActor
+    func testRuleRemovalStopsWhenSleepRestorationFails() async {
+        let blocker = LidSleepBlocker(isActive: true, sleepCommand: { _ in false }, command: { _, _ in
+            XCTFail("Must not remove the permission needed for restoration")
+            return nil
+        }, authorize: { _ in XCTFail("Must not prompt after restoration failure"); return .failed })
+        let removed = await blocker.removePasswordless()
+        XCTAssertFalse(removed)
+        XCTAssertTrue(blocker.isActive)
+        XCTAssertNotNil(blocker.failure)
+    }
+
+    @MainActor
+    func testStartupProbeYieldsAndReportsUnreadableState() async {
+        let gate = LidAuditGate()
+        let started = expectation(description: "probe started")
+        let blocker = LidSleepBlocker(command: { _, arguments in
+            if arguments == ["-g"] {
+                started.fulfill()
+                await gate.wait()
+                return .init(stdout: Data(), stderr: Data(), timedOut: true, status: nil)
+            }
+            return .init(stdout: Data(), stderr: Data(), timedOut: false, status: 0)
+        })
+        let probe = blocker.checkResidue()
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(blocker.busy, "The main actor remains available while the command is suspended")
+        await gate.release()
+        let success = await probe.value
+        XCTAssertFalse(success)
+        XCTAssertNotNil(blocker.failure)
+        XCTAssertFalse(blocker.busy)
+    }
+
+    @MainActor
+    func testSuccessfulDisableOnlyClearsStateAfterCompletion() async {
+        let gate = LidAuditGate()
+        let started = expectation(description: "disable started")
+        let blocker = LidSleepBlocker(isActive: true, sleepCommand: { _ in
+            started.fulfill(); await gate.wait(); return true
+        })
+        let task = blocker.disable()
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(blocker.isActive)
+        await gate.release()
+        let success = await task.value
+        XCTAssertTrue(success)
+        XCTAssertFalse(blocker.isActive)
+        XCTAssertNil(blocker.failure)
+    }
+}
+
+extension LidSleepBlockerTests {
+    @MainActor
+    func testUnknownStartupStateCannotRemoveRecoveryPermission() async {
+        let blocker = LidSleepBlocker(sleepCommand: { _ in false }, command: { _, _ in nil },
+                                     authorize: { _ in XCTFail("Unknown sleep state must not remove recovery permissions"); return .ok })
+        let probed = await blocker.checkResidue().value
+        XCTAssertFalse(probed)
+        let removed = await blocker.removePasswordless()
+        XCTAssertFalse(removed)
+        XCTAssertNotNil(blocker.failure)
+    }
+}

@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Tally
 
@@ -41,6 +42,74 @@ final class ShelfStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testAutomaticScreenshotAndManualDropShareOneSource() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "shot.png")
+        for (index, order) in [[ShelfKind.screenshot, .file], [.file, .screenshot]].enumerated() {
+            let store = ShelfStore(directory: root.appendingPathComponent("shelf-\(index)"))
+            store.setEnabled(true)
+            await store.add(urls: [source], kind: order[0])
+            await store.add(urls: [source.resolvingSymlinksInPath()], kind: order[1])
+            XCTAssertEqual(store.items.count, 1, "同一来源的自动收录和手动拖入只保留一项")
+            XCTAssertEqual(store.items.first?.kind, .file, "手动拖入保留较长的文件时长")
+        }
+    }
+
+    @MainActor
+    func testAutomaticAndManualArrivalDuringCopyDoNotDuplicate() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "shot.png")
+        let store = ShelfStore(directory: root.appendingPathComponent("shelf"))
+        store.setEnabled(true)
+        async let automatic: ShelfStore.AddResult = store.add(urls: [source], kind: .screenshot)
+        async let manual: ShelfStore.AddResult = store.add(urls: [source.resolvingSymlinksInPath()], kind: .file)
+        _ = await (automatic, manual)
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertEqual(store.items.first?.kind, .file)
+    }
+
+    @MainActor
+    func testManualDropRefreshesRetentionFromItsOwnArrival() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "shot.png")
+        let shelf = root.appendingPathComponent("shelf")
+        try FileManager.default.createDirectory(at: shelf, withIntermediateDirectories: true)
+        let old = ShelfItem(id: "old", name: "shot.png", size: 5,
+                            addedAt: Date().addingTimeInterval(-300).timeIntervalSince1970 * 1000,
+                            source: source.path, kind: .screenshot)
+        try JSONEncoder().encode([old]).write(to: shelf.appendingPathComponent("index.json"))
+        let storedCopy = shelf.appendingPathComponent("files/old/shot.png")
+        try FileManager.default.createDirectory(at: storedCopy.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: source, to: storedCopy)
+        let store = ShelfStore(directory: shelf, retention: { (file: 60, screenshot: 3600) })
+        store.setEnabled(true)
+        await store.add(urls: [source], kind: .file)
+        let item = try XCTUnwrap(store.items.first)
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertEqual(item.kind, .file)
+        XCTAssertGreaterThan(ShelfStore.expiry(of: item, file: 60, screenshot: 3600), Date().addingTimeInterval(50))
+    }
+
+    @MainActor
+    func testChangedSourceIsCopiedAsNewManualVersion() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "shot.png")
+        let store = ShelfStore(directory: root.appendingPathComponent("shelf"))
+        store.setEnabled(true)
+        await store.add(urls: [source], kind: .screenshot)
+        try Data("new image".utf8).write(to: source)
+        await store.add(urls: [source], kind: .file)
+        XCTAssertEqual(store.items.count, 2, "同一路径更新后的内容必须保留新副本")
+        let current = try XCTUnwrap(store.items.first)
+        XCTAssertEqual(current.kind, .file)
+        XCTAssertEqual(try Data(contentsOf: store.fileURL(current)), Data("new image".utf8))
+    }
+
+    @MainActor
     func testDisabledHoldsNothingAndIgnoresAdds() async throws {
         let root = temp()
         let source = try sampleFile(root.appendingPathComponent("src"), "b.txt")
@@ -57,6 +126,33 @@ final class ShelfStoreTests: XCTestCase {
         XCTAssertTrue(store.items.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("shelf/index.json").path), "关掉不删磁盘上的东西")
         try? FileManager.default.removeItem(at: root)
+    }
+
+    @MainActor
+    func testPersistedFileIconDoesNotBecomeLargeImagePreview() throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let shelf = root.appendingPathComponent("shelf")
+        let thumbs = shelf.appendingPathComponent("thumbs")
+        try FileManager.default.createDirectory(at: thumbs, withIntermediateDirectories: true)
+        let items = ["preview", "icon"].map {
+            ShelfItem(id: $0, name: "\($0).png", size: 10, addedAt: Date().timeIntervalSince1970 * 1000,
+                      source: nil, kind: .file)
+        }
+        try JSONEncoder().encode(items).write(to: shelf.appendingPathComponent("index.json"))
+        let image = NSWorkspace.shared.icon(forFileType: "png")
+        let png = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation))?.representation(using: .png, properties: [:]))
+        for item in items {
+            try png.write(to: thumbs.appendingPathComponent(item.id + ".png"))
+            try item.id.write(to: thumbs.appendingPathComponent(item.id + ".kind"), atomically: true, encoding: .utf8)
+        }
+        let store = ShelfStore(directory: shelf)
+        store.setEnabled(true)
+        store.start()
+        XCTAssertEqual(store.thumbnails.count, 2)
+        XCTAssertEqual(store.previewIDs, ["preview"], "持久化的文件图标不能当内容预览放大")
+        store.stop()
+        XCTAssertTrue(store.previewIDs.isEmpty)
     }
 
     /// 截图和文件各按各的时长过期；老索引里没标种类的按文件算。
@@ -91,11 +187,12 @@ final class ShelfStoreTests: XCTestCase {
         let root = temp()
         defer { try? FileManager.default.removeItem(at: root) }
         let source = try sampleFile(root.appendingPathComponent("src"), "shot.png")
+        let otherSource = try sampleFile(root.appendingPathComponent("other-src"), "shot.png")
         let store = ShelfStore(directory: root.appendingPathComponent("shelf"), retention: { (file: 3600, screenshot: 0.3) })
         store.setEnabled(true)
         defer { store.setEnabled(false) }
         await store.add(urls: [source], kind: .screenshot)
-        await store.add(urls: [source])
+        await store.add(urls: [otherSource])
         XCTAssertEqual(store.items.count, 2)
         try await Task.sleep(nanoseconds: 1_800_000_000)
         XCTAssertEqual(store.items.map(\.kind), [.file], "截图到点清掉，文件还在")
@@ -155,5 +252,114 @@ final class ShelfStoreTests: XCTestCase {
         let trashed = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash/\(name)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: trashed.path), "不该往废纸篓里丢东西")
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+private actor ShelfAuditGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
+}
+
+extension ShelfStoreTests {
+    @MainActor
+    func testReadyFilesDoNotWaitForThumbnail() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "ready.txt")
+        let gate = ShelfAuditGate()
+        let started = expectation(description: "thumbnail started")
+        let finished = expectation(description: "file ready before thumbnail")
+        let store = ShelfStore(directory: root.appendingPathComponent("shelf"), thumbnail: { _ in
+            started.fulfill()
+            await gate.wait()
+            return (NSImage(data: Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=")!)!, false)
+        })
+        store.setEnabled(true)
+        let addition = Task { await store.add(urls: [source]); finished.fulfill() }
+        await fulfillment(of: [started], timeout: 2)
+        await fulfillment(of: [finished], timeout: 0.3)
+        XCTAssertEqual(store.items.count, 1, "Copied files must be usable before the preview arrives")
+        await gate.release()
+        _ = await addition.value
+        store.clear()
+    }
+
+    @MainActor
+    func testClearDiscardsAnInFlightCopy() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "late.txt")
+        let gate = ShelfAuditGate()
+        let started = expectation(description: "copy started")
+        let store = ShelfStore(directory: root.appendingPathComponent("shelf"), copy: { source, destination in
+            started.fulfill()
+            await gate.wait()
+            try FileManager.default.copyItem(at: source, to: destination)
+        })
+        store.setEnabled(true)
+        let addition = Task { await store.add(urls: [source]) }
+        await fulfillment(of: [started], timeout: 2)
+        store.clear()
+        await gate.release()
+        _ = await addition.value
+        XCTAssertTrue(store.items.isEmpty, "Clear must invalidate pending copies")
+        let contents = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("shelf/files").path)
+        XCTAssertTrue(contents.isEmpty)
+    }
+}
+
+extension ShelfStoreTests {
+    @MainActor
+    func testFailuresNeverProduceSuccessPeekOrOrphanCopy() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "kept.txt")
+        let store = ShelfStore(directory: root.appendingPathComponent("shelf"))
+        store.setEnabled(true)
+        let partial = await store.add(urls: [source, root.appendingPathComponent("missing.txt")])
+        XCTAssertEqual(partial.stored, ["kept.txt"])
+        XCTAssertEqual(partial.failed, ["missing.txt"])
+        XCTAssertEqual(Peek.shelf(result: partial)?.label, "部分文件未收进")
+        XCTAssertNotNil(store.failure)
+        store.clear()
+        let index = store.directory.appendingPathComponent("index.json")
+        try FileManager.default.removeItem(at: index)
+        try FileManager.default.createDirectory(at: index, withIntermediateDirectories: false)
+        let failedSave = await store.add(urls: [source])
+        XCTAssertTrue(failedSave.stored.isEmpty)
+        XCTAssertEqual(failedSave.failed, ["kept.txt"])
+        XCTAssertTrue(store.items.isEmpty)
+        XCTAssertEqual(Peek.shelf(result: failedSave)?.label, "未能放进文件架")
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.directory.appendingPathComponent("files").path).isEmpty)
+        XCTAssertNil(Peek.shelf(result: .init(cancelled: true)))
+    }
+
+    @MainActor
+    func testReenableDoesNotAcceptPreviousCopy() async throws {
+        let root = temp()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try sampleFile(root.appendingPathComponent("src"), "late.txt")
+        let gate = ShelfAuditGate()
+        let started = expectation(description: "copy started")
+        let store = ShelfStore(directory: root.appendingPathComponent("shelf"), copy: { source, destination in
+            started.fulfill()
+            await gate.wait()
+            try FileManager.default.copyItem(at: source, to: destination)
+        })
+        store.setEnabled(true)
+        let addition = Task { await store.add(urls: [source]) }
+        await fulfillment(of: [started], timeout: 2)
+        store.setEnabled(false)
+        store.setEnabled(true)
+        await gate.release()
+        let result = await addition.value
+        XCTAssertTrue(result.cancelled)
+        XCTAssertTrue(store.items.isEmpty)
+        XCTAssertEqual(store.pendingAdds, 0)
     }
 }

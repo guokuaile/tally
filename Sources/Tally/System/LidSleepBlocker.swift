@@ -35,101 +35,184 @@ final class LidSleepBlocker {
     /// 上一次失败的原因，界面上要说出来。人点取消不算失败，这里是 nil。
     /// 装规则要管理员账号，别人拿到这个 app 时最常见的失败就是这条，不说的话就是「点了没反应」。
     private(set) var failure: String?
+    private(set) var busy = false
+    private let sleepCommand: (@Sendable (Bool) async -> Bool)?
+    private let command: @Sendable (String, [String]) async -> Subprocess.Result?
+    private let authorize: @Sendable (String) async -> AuthResult
+    private let keepAwake: @MainActor () -> Void
+    private var pending: Task<Bool, Never>?
+    private var operationID = 0
+    private var sleepIntent = 0
+    private var stateKnown = false
 
-    // MARK: 开关
+    init(isActive: Bool = false, sleepCommand: (@Sendable (Bool) async -> Bool)? = nil,
+         command: (@Sendable (String, [String]) async -> Subprocess.Result?)? = nil,
+         authorize: (@Sendable (String) async -> AuthResult)? = nil,
+         keepAwake: (@MainActor () -> Void)? = nil) {
+        self.isActive = isActive
+        self.stateKnown = isActive
+        self.sleepCommand = sleepCommand
+        self.command = command ?? Self.run
+        self.authorize = authorize ?? Self.runAuthorized
+        self.keepAwake = keepAwake ?? {
+            if !KeepAwake.shared.isActive {
+                KeepAwake.shared.start(minutes: nil, keepDisplay: PreferencesStore.shared.prefs.keepAwakeDisplay)
+            }
+        }
+    }
 
-    /// 开：没装规则就先装（这一次要密码），然后置位。
-    /// 保持唤醒没开就一起开——`SleepDisabled` 只挡合盖，闲置休眠仍旧归断言管。
+    // Serialize system mutations; merely discarding an old callback cannot undo pmset.
+    private func enqueue(_ operation: @escaping @MainActor () async -> Bool) -> Task<Bool, Never> {
+        let previous = pending
+        operationID += 1
+        let id = operationID
+        busy = true
+        let task = Task { @MainActor in
+            if let previous { _ = await previous.value }
+            let result = await operation()
+            if id == self.operationID { self.pending = nil; self.busy = false }
+            return result
+        }
+        pending = task
+        return task
+    }
+
     func enable() async -> Bool {
-        failure = nil
-        // 演示模式只亮开关：装免密规则要弹管理员密码框（setDisableSleep 那边同样不跑 sudo）
-        if !passwordless, !DemoMode.isOn, !(await installPasswordless()) { return false }
-        guard Self.setDisableSleep(true) else {
-            refreshPasswordless()
-            failure = "pmset 没执行成功，免密规则可能被删了"
-            return false
-        }
-        if !KeepAwake.shared.isActive {
-            KeepAwake.shared.start(minutes: nil, keepDisplay: PreferencesStore.shared.prefs.keepAwakeDisplay)
-        }
-        isActive = true
-        residue = false
-        return true
+        sleepIntent += 1
+        let intent = sleepIntent
+        return await enqueue {
+            self.failure = nil
+            guard intent == self.sleepIntent else { return false }
+            if !DemoMode.isOn {
+                guard await self.refreshPasswordless() else { return false }
+                if !self.passwordless, !(await self.installRule()) { return false }
+            }
+            guard intent == self.sleepIntent else { return false }
+            guard await self.setSleep(true) else {
+                self.stateKnown = false
+                self.failure = "pmset 没执行成功，免密规则可能被删了"
+                return false
+            }
+            self.isActive = true
+            self.stateKnown = true
+            self.residue = false
+            if intent == self.sleepIntent { self.keepAwake() }
+            return intent == self.sleepIntent
+        }.value
     }
 
-    /// 关：立刻抹回去，不弹框。退出 app 时也走这里。
-    func disable() {
-        guard isActive else { return }
+    @discardableResult
+    func disable() -> Task<Bool, Never> {
+        sleepIntent += 1
+        return enqueue { await self.disableCurrent() }
+    }
+
+    private func disableCurrent() async -> Bool {
+        guard !stateKnown || isActive || residue else { return true }
+        guard await setSleep(false) else {
+            stateKnown = false
+            failure = "未能恢复合盖休眠，系统可能仍保持唤醒；请重试或检查免密规则"
+            return false
+        }
         isActive = false
-        _ = Self.setDisableSleep(false)
-    }
-
-    // MARK: 残留
-
-    /// 启动时读一次真实状态：是 1 而不是这一轮开的，就是上一轮被强杀 / 断电留下的。
-    /// 有免密就直接抹掉，没有就交给界面出一行橙字加「恢复」（那一下要密码）。
-    func checkResidue() {
-        refreshPasswordless()
-        guard !isActive, Self.readSleepDisabled() else { return }
-        if passwordless, Self.setDisableSleep(false) {
-            Log.debug("上一轮留下的合盖不休眠已抹掉")
-            return
-        }
-        residue = true
-    }
-
-    /// 界面上那颗「恢复」：没免密规则时要一次密码。
-    func clearResidue() async -> Bool {
-        guard await Self.runAuthorized("/usr/bin/pmset -a disablesleep 0") == .ok else { return false }
+        stateKnown = true
         residue = false
+        failure = nil
         return true
     }
 
-    // MARK: 免密规则
+    @discardableResult
+    func checkResidue() -> Task<Bool, Never> {
+        enqueue {
+            _ = await self.refreshPasswordless()
+            guard !self.isActive else { return true }
+            guard let result = await self.command("/usr/bin/pmset", ["-g"]),
+                  !result.timedOut, result.status == 0 else {
+                self.stateKnown = false
+                self.failure = "无法读取合盖休眠状态，请稍后重试"
+                return false
+            }
+            self.residue = Self.sleepDisabled(inPmsetOutput: String(decoding: result.stdout, as: UTF8.self))
+            self.stateKnown = true
+            guard self.residue, self.passwordless else { return true }
+            return await self.disableCurrent()
+        }
+    }
 
-    /// 装规则要一次密码。先写临时文件、`visudo -c` 验过语法再 `install` 到位——写坏 sudoers 会把整个 `sudo` 搞挂。
-    /// 规则里顺带放行「删掉这个文件自己」，撤销时就不用再输一次密码；放行删掉自己这条授权不扩大任何权限。
+    func clearResidue() async -> Bool {
+        sleepIntent += 1
+        return await enqueue {
+            switch await self.authorize("/usr/bin/pmset -a disablesleep 0") {
+            case .ok:
+                self.residue = false
+                self.isActive = false
+                self.stateKnown = true
+                self.failure = nil
+                return true
+            case .cancelled: return false
+            case .failed:
+                self.failure = "没能恢复合盖休眠：这一步要管理员账号"
+                return false
+            }
+        }.value
+    }
+
     func installPasswordless() async -> Bool {
+        await enqueue { await self.installRule() }.value
+    }
+
+    private func installRule() async -> Bool {
         failure = nil
-        switch await Self.runAuthorized(Self.sudoersInstallScript(user: NSUserName())) {
-        case .cancelled:
-            return false
+        switch await authorize(Self.sudoersInstallScript(user: NSUserName())) {
+        case .cancelled: return false
         case .failed:
             failure = "没能装上免密规则：这一步要管理员账号"
             return false
-        case .ok:
-            break
+        case .ok: break
         }
-        refreshPasswordless()
-        if !passwordless {
-            failure = "规则装上了却没生效：/etc/sudoers 里可能没有 @includedir /etc/sudoers.d"
-        }
+        guard await refreshPasswordless() else { return false }
+        if !passwordless { failure = "规则装上了却没生效：/etc/sudoers 里可能没有 @includedir /etc/sudoers.d" }
         return passwordless
     }
 
-    /// 撤销：先把开着的关掉，再删规则（规则自己允许免密删自己，删不动才退回要密码那条路）。
     func removePasswordless() async -> Bool {
-        disable()
-        if !Self.run("/usr/bin/sudo", ["-n", "/bin/rm", "-f", Self.sudoersPath]) {
-            guard await Self.runAuthorized("/bin/rm -f \(Self.sudoersPath)") == .ok else { return false }
+        sleepIntent += 1
+        return await enqueue {
+            guard await self.disableCurrent() else { return false }
+            if !(await self.succeeded("/usr/bin/sudo", ["-n", "/bin/rm", "-f", Self.sudoersPath])) {
+                switch await self.authorize("/bin/rm -f \(Self.sudoersPath)") {
+                case .ok: break
+                case .cancelled: return false
+                case .failed:
+                    self.failure = "没能撤销免密规则：这一步要管理员账号"
+                    return false
+                }
+            }
+            guard await self.refreshPasswordless() else { return false }
+            if self.passwordless { self.failure = "免密规则仍在生效，未能撤销" }
+            return !self.passwordless
+        }.value
+    }
+
+    private func refreshPasswordless() async -> Bool {
+        guard let result = await command("/usr/bin/sudo", ["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "1"]),
+              !result.timedOut, let status = result.status else {
+            failure = "无法确认免密规则状态，请稍后重试"
+            return false
         }
-        refreshPasswordless()
-        return !passwordless
+        passwordless = status == 0
+        return true
     }
 
-    func refreshPasswordless() {
-        passwordless = Self.run("/usr/bin/sudo", ["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "1"])
+    private func succeeded(_ path: String, _ arguments: [String]) async -> Bool {
+        guard let result = await command(path, arguments) else { return false }
+        return !result.timedOut && result.status == 0
     }
 
-    // MARK: 底下这几件
-
-    /// 免密置位 / 抹掉。命令必须和 sudoers 里写的逐字一致，否则免密不生效、静默失败。
-    private static func setDisableSleep(_ on: Bool) -> Bool {
-        // 演示模式当作成了：开关照亮、照灭，系统级的合盖设置一点不动
+    private func setSleep(_ on: Bool) async -> Bool {
         guard !DemoMode.isOn else { return true }
-        let ok = run("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", on ? "1" : "0"])
-        if !ok { Log.error("pmset -a disablesleep \(on ? 1 : 0) 没成功，免密规则可能不在了") }
-        return ok
+        if let sleepCommand { return await sleepCommand(on) }
+        return await succeeded("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", on ? "1" : "0"])
     }
 
     nonisolated static func sudoersInstallScript(user: String) -> String {
@@ -155,39 +238,15 @@ final class LidSleepBlocker {
         }
     }
 
-    private static func readSleepDisabled() -> Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        task.arguments = ["-g"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        do {
-            try task.run()
-        } catch {
-            Log.error("pmset -g 跑不起来: \(error.localizedDescription)")
-            return false
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        return sleepDisabled(inPmsetOutput: String(decoding: data, as: UTF8.self))
-    }
-
-    /// 跑一个命令，只关心成没成。输出全丢掉。
-    @discardableResult
-    private static func run(_ path: String, _ arguments: [String]) -> Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: path)
-        task.arguments = arguments
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-        } catch {
-            Log.error("\(path) 跑不起来: \(error.localizedDescription)")
-            return false
-        }
-        task.waitUntilExit()
-        return task.terminationStatus == 0
+    nonisolated private static func run(_ path: String, _ arguments: [String]) async -> Subprocess.Result? {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                return try Subprocess.run(URL(fileURLWithPath: path), arguments, deadline: 5)
+            } catch {
+                Log.error("休眠状态命令无法执行: \(error.localizedDescription)")
+                return nil
+            }
+        }.value
     }
 
     /// 脚本 base64 进 `do shell script`：AppleScript 那层字符串里只剩 base64 字符，不用套两层引号。
@@ -197,7 +256,7 @@ final class LidSleepBlocker {
     /// 密码框上写的才是「Tally 想要进行更改」；起 osascript 的话人看到的是「osascript 想要进行更改」，谁都不敢输。
     ///
     /// 只用来干**一次就结束**的事（装 / 删规则、抹残留）。别指望在这里面起长期进程：授权层退出时会把后台进程一起杀掉。
-    private static func runAuthorized(_ script: String) async -> AuthResult {
+    nonisolated private static func runAuthorized(_ script: String) async -> AuthResult {
         let encoded = Data(script.utf8).base64EncodedString()
         let source = "do shell script \"/bin/echo \(encoded) | /usr/bin/base64 -D | /bin/sh\" with administrator privileges"
         return await Task.detached(priority: .userInitiated) { () -> AuthResult in
@@ -213,5 +272,5 @@ final class LidSleepBlocker {
     }
 
     /// 取消和失败要分开：取消是人的选择，界面不该报错；失败得说出来，否则点了没反应没人知道为什么。
-    private enum AuthResult { case ok, cancelled, failed }
+    enum AuthResult: Sendable { case ok, cancelled, failed }
 }

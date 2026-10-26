@@ -18,7 +18,7 @@ struct ShelfItem: Codable, Identifiable, Equatable {
     let name: String
     let size: Int64
     /// 毫秒时间戳。
-    let addedAt: Double
+    var addedAt: Double
     /// 拖进来时的原路径，「剪切」靠它把来源文件也收走。老索引里没有这个键，解出来是 nil，那就只收架上这份。
     let source: String?
     /// 老索引里没有这个键，解出来是 nil，按文件算。
@@ -76,16 +76,34 @@ final class ShelfStore {
     private(set) var items: [ShelfItem] = []
     /// 只在这页可见时有内容。
     private(set) var thumbnails: [String: NSImage] = [:]
+    /// 缩略图可能是 QuickLook 内容预览，也可能是失败时的文件图标；大图卡片只用前者。
+    private(set) var previewIDs: Set<String> = []
     private(set) var enabled = false
     private var visible = false
+    private var generation = 0
+    private(set) var pendingAdds = 0
+    private(set) var failure: String?
+
+    struct AddResult {
+        var stored: [String] = []
+        var failed: [String] = []
+        var cancelled = false
+    }
     /// 文件和截图各保留多久（秒），设置里调；测试注入。
     private let retention: () -> (file: TimeInterval, screenshot: TimeInterval)
     /// 到最早那一件的过期时刻就清：原来只在打开这页时清，过了时间的副本可能在磁盘上多躺好几天。
     @ObservationIgnored private var purgeTimer: Timer?
+    @ObservationIgnored private var migratingThumbnails: Set<String> = []
+    private let makeThumbnail: @Sendable (URL) async -> (image: NSImage, isPreview: Bool)
+    private let copyFile: @Sendable (URL, URL) async throws -> Void
 
     init(directory: URL = PreferencesStore.directory.appendingPathComponent("shelf"),
-         retention: (() -> (file: TimeInterval, screenshot: TimeInterval))? = nil) {
+         retention: (() -> (file: TimeInterval, screenshot: TimeInterval))? = nil,
+         thumbnail: (@Sendable (URL) async -> (image: NSImage, isPreview: Bool))? = nil,
+         copy: (@Sendable (URL, URL) async throws -> Void)? = nil) {
         self.directory = directory
+        self.makeThumbnail = thumbnail ?? Self.thumbnail
+        self.copyFile = copy ?? { try FileManager.default.copyItem(at: $0, to: $1) }
         self.retention = retention ?? {
             let prefs = PreferencesStore.shared.prefs
             return (TimeInterval(prefs.shelfFileRetentionMinutes * 60), TimeInterval(prefs.shelfScreenshotRetentionMinutes * 60))
@@ -104,11 +122,17 @@ final class ShelfStore {
         thumbsDirectory.appendingPathComponent(item.id + ".png")
     }
 
+    private func thumbKindURL(_ item: ShelfItem) -> URL {
+        thumbsDirectory.appendingPathComponent(item.id + ".kind")
+    }
+
     // MARK: 起停
 
     /// 开：读索引、清过期；关：内存全放掉，磁盘上的文件不动（再开还在）。
     func setEnabled(_ on: Bool) {
         guard on != enabled else { return }
+        generation += 1
+        failure = nil
         enabled = on
         if on {
             try? FileManager.default.createDirectory(at: filesDirectory, withIntermediateDirectories: true)
@@ -120,6 +144,7 @@ final class ShelfStore {
             purgeTimer = nil
             items = []
             thumbnails = [:]
+            previewIDs = []
             visible = false
         }
     }
@@ -142,13 +167,45 @@ final class ShelfStore {
         }
         purgeExpired(now: Date())
         for item in items where thumbnails[item.id] == nil {
-            thumbnails[item.id] = NSImage(contentsOf: thumbURL(item))
+            thumbnails[item.id] = NSImage(contentsOf: thumbURL(item)) ?? NSWorkspace.shared.icon(for: UTType(filenameExtension: (item.name as NSString).pathExtension) ?? .data)
+            let kind = try? String(contentsOf: thumbKindURL(item), encoding: .utf8)
+            if kind == "preview" { previewIDs.insert(item.id) }
+            if kind == nil { generateThumbnail(for: item) }
+        }
+    }
+
+    private func generateThumbnail(for item: ShelfItem) {
+        guard !migratingThumbnails.contains(item.id) else { return }
+        migratingThumbnails.insert(item.id)
+        let pass = generation
+        let url = fileURL(item)
+        let makeThumbnail = self.makeThumbnail
+        Task { [weak self] in
+            let prepared = await Task.detached(priority: .utility) {
+                let result = await makeThumbnail(url)
+                return (image: result.image, png: Self.png(result.image), preview: result.isPreview)
+            }.value
+            guard let self else { return }
+            self.migratingThumbnails.remove(item.id)
+            guard self.enabled, self.generation == pass,
+                  self.items.contains(where: { $0.id == item.id }), let png = prepared.png else { return }
+            do {
+                try png.write(to: self.thumbURL(item), options: .atomic)
+                try Data((prepared.preview ? "preview" : "icon").utf8).write(to: self.thumbKindURL(item), options: .atomic)
+                if self.visible {
+                    self.thumbnails[item.id] = prepared.image
+                    if prepared.preview { self.previewIDs.insert(item.id) }
+                }
+            } catch {
+                Log.error("文件架缩略图保存失败: \(error.localizedDescription)")
+            }
         }
     }
 
     func stop() {
         visible = false
         thumbnails = [:]
+        previewIDs = []
     }
 
     /// 一件的过期时刻：截图按截图的时长，其余（含老索引里没标种类的）按文件的时长。
@@ -173,6 +230,7 @@ final class ShelfStore {
             for item in gone { deleteFiles(of: item) }
             items.removeAll { gone.contains($0) }
             for item in gone { thumbnails[item.id] = nil }
+            for item in gone { previewIDs.remove(item.id) }
             save()
         }
         schedulePurge()
@@ -192,40 +250,100 @@ final class ShelfStore {
 
     // MARK: 增删
 
-    /// 每个文件复制进自己的目录（同名也不冲突），复制在后台，缩略图用 QuickLook 生成落盘。`kind` 决定保留多久。
-    /// 演示模式不收：录屏时拖进来的是真文件。
-    func add(urls: [URL], kind: ShelfKind = .file) async {
-        guard enabled, !DemoMode.isOn else { return }
+    private nonisolated static func sourceKey(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// 同一来源跨自动/手动两种入口只留一项；人手动拖入时从现在起按文件时长保留。
+    private func alreadyStored(_ url: URL, kind: ShelfKind, pass: Int) async -> Bool {
+        let key = Self.sourceKey(url)
+        let candidates = items.filter {
+            ($0.kind ?? .file) != kind && $0.source.map { Self.sourceKey(URL(fileURLWithPath: $0)) } == key
+        }
+        for item in candidates {
+            let copy = fileURL(item)
+            let equal = await Task.detached(priority: .userInitiated) {
+                FileManager.default.contentsEqual(atPath: url.path, andPath: copy.path)
+            }.value
+            guard enabled, generation == pass else { return false }
+            guard equal, let index = items.firstIndex(where: { $0.id == item.id }) else { continue }
+            if kind == .file {
+                let previous = items[index]
+                items[index].kind = .file
+                items[index].addedAt = Date().timeIntervalSince1970 * 1000
+                guard save() else { items[index] = previous; return false }
+                schedulePurge()
+            }
+            return true
+        }
+        return false
+    }
+
+    // Readiness means the file and index are durable; preview generation is independent.
+    @discardableResult
+    func add(urls: [URL], kind: ShelfKind = .file) async -> AddResult {
+        guard enabled, !DemoMode.isOn else { return AddResult(cancelled: true) }
+        let pass = generation
+        pendingAdds += 1
+        failure = nil
+        defer { pendingAdds -= 1 }
+        var result = AddResult()
         for url in urls {
+            let existing = await alreadyStored(url, kind: kind, pass: pass)
+            guard enabled, generation == pass else { result.cancelled = true; break }
+            if existing { result.stored.append(url.lastPathComponent); continue }
             let item = ShelfItem(
-                id: UUID().uuidString,
-                name: url.lastPathComponent,
+                id: UUID().uuidString, name: url.lastPathComponent,
                 size: (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0,
-                addedAt: Date().timeIntervalSince1970 * 1000,
-                source: url.path,
-                kind: kind
+                addedAt: Date().timeIntervalSince1970 * 1000, source: url.path, kind: kind
             )
             let destination = fileURL(item)
-            let thumb = thumbURL(item)
-            let copied = await Task.detached(priority: .userInitiated) { () -> Bool in
+            let copyFile = self.copyFile
+            let problem = await Task.detached(priority: .userInitiated) { () -> String? in
                 do {
                     try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try FileManager.default.copyItem(at: url, to: destination)
-                } catch {
-                    Log.error("文件架复制失败 \(url.lastPathComponent): \(error.localizedDescription)")
-                    return false
-                }
-                if let image = await Self.thumbnail(for: destination), let png = Self.png(image) {
-                    try? png.write(to: thumb, options: .atomic)
-                }
-                return true
+                    try await copyFile(url, destination)
+                    return nil
+                } catch { return error.localizedDescription }
             }.value
-            guard copied, enabled else { continue }
+            guard enabled, generation == pass else {
+                deleteFiles(of: item)
+                result.cancelled = true
+                break
+            }
+            if let problem {
+                deleteFiles(of: item)
+                failure = "\(item.name)：\(problem)"
+                result.failed.append(item.name)
+                continue
+            }
+            let duplicated = await alreadyStored(url, kind: kind, pass: pass)
+            guard enabled, generation == pass else {
+                deleteFiles(of: item)
+                result.cancelled = true
+                break
+            }
+            if duplicated {
+                deleteFiles(of: item)
+                result.stored.append(item.name)
+                continue
+            }
             items.insert(item, at: 0)
-            if visible { thumbnails[item.id] = NSImage(contentsOf: thumb) }
+            guard save() else {
+                items.removeAll { $0.id == item.id }
+                deleteFiles(of: item)
+                failure = "\(item.name)：文件架索引保存失败，请检查存储空间和权限"
+                result.failed.append(item.name)
+                continue
+            }
+            result.stored.append(item.name)
+            if visible {
+                thumbnails[item.id] = NSWorkspace.shared.icon(for: UTType(filenameExtension: (item.name as NSString).pathExtension) ?? .data)
+            }
+            generateThumbnail(for: item)
         }
-        save()
         schedulePurge()
+        return result
     }
 
     /// 拖出去 / 移动时交出去的那个 URL：来源文件还在就交来源本身，不在了才退回架上这份副本。
@@ -260,15 +378,19 @@ final class ShelfStore {
         deleteFiles(of: item)
         items.removeAll { $0.id == item.id }
         thumbnails[item.id] = nil
+        previewIDs.remove(item.id)
         save()
         schedulePurge()
     }
 
     func clear() {
         guard !DemoMode.isOn else { return }
+        generation += 1
+        failure = nil
         for item in items { deleteFiles(of: item) }
         items = []
         thumbnails = [:]
+        previewIDs = []
         save()
         schedulePurge()
     }
@@ -276,28 +398,32 @@ final class ShelfStore {
     private func deleteFiles(of item: ShelfItem) {
         try? FileManager.default.removeItem(at: fileURL(item).deletingLastPathComponent())
         try? FileManager.default.removeItem(at: thumbURL(item))
+        try? FileManager.default.removeItem(at: thumbKindURL(item))
     }
 
-    private func save() {
+    @discardableResult
+    private func save() -> Bool {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(items).write(to: indexURL, options: .atomic)
+            return true
         } catch {
             Log.error("文件架索引写入失败: \(error.localizedDescription)")
+            return false
         }
     }
 
     // MARK: 缩略图与分享
 
     /// QuickLook 生成不了（没有预览器的类型）就用文件图标。
-    nonisolated private static func thumbnail(for url: URL) async -> NSImage? {
+    nonisolated private static func thumbnail(for url: URL) async -> (image: NSImage, isPreview: Bool) {
         let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 96, height: 96), scale: 2, representationTypes: .thumbnail)
         if let representation = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request) {
-            return representation.nsImage
+            return (representation.nsImage, true)
         }
-        return NSWorkspace.shared.icon(forFile: url.path)
+        return (NSWorkspace.shared.icon(forFile: url.path), false)
     }
 
     nonisolated private static func png(_ image: NSImage) -> Data? {

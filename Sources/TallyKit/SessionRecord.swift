@@ -33,6 +33,14 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     public var updatedAt: Double
     /// 会话在用的模型 id，如 `claude-opus-5`、`gpt-6-astra`；还不知道时为 nil。来源见 `HookRunner`。
     public var model: String?
+    /// 主回合结束后还在后台干活的东西：agent 类任务（Claude Code 的 status 是 busy）或后台命令（shell）。
+    /// app 每轮刷新从 Claude Code 自己的状态文件读出来放在内存里，不进 JSON，hook 不管它（docs/ai.md「后台还在跑」）。
+    public var backgroundWork: BackgroundWork?
+
+    public enum BackgroundWork {
+        case agents
+        case shells
+    }
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
@@ -204,15 +212,20 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         claudeHome(configDir: configDir).appendingPathComponent("sessions")
     }
 
-    /// Claude Code 自己维护的 `<pid>.json` 里 `status` 是 busy / waiting / idle：回合一结束就写 idle，
-    /// 打断和 API 报错（这两种不发 Stop）也写，等审批写 waiting。pid 会被系统复用，对上 sessionId 才算；
-    /// 没有文件或字段（老版本、桌面版托管的会话）按不是 idle 算。
-    public func claudeCodeReportsIdle(in directory: URL) -> Bool {
+    /// Claude Code 自己维护的 `<pid>.json` 里的 `status`：busy / shell / waiting / idle（docs/ai.md「打断与 API 报错」「后台还在跑」）。
+    /// pid 会被系统复用，对上 sessionId 才算；没有文件或字段（老版本、桌面版托管的会话）为 nil。
+    public func claudeCodeStatus(in directory: URL) -> String? {
         guard let pid,
               let data = try? Data(contentsOf: directory.appendingPathComponent("\(pid).json")),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return false }
-        return object["sessionId"] as? String == sessionId && object["status"] as? String == "idle"
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["sessionId"] as? String == sessionId
+        else { return nil }
+        return object["status"] as? String
+    }
+
+    /// 回合一结束就写 idle，打断和 API 报错（这两种不发 Stop）也写，等审批写 waiting。
+    public func claudeCodeReportsIdle(in directory: URL) -> Bool {
+        claudeCodeStatus(in: directory) == "idle"
     }
 
     /// 超过 24 小时没更新的文件该删。活着但一天没事件的会话也会被清，
