@@ -7,6 +7,7 @@ enum MihomoError: Error, Equatable {
     case badStatus(String)
     /// 连上了但对方一直不回：不设超时这条连接会永远挂着。
     case timeout
+    case incompleteResponse
 }
 
 /// 只读的 GET 接口，方便测试塞假实现。
@@ -116,8 +117,9 @@ final class MihomoClient: MihomoRequesting {
                     }
                 }
                 if isComplete {
-                    // 走到这里 body 自己的框定（Content-Length / chunked 结尾）还没说完，对端先关了：有记下的失败就按它报
-                    finish(peerFailure)
+                    // EOF 可能比失败回调先到，必须按 HTTP 框定判断是否收齐。
+                    finish(Self.eofError(headerParsed: headerParsed, contentLength: contentLength, bodyReceived: bodyReceived,
+                                         chunked: isChunked, chunkFinished: decoder.isFinished, transportError: peerFailure))
                     return
                 }
                 receive()
@@ -151,6 +153,14 @@ final class MihomoClient: MihomoRequesting {
             finish(MihomoError.timeout)
         }
         return conn
+    }
+
+    static func eofError(headerParsed: Bool, contentLength: Int?, bodyReceived: Int,
+                         chunked: Bool, chunkFinished: Bool, transportError: Error?) -> Error? {
+        guard headerParsed else { return transportError ?? MihomoError.incompleteResponse }
+        guard chunked || contentLength != nil else { return transportError }
+        let complete = chunked ? chunkFinished : bodyReceived >= contentLength!
+        return complete ? nil : transportError ?? MihomoError.incompleteResponse
     }
 
     private static func statusCode(in statusLine: String) -> Int? {

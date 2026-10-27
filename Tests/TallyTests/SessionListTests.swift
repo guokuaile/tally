@@ -20,12 +20,49 @@ final class SessionOrderTests: XCTestCase {
             record("permission", .waitingPermission, age: 20, now: now),
             record("stale", .running, age: 3 * 3600, now: now),
             record("done-old", .done, age: 400, now: now),
+            record("done-ancient", .done, age: 24 * 3600, now: now),
         ]
         XCTAssertEqual(SessionRecord.displayOrder(sessions, now: now).map(\.sessionId),
-                       ["permission", "ask", "compacting", "running-old", "done-new", "done-old", "stale", "ended-newest"])
+                       ["permission", "ask", "compacting", "running-old", "done-new", "done-old", "done-ancient", "stale", "ended-newest"])
         XCTAssertEqual(SessionRecord.shortcutOrder(sessions, now: now).map(\.sessionId),
-                       ["permission", "ask", "compacting", "running-old", "done-new", "done-old", "stale"],
+                       ["permission", "ask", "compacting", "running-old", "done-new", "done-old", "done-ancient", "stale"],
                        "⌘N 不数已关闭的：按到它会开新终端")
+    }
+
+    func testBackgroundWorkStaysWorkingUntilItFinishes() {
+        let now = Date()
+        for work in [SessionRecord.BackgroundWork.agents, .shells] {
+            var session = record("background", .done, age: 3 * 3600, now: now)
+            session.backgroundWork = work
+            XCTAssertEqual(session.group(now: now), .working)
+            XCTAssertFalse(session.isStale(now: now))
+            XCTAssertEqual(session.state, .done, "Grouping must not change the persisted hook state")
+            session.backgroundWork = nil
+            XCTAssertEqual(session.group(now: now), .recent)
+        }
+    }
+
+    func testBackgroundWorkAndShortcutOrderShareWorkingGroup() {
+        let now = Date()
+        var background = record("background", .done, age: 30, now: now)
+        background.backgroundWork = .agents
+        var ended = record("closed", .ended, age: 1, now: now)
+        ended.backgroundWork = .agents
+        var waiting = record("waiting", .waitingPermission, age: 90, now: now)
+        waiting.backgroundWork = .shells
+        let rows = [record("done", .done, age: 1, now: now), background, ended, waiting,
+                    record("running", .running, age: 10, now: now)]
+        XCTAssertEqual(SessionRecord.displayOrder(rows, now: now).map(\.sessionId),
+                       ["waiting", "running", "background", "done", "closed"])
+        XCTAssertEqual(SessionRecord.shortcutOrder(rows, now: now).map(\.sessionId),
+                       ["waiting", "running", "background", "done"])
+    }
+
+    func testStaleUnfinishedSessionsAreNotCompleted() {
+        let now = Date()
+        for state in [SessionRecord.State.running, .compacting, .waitingInput, .waitingPermission] {
+            XCTAssertEqual(record("stale", state, age: 3 * 3600, now: now).group(now: now), .stale)
+        }
     }
 
     func testCrowdedCWDsOnlyWhereADirectoryRepeats() {
@@ -45,7 +82,7 @@ final class SessionOrderTests: XCTestCase {
         XCTAssertEqual(record("a", .done, age: 0, now: now).group(now: now), .recent)
         XCTAssertEqual(record("a", .ended, age: 0, now: now).group(now: now), .closed, "已关闭单独一组")
         XCTAssertEqual(record("a", .ended, age: 3 * 3600, now: now).group(now: now), .closed)
-        XCTAssertEqual(record("a", .waitingInput, age: 3 * 3600, now: now).group(now: now), .recent, "失联的进最近")
+        XCTAssertEqual(record("a", .waitingInput, age: 3 * 3600, now: now).group(now: now), .stale, "Stale unfinished sessions have a separate group")
         XCTAssertFalse(record("a", .ended, age: 3 * 3600, now: now).isStale(now: now), "已关闭不算失联")
     }
 }

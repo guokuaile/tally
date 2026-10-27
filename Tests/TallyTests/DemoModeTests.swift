@@ -18,10 +18,10 @@ final class DemoModeTests: XCTestCase {
         XCTAssertFalse(DemoMode.isOn)
     }
 
-    func testSessionFixturesCoverEveryGroupAndNoneLooksStale() {
+    func testSessionFixturesCoverHealthyGroupsAndNoneLooksStale() {
         let now = Date()
         let sessions = DemoData.sessions(now: now)
-        XCTAssertEqual(Set(sessions.map { $0.group(now: now) }), Set(SessionRecord.Group.allCases))
+        XCTAssertEqual(Set(sessions.map { $0.group(now: now) }), Set([SessionRecord.Group.waiting, .working, .recent, .closed]))
         XCTAssertTrue(sessions.filter { $0.state != .ended }.allSatisfy { !$0.isStale(now: now) }, "没关闭的会话不该画成失联")
         XCTAssertTrue(sessions.compactMap(\.pid).allSatisfy { $0 > 99_999 }, "pid 不能落在 macOS 真进程的范围里")
         XCTAssertEqual(Set(sessions.map(\.sessionId)).count, sessions.count)

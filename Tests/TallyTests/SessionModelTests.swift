@@ -365,15 +365,18 @@ final class SessionTurnEndTests: XCTestCase {
         store.reload()
         XCTAssertEqual(store.sessions.first?.state, .done)
         XCTAssertEqual(store.sessions.first?.backgroundWork, .agents)
+        XCTAssertEqual(store.sessions.first?.group(now: Date()), .working)
         XCTAssertEqual(alerts.count, 1, "完成提示只在 Stop 那次弹")
 
         try writeClaudeStatus("shell")
         store.reload()
         XCTAssertEqual(store.sessions.first?.backgroundWork, .shells)
+        XCTAssertEqual(store.sessions.first?.group(now: Date()), .working)
 
         try writeClaudeStatus("idle")
         store.reload()
         XCTAssertNil(store.sessions.first?.backgroundWork, "后台的活干完了")
+        XCTAssertEqual(store.sessions.first?.group(now: Date()), .recent)
         XCTAssertEqual(alerts.count, 1)
 
         try writeClaudeStatus("busy", sessionId: "someone-else")

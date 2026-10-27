@@ -130,6 +130,31 @@ final class MihomoClientTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 2)
     }
 
+    func testEOFBeforeFailureCallbackRejectsIncompleteFraming() {
+        XCTAssertEqual(MihomoClient.eofError(headerParsed: false, contentLength: nil, bodyReceived: 0,
+                                            chunked: false, chunkFinished: false, transportError: nil) as? MihomoError, .incompleteResponse)
+        XCTAssertEqual(MihomoClient.eofError(headerParsed: true, contentLength: 100, bodyReceived: 8,
+                                            chunked: false, chunkFinished: false, transportError: nil) as? MihomoError, .incompleteResponse)
+        XCTAssertEqual(MihomoClient.eofError(headerParsed: true, contentLength: nil, bodyReceived: 8,
+                                            chunked: true, chunkFinished: false, transportError: nil) as? MihomoError, .incompleteResponse)
+    }
+
+    func testEOFKeepsCompleteAndCloseDelimitedResponsesSuccessful() {
+        XCTAssertNil(MihomoClient.eofError(headerParsed: true, contentLength: 8, bodyReceived: 8,
+                                          chunked: false, chunkFinished: false, transportError: MihomoError.notRunning))
+        XCTAssertNil(MihomoClient.eofError(headerParsed: true, contentLength: nil, bodyReceived: 8,
+                                          chunked: true, chunkFinished: true, transportError: MihomoError.notRunning))
+        XCTAssertNil(MihomoClient.eofError(headerParsed: true, contentLength: nil, bodyReceived: 8,
+                                          chunked: false, chunkFinished: false, transportError: nil))
+        XCTAssertEqual(MihomoClient.eofError(headerParsed: true, contentLength: 100, bodyReceived: 8,
+                                            chunked: false, chunkFinished: false, transportError: MihomoError.timeout) as? MihomoError, .timeout)
+    }
+
+    func testCloseDelimitedResponsePreservesTransportFailure() {
+        XCTAssertEqual(MihomoClient.eofError(headerParsed: true, contentLength: nil, bodyReceived: 8,
+                                            chunked: false, chunkFinished: false, transportError: MihomoError.notRunning) as? MihomoError, .notRunning)
+    }
+
     func testNon2xxIsAnErrorWithoutLines() throws {
         let result = try run("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
         XCTAssertEqual(result.lines, [])

@@ -53,7 +53,7 @@
 `--demo`（`DemoMode.isOn`，和别的启动参数同一套 `LaunchOptions.parse`，进程里只算一次）：给 README 截图和 GIF 用，每一页都换成编出来的数据，真会话、项目目录、花费、IP、在跑的 app、文件一样都不露。假数据全在 `Sources/Tally/Demo/DemoData.swift`；各 store 在 `shared` 或 `start()` 里认它，读写真数据的路一律不走。
 
 - **设置只在内存里**（`PreferencesStore(inMemory:)`）：不读也不写 `preferences.json`，录屏时拨的开关退出就没了。在默认值上改几项：截屏时不隐藏面板（开着截出来是空的）、不查新版本、不弹电池提示、不自动收新截图、没有刘海屏时不发系统通知（会去要授权）、文件架开、菜单栏小恐龙开（它只读整机 CPU 和内存，是真数据，和系统页的假内存对不上，接受）、不画摄像头 / 麦克风占用点（那是真设备状态）、多开 DeepSeek、启动页 AI。
-- **AI 页**：七个会话——等审批「给订单列表加分页」、等输入「迁移 CI 到 GitHub Actions」、在跑两个、跑完一个、已关闭两个；目录在 `/Users/demo/code/` 下，pid 从 999999 起（macOS 的 pid 到不了），没关闭的都在两小时内动过、不画成失联。`SessionStore` 的两个目录指到不存在的临时路径，`start()` 直接赋值：不碰会话目录，也不碰 `ClaudeHome`（它要问登录 shell、读心跳文件）。用量换成 `DemoUsageProvider`：Claude（Max，今日 $12.40 · 1.8M，本周 $86.10，5 小时 42%、7 天 61% 配速线橙、Fable 周窗口 23%）、Codex（Pro，5 小时 18%、7 天 35%，今日 $4.20）、DeepSeek（余额 ¥128.50）；会话条数和用量家数刚好让 AI 页放进面板最高高度（屏高六成），再多一行底部就被裁；数字固定，重置时刻按每轮刷新的 `now` 往后算，配额条不会过期消失。不扫日志、不读扫描缓存与 429 退避文件、不碰钥匙串和凭据文件、不调接口。
+- **AI 页**：七个会话——等审批「给订单列表加分页」、等输入「迁移 CI 到 GitHub Actions」、在跑两个、跑完一个、已关闭两个；目录在 `/Users/demo/code/` 下，pid 从 999999 起（macOS 的 pid 到不了），没关闭的都在两小时内动过、不画成失联。`SessionStore` 的两个目录指到不存在的临时路径，`start()` 直接赋值：不碰会话目录，也不碰 `ClaudeHome`（它要问登录 shell、读心跳文件）。用量换成 `DemoUsageProvider`：Claude（Max，今日 $12.40 · 1.8M，本周 $86.10，5 小时 42%、7 天 61% 配速线橙、Fable 周窗口 23%）、Codex（Pro，5 小时 18%、7 天 35%，今日 $4.20）、DeepSeek（余额 ¥128.50）；内容超过面板最高高度（屏高六成）时可纵向滚动查看；数字固定，重置时刻按每轮刷新的 `now` 往后算，配额条不会过期消失。不扫日志、不读扫描缓存与 429 退避文件、不碰钥匙串和凭据文件、不调接口。
 - **网络页**：Wi-Fi en0 −48 dBm，本机 192.0.2.24、网关 192.0.2.1（文档专用段 192.0.2.0/24），DNS 1.1.1.1、8.8.8.8；速率每秒按几条正弦叠出一个点（下行 1–6 MB/s、上行 100–600 KB/s），定时器挂在 `rateTimer` 上照常随收起停，每次开页先补满 60 秒曲线；不画代理卡片：截图要放进公开的 README，不放代理软件与节点名。刷新按钮不动：重拉会换上真网卡。
 - **系统页**：Apple M4 Pro（10 性能 + 4 能效）48 GB、CPU 23%、内存 58% 正常、电池 87% 放电 · 最大容量 96%、内存大户 Xcode / Safari / Claude、废纸篓 12 项 1.3 GB；不起采样定时器，刷新按钮跟着不动。
 - **应用页**：七个系统自带 app（Safari、邮件、音乐、备忘录、日历、预览、终端），图标按 `/System/Applications` 与 `/Applications/Safari.app` 取，内存是编的；不起定时器。
@@ -87,7 +87,7 @@ open -a Tally --args --demo --open network    # 静态截图：钉住展开到�
 
 四个来源：
 
-- 会话事件（`SessionStore.sessionAlert`，判定见 [ai.md](ai.md) 的「提示」）：跑完一个回合是绿勾 +「Claude」「Codex」，标题是会话标题，副标题是回合最后一句话的开头（`message` 为空就是「跑完了 · 点这里跳过去」；API 报错结束的回合是那句报错，按 Esc 打断的不弹，见 [ai.md](ai.md)「打断与 API 报错」），停留时长按设置里的「会话提示停留」（默认 5 秒）；进入等审批 / 等输入是橙叹号 / 黄问号 +「等审批」「等输入」，副标题「Claude 在等你点一下 · 点这里跳过去」，比跑完多留 `Peek.askExtra`（3 秒）——真要人来的那种该多给点时间。
+- 会话事件（`SessionStore.sessionAlert`，判定见 [ai.md](ai.md) 的「提示」）：跑完一个回合是 bloub 原版眨眼动画 +「Claude」「Codex」，标题是会话标题，副标题是回合最后一句话的开头（`message` 为空就是「跑完了 · 点这里跳过去」；API 报错结束的回合是那句报错，按 Esc 打断的不弹，见 [ai.md](ai.md)「打断与 API 报错」），停留时长按设置里的「会话提示停留」（默认 5 秒）；进入等审批 / 等输入是 bloub 感叹号变化 / 通知动画 +「等审批」「等输入」，副标题「Claude 在等你点一下 · 点这里跳过去」，比跑完多留 `Peek.askExtra`（3 秒）——真要人来的那种该多给点时间。
 - 电池事件（[monitors.md](monitors.md)）：接电、拔电、低电、充满各一种图标与文案，停留时长按设置里的「电池提示停留」（默认 3 秒）。
 - 配额事件（[ai.md](ai.md)「配额提醒」）：涨过 80% 是橙色仪表 +「配额 80%」、用完是红三角 +「配额用完」、重置是绿色循环箭头 +「配额重置」，标题「Claude · 5 小时」，副标题是用量与重置时刻；不可点，停留时长跟会话提示走。设置「提示 → 配额提醒」可关。
 - 文件架（[shelf.md](shelf.md)「从命令行放进来」）：`open -a Tally <文件>` 放进来时是薄荷绿托盘 +「放进文件架」，标题是文件名（多个是「N 个文件」）；文件架关着是橙色「文件架没开」。不可点，停留时长跟电池提示走。自动收进来的截图也弹这一条，设置「文件架 → 收进截图时提示」关掉就不弹。
@@ -97,9 +97,9 @@ open -a Tally --args --demo --open network    # 静态截图：钉住展开到�
 - **那个会话的终端标签就在前台时，不响也不弹**：人正看着它，提示给不了新信息（vibe-notch、CodeIsland 的做法）。先比前台 app 是不是会话的终端，是才去问标签：Ghostty 取 `id of focused terminal of selected tab of front window`，和 `GhosttyMatch` 挑出的那个终端比；Terminal 取 `tty of selected tab of front window`、iTerm 取 `tty of current session of current window`，和记录里的 tty 比。问之前用 `AEDeterminePermissionToAutomateTarget`（`askUserIfNeeded = false`）确认已经有自动化授权，没有就当不在前台——不能为了一条提示去弹授权框。tmux、编辑器和别的终端判不到标签，照常提示。
 - **提示音**：跑完放 `Glass`，等审批 / 等输入放 `Ping`（`/System/Library/Sounds`）。走 `AVAudioPlayer` 不走 `NSSound`：系统设置里关掉「播放用户界面音效」后 `NSSound` 不出声（codenotch 踩过）。面板展开时和提示条一样不响；配额和电池提示不响。设置「提示 → 提示音」可关，默认开。2 秒内连着来的只响第一声（`AlertSound.shouldPlay`）：几个会话前后脚跑完不该叮叮叮一串（CodeIsland 的做法）。
 
-入场动效（`PeekContent` / `PeekIcon`，全是 SwiftUI 自带的动画与符号动效，`peek.id` 一变视图重建、动画重放）：图标块从中心用欠阻尼弹簧弹出，同时向外扩一圈同色涟漪；标题行从刘海底下往下滑出，副标题晚 0.1 s 跟上。图标按 `style` 各有动作：会话完成先画满圆环再从左到右画勾，勾画完从中心撒一把十二片彩纸（角度距离按序号定，不用随机数）；接电闪电向上弹一下并持续脉动；拔电插头往下弹一下；低电电池脉动加轻晃；充满电池弹一下、右上角撒一颗星。电源文案见 [monitors.md](monitors.md)。
+入场动效（`PeekContent` / `PeekIcon`，全是 SwiftUI 自带的动画与符号动效，`peek.id` 一变视图重建、动画重放）：图标块从中心用欠阻尼弹簧弹出，同时向外扩一圈同色涟漪；标题行从刘海底下往下滑出，副标题晚 0.1 s 跟上。图标按 `style` 各有动作：会话完成用 bloub 原版眨眼动作、等审批 / 等输入用原引擎的感叹号与通知动作，和 AI 会话行共用无方底、近黑反光主体与青蓝紫粉光圈的 `SessionEyes`；不再画勾和彩纸。系统「减少动态效果」时这些会话图标保持静态；会话图标的出现只淡入，不额外缩放或扩散涟漪；接电闪电向上弹一下并持续脉动；拔电插头往下弹一下；低电电池脉动加轻晃；充满电池弹一下、右上角撒一颗星。电源文案见 [monitors.md](monitors.md)。
 
-到时收回（时长 `Peek.duration(session:battery:)`，两个秒数在设置里调，2 到 30 秒）；期间又来一条按优先级排（`Peek.priority`，`PeekQueue` 纯函数）：等审批 / 等输入 > 跑完 > 配额、文件架 > 电池。比正挂着的高、或是同一个会话的新状态，就换成新的并重新计时；一样高或更低的排到它收回之后接着垂（队里只留一条，留优先级高的，一样高留新的）——不然一条电池提示能把「等输入」顶掉；一样高也排，是因为两个会话前后脚都在等审批时，后来的顶掉先来的，先来的就再没人提醒了。展开面板、点提示条时队里那条一起丢掉：人已经在看了；电池类的鼠标进来照旧悬停展开、提示随之消失，会话类的要等它到期（见上）。面板展开时不弹（会话那一行已经变成绿勾或橙叹号）。提示条比刘海宽出去的部分会盖住紧挨刘海的一点菜单栏，不做 Atoll 那种量菜单位置再避让。
+到时收回（时长 `Peek.duration(session:battery:)`，两个秒数在设置里调，2 到 30 秒）；期间又来一条按优先级排（`Peek.priority`，`PeekQueue` 纯函数）：等审批 / 等输入 > 跑完 > 配额、文件架 > 电池。比正挂着的高、或是同一个会话的新状态，就换成新的并重新计时；一样高或更低的排到它收回之后接着垂（队里只留一条，留优先级高的，一样高留新的）——不然一条电池提示能把「等输入」顶掉；一样高也排，是因为两个会话前后脚都在等审批时，后来的顶掉先来的，先来的就再没人提醒了。展开面板、点提示条时队里那条一起丢掉：人已经在看了；电池类的鼠标进来照旧悬停展开、提示随之消失，会话类的要等它到期（见上）。面板展开时不弹（会话那一行已经变换眼睛表情）。提示条比刘海宽出去的部分会盖住紧挨刘海的一点菜单栏，不做 Atoll 那种量菜单位置再避让。
 
 ## 页签与手势
 
@@ -147,7 +147,7 @@ open -a Tally --args --demo --open network    # 静态截图：钉住展开到�
 
 `Package.swift`：swift-tools 6.0，macOS 15，三个目标（`TallyKit` 共用库、`Tally` app、`TallyHook` hook 小程序）加测试目标，全部 `swiftLanguageMode(.v5)`。签名身份由 `TALLY_SIGN_IDENTITY` 决定，默认「Tally Dev」；钥匙串里没有这张证书就报错退出，不退回 ad-hoc：ad-hoc 每次编译都是一个新的代码身份，「允许 Tally 控制 <终端>」这类按身份记的授权会全部作废，重装一次就重新问一次。证书是自签的代码签名证书（钥匙串访问 → 证书助理 → 创建证书，自签名根 + 代码签名），叫别的名字就 `export TALLY_SIGN_IDENTITY="证书名"`。有了固定身份，授权跨重装有效（designated requirement 从「二进制哈希」变成「证书指纹」，`codesign -d -r-` 能看到）。证书不必设信任：`codesign` 照样能用它签，我们要的只是一个不变的身份。分发的 DMG 强制重签成 ad-hoc——自签证书在别人机器上不受信任，验不过会被报「已损坏」，比 ad-hoc 的「无法验证开发者」更吓人；对方装一次之后授权同样记得住。
 
-打包时组装 `Tally.app`（`Contents/MacOS/Tally` 与 `tally-hook`、`Info.plist`、`AppIcon.icns`、`pricing.json` 与各资源目录），用上面的身份签名；本机安装时编译并装进 `/Applications`、清 quarantine、接管旧实例、把 LaunchAgent 指到新位置；分发时另打镜像。`Info.plist`：`LSUIElement = true`（无 Dock 图标）、`CFBundleIdentifier = com.aiden.tally`、`NSAppleEventsUsageDescription`（定位终端要 Apple Events）。
+打包时组装 `Tally.app`（`Contents/MacOS/Tally` 与 `tally-hook`、`Info.plist`、`AppIcon.icns`、`pricing.json` 与各资源目录，含将 `Resources/bloub/frames.json`、`LICENSE` 到 `Contents/Resources/bloub/`；本机 `scripts/build-app.sh` 已包含这些步骤，`scripts/` 被 Git 忽略，其他打包入口也须带上该资源目录），用上面的身份签名；本机安装时编译并装进 `/Applications`、清 quarantine、接管旧实例、把 LaunchAgent 指到新位置；分发时另打镜像。`Info.plist`：`LSUIElement = true`（无 Dock 图标）、`CFBundleIdentifier = com.aiden.tally`、`NSAppleEventsUsageDescription`（定位终端要 Apple Events）。
 
 ## 验证
 

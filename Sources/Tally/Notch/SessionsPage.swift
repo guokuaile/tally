@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 会话列表：分「等你 / 在跑 / 最近」三组，一行一个会话，点行跳回它的终端。
+/// 会话列表：分「等你 / 在跑 / 完成 / 失联」四组，一行一个会话，点行跳回它的终端。
 /// 已关闭的在会话卡片的另一页（`showingClosed`）：只列已关闭的，点行尾「接着聊」才开新终端。
 struct SessionsPage: View {
     var store = SessionStore.shared
@@ -59,7 +59,8 @@ private struct GroupHeader: View {
         switch group {
         case .waiting: return "等你"
         case .working: return "在跑"
-        case .recent: return "最近"
+        case .recent: return "完成"
+        case .stale: return "失联"
         case .closed: return "已关闭"
         }
     }
@@ -100,7 +101,7 @@ struct SessionRow: View {
 
     private func content(stale: Bool, ended: Bool) -> some View {
             HStack(spacing: 8) {
-                StateIcon(state: session.state, stale: stale, backgroundWork: session.backgroundWork != nil)
+                StateIcon(state: session.state, stale: stale, backgroundWork: session.backgroundWork != nil, identity: session.sessionId)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
                         // 从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上
@@ -249,40 +250,46 @@ struct RowTag: View {
     }
 }
 
-/// 状态图标：等审批橙、等输入黄、忙灰、压缩中青、完成绿（主回合完了后台还有活是绿色虚线圆：在跑的形状、完成的颜色）、失联灰、已关闭灰。
+/// 状态语义保留在辅助功能文本中，不依赖颜色或动画。
 struct StateIcon: View {
     let state: SessionRecord.State
     let stale: Bool
     let backgroundWork: Bool
+    var identity = ""
+    @State private var visible = false
 
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 13))
-            .foregroundStyle(color)
-            .frame(width: 16)
+        SessionEyes(mood: mood, identity: identity, active: visible)
+            .accessibilityHidden(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(label)
+            .help(label)
+            .onScrollVisibilityChange(threshold: 0.05) { visible = $0 }
     }
 
-    private var symbol: String {
-        if stale { return "wifi.slash" }
+    private var mood: SessionEyes.Mood {
+        if stale { return .stale }
         switch state {
-        case .waitingPermission: return "exclamationmark.circle.fill"
-        case .waitingInput: return "questionmark.circle.fill"
-        case .running: return "circle.dotted"
-        case .compacting: return "arrow.triangle.2.circlepath"
-        case .done: return backgroundWork ? "circle.dotted" : "checkmark.circle.fill"
-        case .ended: return "arrow.uturn.backward.circle"
+        case .waitingPermission: return .permission
+        case .waitingInput: return .input
+        case .running: return .working
+        case .compacting: return .compacting
+        case .done: return backgroundWork ? .working : .happy
+        case .ended: return .sleeping
         }
     }
 
-    private var color: Color {
-        if stale { return .gray }
+    private var label: String {
+        if stale { return "失联" }
         switch state {
-        case .waitingPermission: return .orange
-        case .waitingInput: return .yellow
-        case .running: return .gray
-        case .compacting: return .cyan
-        case .done: return .green
-        case .ended: return .gray
+        case .waitingPermission: return "等审批"
+        case .waitingInput: return "等输入"
+        case .running: return "正在工作"
+        case .compacting: return "压缩上下文中"
+        case .done: return backgroundWork ? "主回合已结束，后台仍在工作" : "已完成"
+        case .ended: return "已关闭"
         }
     }
+
+
 }

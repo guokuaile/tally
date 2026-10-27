@@ -65,3 +65,8 @@ MediaRemote、stdout 出 JSON、stdin 收命令、stdin 关闭即退出）参考
   Copyright (c) 2025, Jonas van den Berg and contributors
 
 Claude、OpenAI、Cursor、Antigravity、DeepSeek、Kimi、智谱 GLM / Z.ai 的名称与标志归各自所有者，放在这里只用来标明是哪家的会话与用量。
+
+会话表情矢量数据改编自 jeremy-prt/bloub，版本 b4bb3c1b5f93c7b87a2e8d620f667c4093d97749：
+https://github.com/jeremy-prt/bloub
+Copyright (c) 2026 Jérémy Perret，MIT License，全文保留于 Resources/bloub/LICENSE 并随应用打包。
+原始身体轮廓、形变、旋转、前后轨道、粒子、通知和眼神均由上游引擎采样；Tally 选择对应会话状态的原版动作序列。

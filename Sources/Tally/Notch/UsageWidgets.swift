@@ -27,47 +27,74 @@ enum QuotaPace {
     }
 }
 
-/// 一条配额：标签、条、整数百分比（缓存陈旧时加「~」）、重置时刻。紧凑到一行能放两条。
-/// 给了窗口长度就在条上画配速线：窗口时间过去了多少就画在哪儿，领先 10 个百分点以上变橙。
+/// 数字独立于动画，轨道只表达从左到右的已用比例。
 struct QuotaBar: View {
     let label: String
     let limit: UsageLimit
     let stale: Bool
     let now: Date
     var window: TimeInterval? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var percent: String { "\(Int((limit.fraction * 100).rounded()))%\(stale ? "~" : "")" }
+    private var elapsed: Double? { QuotaPace.elapsedFraction(resetsAt: limit.resetsAt, window: window, now: now) }
 
     var body: some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(0.5))
-                .frame(width: 36, alignment: .leading)
-                .lineLimit(1)
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.15))
-                    Capsule()
-                        .fill(quotaColor(limit.fraction))
-                        .frame(width: max(4, geometry.size.width * min(1, limit.fraction)))
-                    if let elapsed = QuotaPace.elapsedFraction(resetsAt: limit.resetsAt, window: window, now: now) {
-                        Rectangle()
-                            .fill(QuotaPace.isAhead(used: limit.fraction, elapsed: elapsed) ? Color.orange : Color.white.opacity(0.75))
-                            .frame(width: 1.5, height: 10)
-                            .offset(x: geometry.size.width * elapsed - 0.75)
+        VStack(spacing: 3) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 5) {
+                    windowLabel.fixedSize()
+                    amountLabel
+                    Spacer(minLength: 2)
+                    resetLabel
+                }
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(spacing: 5) {
+                        windowLabel
+                        Spacer(minLength: 2)
+                        amountLabel
                     }
+                    resetLabel
                 }
             }
-            .frame(width: 50, height: 6)
-            Text("\(Int((limit.fraction * 100).rounded()))%\(stale ? "~" : "")")
-                .font(.metric(11, .medium))
-                .foregroundStyle(.white.opacity(0.85))
-                .frame(width: 32, alignment: .trailing)
-            Text(ResetLabel.text(for: limit.resetsAt, now: now, style: .short) ?? "")
-                .font(.system(size: 9).monospacedDigit())
-                .foregroundStyle(.white.opacity(0.45))
-                .frame(width: 58, alignment: .leading)
-                .lineLimit(1)
+            UsageTrack(fraction: limit.fraction, elapsed: elapsed, paused: stale || reduceMotion)
+                .accessibilityHidden(true)
         }
+        .help("已用量从左向右增长，100% 填满后停止流光。刻线是时间配速。" + (stale ? "当前为缓存读数。" : ""))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(accessibilitySummary)
+    }
+
+    private var windowLabel: some View {
+        Text(label)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(.white.opacity(0.65))
+            .lineLimit(1)
+    }
+
+    private var amountLabel: some View {
+        Text("已用 " + percent)
+            .font(.metric(10, .medium))
+            .foregroundStyle(quotaColor(limit.fraction))
+            .fixedSize()
+    }
+
+    private var resetLabel: some View {
+        Text(ResetLabel.text(for: limit.resetsAt, now: now, style: .short) ?? "")
+            .font(.system(size: 9).monospacedDigit())
+            .foregroundStyle(.white.opacity(0.45))
+            .fixedSize()
+    }
+
+    private var accessibilitySummary: String {
+        var parts = ["已用 " + percent]
+        if stale { parts.append("缓存读数") }
+        if let reset = ResetLabel.text(for: limit.resetsAt, now: now) { parts.append(reset) }
+        if let elapsed {
+            parts.append(QuotaPace.isAhead(used: limit.fraction, elapsed: elapsed) ? "用量快于时间配速" : "用量在时间配速内")
+        }
+        return parts.joined(separator: "，")
     }
 }
 

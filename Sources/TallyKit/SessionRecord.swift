@@ -144,24 +144,23 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         state != .done && state != .ended && now.timeIntervalSince(updatedDate) > 2 * 3600
     }
 
-    /// 会话列表的四组，按原始值从小到大排。已关闭的单独一组放最后、默认折叠：点它会开一个新终端接着聊，
-    /// 混在「最近」里离跑完的会话一行之隔，容易误触。
+    /// Group order keeps active work first, then completed and stale records; closed sessions are on their own page.
     public enum Group: Int, CaseIterable {
-        case waiting, working, recent, closed
+        case waiting, working, recent, stale, closed
     }
 
     public func group(now: Date) -> Group {
         if state == .ended { return .closed }
-        if isStale(now: now) { return .recent }
+        if isStale(now: now) { return .stale }
         switch state {
         case .waitingPermission, .waitingInput: return .waiting
         case .running, .compacting: return .working
-        case .done: return .recent
+        case .done: return backgroundWork == nil ? .recent : .working
         case .ended: return .closed
         }
     }
 
-    /// 列表的显示顺序：等你 → 在跑 → 最近 → 已关闭，组内按 updated_at 倒序。
+    /// 列表的显示顺序：等你 → 在跑 → 完成 → 失联 → 已关闭，组内按 updated_at 倒序。
     public static func displayOrder(_ sessions: [SessionRecord], now: Date) -> [SessionRecord] {
         sessions.sorted { a, b in
             let ga = a.group(now: now), gb = b.group(now: now)

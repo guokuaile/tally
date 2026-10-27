@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 「AI」页：上半是会话卡片，下半是各家用量的单行条卡片。
+/// Stack quota windows so labels, exact percentages and reset times stay readable.
 struct AIPage: View {
     var store = SessionStore.shared
     var usage = UsageStore.shared
@@ -43,7 +43,7 @@ struct ClosedPageToggle: View {
     }
 }
 
-/// 每个已开启的提供方一行：名字与费用、两条配额（带重置时刻）。
+/// 名字与费用固定在左侧，便于对照多个配额窗口。
 struct UsageStrip: View {
     var usage: UsageStore
 
@@ -70,27 +70,8 @@ struct UsageStripRow: View {
     let provider: ProviderID
     let result: UsageResult
     let now: Date
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            main
-            // 按模型分的周窗口（Fable 那条）另起一行，和上面的名字列对齐：一行放不下三条
-            if case .success(let snapshot) = result, case let scopedLimits = snapshot.scopedLimits.filter({ !$0.limit.isExpired(at: now) }),
-               !scopedLimits.isEmpty {
-                HStack(spacing: 8) {
-                    Color.clear.frame(width: 150, height: 1)
-                    ForEach(scopedLimits, id: \.label) { scoped in
-                        QuotaBar(label: scoped.label, limit: scoped.limit, stale: snapshot.limitsStale, now: now, window: provider.limitWindows.week)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .padding(.vertical, 2)
-    }
-
-    private var main: some View {
-        HStack(alignment: .center, spacing: 8) {
+        HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
                     ProviderLogo(name: provider.logoName)
@@ -111,31 +92,38 @@ struct UsageStripRow: View {
                     UsageFigures(today: snapshot.today, week: snapshot.week)
                 }
             }
-            .frame(width: 150, alignment: .leading)
+            .frame(width: 132, alignment: .leading)
 
-            switch result {
-            case .loading:
-                Text("加载中").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
-                Spacer()
-            case .failure(let message):
-                Text(message).font(.system(size: 10)).foregroundStyle(.red).lineLimit(1)
-                Spacer()
-            case .success(let snapshot):
-                // 过了重置时间的窗口不画：下一轮刷新之前那几分钟，手里的百分比说的还是上一个窗口
-                if let limit = snapshot.sessionLimit, !limit.isExpired(at: now) {
-                    QuotaBar(label: provider.stripLabels.session, limit: limit, stale: snapshot.limitsStale, now: now, window: provider.limitWindows.session)
+            VStack(alignment: .leading, spacing: 5) {
+                switch result {
+                case .loading:
+                    Text("加载中").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
+                case .failure(let message):
+                    Text(message).font(.system(size: 10)).foregroundStyle(.red).lineLimit(2)
+                case .success(let snapshot):
+                    if let limit = snapshot.sessionLimit, !limit.isExpired(at: now) {
+                        QuotaBar(label: provider.stripLabels.session, limit: limit, stale: snapshot.limitsStale, now: now, window: provider.limitWindows.session)
+                    }
+                    let totalWeek = snapshot.weekLimit.map { [ScopedLimit(label: provider.stripLabels.week, limit: $0)] } ?? []
+                    let weekly = (provider == .claude ? snapshot.scopedLimits + totalWeek : totalWeek + snapshot.scopedLimits)
+                        .filter { !$0.limit.isExpired(at: now) }
+                    let columns = provider == .claude && weekly.count > 1 ? 2 : 1
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: columns), alignment: .leading, spacing: 5) {
+                        ForEach(Array(weekly.enumerated()), id: \.offset) { _, scoped in
+                            QuotaBar(label: scoped.label, limit: scoped.limit, stale: snapshot.limitsStale, now: now, window: provider.limitWindows.week)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    ForEach(Array(snapshot.balances.enumerated()), id: \.offset) { _, balance in
+                        BalanceLabel(balance: balance)
+                    }
+                    if let note = snapshot.limitsNote {
+                        Text(note).font(.system(size: 9)).foregroundStyle(.red).lineLimit(2)
+                    }
                 }
-                if let limit = snapshot.weekLimit, !limit.isExpired(at: now) {
-                    QuotaBar(label: provider.stripLabels.week, limit: limit, stale: snapshot.limitsStale, now: now, window: provider.limitWindows.week)
-                }
-                ForEach(Array(snapshot.balances.enumerated()), id: \.offset) { _, balance in
-                    BalanceLabel(balance: balance)
-                }
-                if let note = snapshot.limitsNote {
-                    Text(note).font(.system(size: 9)).foregroundStyle(.red).lineLimit(1)
-                }
-                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.vertical, 5)
     }
 }

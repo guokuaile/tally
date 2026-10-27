@@ -355,44 +355,43 @@ struct PeekContent: View {
     }
 }
 
-/// 提示条左边的图标：着色圆角块 + 一圈涟漪，里面按类型动——
-/// 会话完成先画圆环再勾一下、随后撒一把彩纸；接电闪电向上弹再脉动；拔电插头往下弹；低电脉动加轻晃；充满弹一下并撒星星。
+/// 提示和会话行共用表情，避免同一状态出现两套视觉含义。
 private struct PeekIcon: View {
     let peek: Peek
     let appeared: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(peek.tint.opacity(0.4))
-                .frame(width: 24, height: 24)
-                .scaleEffect(appeared ? 2.6 : 0.5)
-                .opacity(appeared ? 0 : 0.9)
-                .animation(.easeOut(duration: 0.8).delay(0.1), value: appeared)
-            if peek.style == .session {
-                Confetti(appeared: appeared)
+            if !reduceMotion && peek.style != .session && peek.style != .ask {
+                Circle()
+                    .fill(peek.tint.opacity(0.4))
+                    .frame(width: 24, height: 24)
+                    .scaleEffect(appeared ? 2.6 : 0.5)
+                    .opacity(appeared ? 0 : 0.9)
+                    .animation(.easeOut(duration: 0.8).delay(0.1), value: appeared)
             }
-            RoundedRectangle(cornerRadius: 7)
-                .fill(peek.tint.opacity(0.16))
-                .frame(width: 24, height: 24)
+            if peek.style != .session && peek.style != .ask {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(peek.tint.opacity(0.16))
+                    .frame(width: 24, height: 24)
+            }
             glyph
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(peek.tint)
         }
         .frame(width: 24, height: 24)
-        .scaleEffect(appeared ? 1 : 0.3)
-        .animation(.spring(response: 0.42, dampingFraction: 0.55), value: appeared)
+        .scaleEffect(reduceMotion || appeared || peek.style == .session || peek.style == .ask ? 1 : 0.3)
+        .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.55), value: appeared)
     }
 
     @ViewBuilder
     private var glyph: some View {
         switch peek.style {
         case .session:
-            CheckRing(tint: peek.tint, appeared: appeared)
+            SessionEyes(mood: .happy, identity: peek.sessionId ?? "", size: 28)
         case .ask:
-            Image(systemName: peek.label == "等输入" ? "questionmark" : "exclamationmark")
-                .symbolEffect(.bounce, options: .nonRepeating, value: appeared)
-                .symbolEffect(.pulse, options: .repeating.speed(1.2))
+            SessionEyes(mood: peek.label == "等输入" ? .input : .permission, identity: peek.sessionId ?? "", size: 28)
         case .pluggedIn:
             Image(systemName: "bolt.fill")
                 .symbolEffect(.bounce.up, options: .nonRepeating, value: appeared)
@@ -432,61 +431,6 @@ private struct PeekIcon: View {
                     .animation(.spring(response: 0.5, dampingFraction: 0.5).delay(0.3), value: appeared)
             }
         }
-    }
-}
-
-/// 会话完成的勾：圆环先画满（0.35 s），再把勾从左到右画出来。
-private struct CheckRing: View {
-    let tint: Color
-    let appeared: Bool
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .trim(from: 0, to: appeared ? 1 : 0)
-                .stroke(tint, style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.easeOut(duration: 0.35).delay(0.1), value: appeared)
-            CheckShape()
-                .trim(from: 0, to: appeared ? 1 : 0)
-                .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .animation(.easeOut(duration: 0.25).delay(0.4), value: appeared)
-        }
-        .frame(width: 15, height: 15)
-    }
-}
-
-/// 一把彩纸：十二片小纸片从图标中心飞出、边转边淡，勾画完之后才撒。角度和距离按序号定，不用随机数，每次一样好看。
-private struct Confetti: View {
-    let appeared: Bool
-    private static let colors: [Color] = [.green, .yellow, .orange, .pink, .cyan, .mint]
-
-    var body: some View {
-        ZStack {
-            ForEach(0..<12, id: \.self) { index in
-                let angle = Double(index) * 30 + (index.isMultiple(of: 2) ? 8 : -8)
-                let distance: CGFloat = index.isMultiple(of: 3) ? 30 : 22
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(Self.colors[index % Self.colors.count])
-                    .frame(width: 4, height: index.isMultiple(of: 2) ? 6 : 4)
-                    .rotationEffect(.degrees(appeared ? angle * 3 : 0))
-                    .offset(x: appeared ? cos(angle * .pi / 180) * distance : 0,
-                            y: appeared ? sin(angle * .pi / 180) * distance : 0)
-                    .opacity(appeared ? 0 : 1)
-                    .animation(.easeOut(duration: 0.9).delay(0.55 + Double(index) * 0.02), value: appeared)
-            }
-        }
-    }
-}
-
-/// 一个勾的折线，按单位矩形定点。
-private struct CheckShape: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.minX + rect.width * 0.24, y: rect.minY + rect.height * 0.54))
-        path.addLine(to: CGPoint(x: rect.minX + rect.width * 0.44, y: rect.minY + rect.height * 0.72))
-        path.addLine(to: CGPoint(x: rect.minX + rect.width * 0.78, y: rect.minY + rect.height * 0.32))
-        return path
     }
 }
 
