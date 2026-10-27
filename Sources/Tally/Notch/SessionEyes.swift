@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Decode complete upstream geometry once; animation only selects a cached frame.
 struct BloubArt {
+    enum ExpressionSymbol: String, Decodable { case approval = "!", question = "?" }
     struct Fill { let path: Path; let shading: GraphicsContext.Shading; let opacity: Double }
     struct Arc { let front: Path; let back: Path; let shading: GraphicsContext.Shading; let width: Double; let opacity: Double }
     struct Frame {
@@ -13,8 +14,17 @@ struct BloubArt {
         let arcs: [Arc]
         let notch: Path?
         let notif: Path?
+        let symbol: ExpressionSymbol?
+        let symbolY: Double
 
-        func draw(in context: GraphicsContext, time: Double = 0) {
+        var symbolAnchor: CGPoint { CGPoint(x: 104, y: -73 + symbolY) }
+
+        func draw(in supplied: GraphicsContext, time: Double = 0) {
+            var context = supplied
+            if symbol != nil {
+                context.translateBy(x: -8, y: 8)
+                context.scaleBy(x: 0.90, y: 0.90)
+            }
             for arc in arcs {
                 var layer = context
                 layer.opacity *= arc.opacity
@@ -54,7 +64,24 @@ struct BloubArt {
                     layer.fill(dot.path, with: dot.shading)
                 }
             }
-            if let notif { context.fill(notif, with: .color(Color(red: 0x24 / 255.0, green: 0x96 / 255.0, blue: 0xe8 / 255.0))) }
+            if let notif {
+                let bounds = notif.boundingRect
+                context.fill(notif, with: .linearGradient(Gradient(colors: BloubArt.approvalColors),
+                    startPoint: CGPoint(x: bounds.minX, y: bounds.minY), endPoint: CGPoint(x: bounds.maxX, y: bounds.maxY)))
+            }
+            if let symbol {
+                var expression = supplied
+                expression.translateBy(x: symbolAnchor.x, y: symbolAnchor.y)
+                expression.rotate(by: .degrees(18 + 3 * sin(time * .pi / 2)))
+                var glyph = expression.resolve(Text(symbol.rawValue).font(.system(size: 148.4, weight: .heavy, design: .rounded)))
+                glyph.shading = .linearGradient(Gradient(colors: [
+                    Color(red: 0.48, green: 0.95, blue: 1),
+                    Color(red: 1, green: 0.76, blue: 0.95),
+                    Color(red: 0.77, green: 0.72, blue: 1)
+                ]),
+                    startPoint: CGPoint(x: 0, y: -55), endPoint: CGPoint(x: 0, y: 55))
+                expression.draw(glyph, at: .zero)
+            }
             for arc in arcs {
                 var layer = context
                 layer.opacity *= arc.opacity
@@ -62,6 +89,7 @@ struct BloubArt {
             }
         }
     }
+    static let approvalColors = [Color(red: 0.58, green: 0.94, blue: 1), Color(red: 0.24, green: 0.65, blue: 1)]
     static let paper = Color(white: 0.96)
     static let rimColors: [Color] = [
         Color(red: 0.24, green: 0.32, blue: 1),
@@ -96,6 +124,7 @@ struct BloubArt {
         struct Frame: Decodable {
             let body: [Double]; let bodyAlpha: Double; let eyes: [Eye]; let dots: [Dot]; let dotsBehind: Bool
             let arcs: [Arc]; let notch: Circle?; let notif: Circle?
+            let symbol: ExpressionSymbol?; let symbolY: Double?
         }
         let fps: Double
         let clips: [String: [Frame]]
@@ -140,7 +169,9 @@ struct BloubArt {
                     arcs.append(Arc(front: front, back: back, shading: .linearGradient(Gradient(colors: colors),
                         startPoint: CGPoint(x: arc.grad.x1, y: arc.grad.y1), endPoint: CGPoint(x: arc.grad.x2, y: arc.grad.y2)), width: arc.width, opacity: arc.opacity))
                 }
-                frames.append(Frame(body: body, alpha: frame.bodyAlpha, eyes: eyes, dots: dots, dotsBehind: frame.dotsBehind, arcs: arcs, notch: frame.notch?.path, notif: frame.notif?.path))
+                let symbolY = frame.symbolY ?? 0
+                guard symbolY.isFinite else { return nil }
+                frames.append(Frame(body: body, alpha: frame.bodyAlpha, eyes: eyes, dots: dots, dotsBehind: frame.dotsBehind, arcs: arcs, notch: frame.notch?.path, notif: frame.notif?.path, symbol: frame.symbol, symbolY: symbolY))
             }
             clips[mood.rawValue] = frames
         }
@@ -174,8 +205,9 @@ struct BloubArt {
         return path
     }
 
-    func frame(mood: SessionEyes.Mood, time: Double) -> Frame? {
+    func frame(mood: SessionEyes.Mood, time: Double, still: Bool = false) -> Frame? {
         guard let frames = clips[mood.rawValue] else { return nil }
+        let time = still ? (mood == .permission || mood == .input ? 2.4 : 0.9) : time
         let duration = Double(frames.count) / fps
         let local = time.isFinite ? max(0, time).truncatingRemainder(dividingBy: duration) : 0
         return frames[min(frames.count-1, Int(local*fps))]
@@ -215,11 +247,11 @@ struct SessionEyes: View {
         return TimelineView(.animation(minimumInterval: 1.0 / 30, paused: still)) { timeline in
             let phase = Double(identity.utf8.reduce(0) { ($0 * 31 + Int($1)) % 997 }) / 997
             let time = still ? 0.9 : max(0, timeline.date.timeIntervalSince(appearedAt)) + phase
-            if let art, let frame = art.frame(mood: mood, time: time) {
+            if let art, let frame = art.frame(mood: mood, time: time, still: still) {
                 Canvas { context, canvas in
                     context.translateBy(x: canvas.width/2, y: canvas.height/2)
                     context.scaleBy(x: canvas.width/316, y: canvas.height/316)
-                        frame.draw(in: context, time: time)
+                    frame.draw(in: context, time: time)
                 }
                 .opacity(mood == .stale ? 0.55 : 1)
             } else {
