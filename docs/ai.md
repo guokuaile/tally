@@ -39,7 +39,7 @@ Claude Code 与 Codex 的 hook 调 `Tally.app/Contents/MacOS/tally-hook`（Codex
 | `Notification` | 同上三种但现有状态不是 `running`（含文件不存在），或回合已经结束（见「打断与 API 报错」） | 不写：`done` 之后闲置不算「等我」 |
 | `Notification` | 其他类型 | 不写 |
 | `PermissionRequest`（只在 Codex 侧注册） | 无 | `waiting_permission` |
-| `PostToolUse` 带 `agent_id`（后台子 agent 的工具调用，用的是主会话的 session_id） | 现有是 `waiting_permission`，或文件不存在、坏文件 | `running`：审批过了，或 Tally 装上时正跑着 |
+| `PostToolUse` 带 `agent_id`（后台子 agent 的工具调用，用的是主会话的 session_id） | 现有是 `waiting_permission`，或文件不存在、坏文件 | `running`：审批过了，或 Tally 装上时正跑着。几个 agent 并行时这一行会把别人还没过的等审批冲回 running，app 靠「等你」那节的 status 兜底 |
 | `PostToolUse` 带 `agent_id` | 其他（`done`、`waiting_input`、`compacting`、`ended`、`running`） | 不写：主回合结束后子 agent 在后台干活，不等于会话又忙起来了。实测：主回合 Stop 写 done，1 秒后子 agent 的工具调用把它翻回 running，60 秒后 `idle_prompt` 再写成等输入、又弹一次；这期间 Claude Code 自己的 status 一直是 busy，app 的补判接不住。行上「后台 agent 在跑」的标注就是 app 从这个 busy 读出来的，见「后台还在跑」。`agent_id` 只在 hook 从子 agent 里触发时才带，主线程永远不带（`agent_type` 在 `--agent` 会话里主线程也有，不能用） |
 | `PostToolUse` 不带 `agent_id` | 现有 `state != running`（含文件不存在、坏文件） | `running`：工具跑完就是 agent 在干活。文件不存在是 Tally 装上时会话正跑在长回合中间；`done` 是后台命令或子 agent 回来之后主会话接着干的新回合（2.1.266 起这种回合都有 `UserPromptSubmit`，更早的版本实测有没有的）；等审批必然已过 |
 | `PostToolUse` | 现有 `state == running` | 不写：省得每次工具调用都改文件 |
@@ -58,14 +58,14 @@ hook 的硬约束：永远 `exit 0`（`Stop` 上 exit 2 会阻止 agent 结束�
 
 两个信号，任一个说结束就算结束：
 
-- **Claude Code 自己的 `~/.claude/sessions/<pid>.json`**（没有文档，codenotch 也靠它）：`status` 是 `busy` / `shell` / `waiting` / `idle`（`shell` 见「后台还在跑」），回合结束那一刻写 `idle`（实测和 Stop hook 写 done 同一时刻，idle 在后；回合开始时 busy 反而先于 UserPromptSubmit hook），打断也写（实测：还没开始输出就按 Esc，transcript 里没标记，status 已是 idle）；等审批是 `waiting`（实测）。`pid` 用状态文件里记的那个，`sessionId` 要对上（pid 会被系统复用）；没有文件或没有 `status`（老版本、桌面版托管的会话）不算。记录是等输入时不看它：elicitation 对话框是回合中途等人，那时写什么没验证过。
+- **Claude Code 自己的 `~/.claude/sessions/<pid>.json`**（没有文档，codenotch 也靠它）：`status` 是 `busy` / `shell` / `waiting` / `idle`（`shell` 见「后台还在跑」），回合结束那一刻写 `idle`（实测和 Stop hook 写 done 同一时刻，idle 在后；回合开始时 busy 反而先于 UserPromptSubmit hook），打断也写（实测：还没开始输出就按 Esc，transcript 里没标记，status 已是 idle）；等审批是 `waiting`（实测；这时多一个 `waitingFor` 说在等什么，见「等你」）。`pid` 用状态文件里记的那个，`sessionId` 要对上（pid 会被系统复用）；没有文件或没有 `status`（老版本、桌面版托管的会话）不算。记录是等输入时不看它：elicitation 对话框是回合中途等人，那时写什么没验证过。
 - **transcript 尾 64 KB**：从后往前找第一条主链对话记录——`type` 是 `user` / `assistant`，跳过 `isSidechain`（子 agent）和 `isMeta`（Claude Code 注入的提示）；回合结束后追加的 `file-history-snapshot`、`permission-mode`、`system` 之类一律跳过。`user` 且正文以 `[Request interrupted by user` 开头（含「… for tool use]」）→ 打断；`assistant` 且 `isApiErrorMessage == true` → API 报错，正文（如「You've hit your session limit · resets 3pm」）取前 120 码点；别的，或尾巴里一条对话记录都没有 → 没结束。
 
 只看 transcript 不够：普通打断的标记常常不是按 Esc 那一刻写的。实测 52 次里至少 21 次，标记和下一句话时间戳相同、离上一条记录几十到几百秒；还没开始输出就按 Esc 的那次实测，干等 100 秒 transcript 里什么都没多。也就是标记等用户发下一句才补进去，干等的那段只有 status 知道。transcript 这路留着，是为了拿 API 报错那句正文、分辨要不要弹，也给没有 status 的老版本兜底。标记当场写入的，59 次里 58 次是那个回合最后一条对话记录；API 报错 47 次没有一次在同一回合内偷偷重试成功，接着跑的 9 次前面都有新的一条输入（注入的「Continue」、配额重置后自动续、排队的提示、`/login`）。
 
 用在两处：
 
-- **app**：`SessionStore.reload()` 对 `state != done` 的 Claude 会话看这两个信号，结束了就把内存里的记录改成 `done`，**不回写文件**——回写会和 hook 抢：刚判完用户就发了下一句，app 写的 done 会盖掉 hook 写的 running。transcript 说是 API 报错：`message` 是那句报错，照常弹；其余（打断）：`message` 清空、不弹提示（人就在终端前按的键）。文件不变时靠 60 秒一次的重算发现，所以最多晚一分钟。下一句话来了 hook 写 running、Claude Code 写 busy，自然回到「忙」；配额重置后自动续跑的回合没有 `UserPromptSubmit`，status 变回 busy、尾巴上出现新的 assistant 记录，同样回到「忙」。
+- **app**：`SessionStore.reload()` 对 `state != done` 的 Claude 会话看这两个信号，结束了就把内存里的记录改成 `done`，**不回写文件**——回写会和 hook 抢：刚判完用户就发了下一句，app 写的 done 会盖掉 hook 写的 running。transcript 说是 API 报错：`message` 是那句报错，照常弹；其余（打断）：`message` 清空、不弹提示（人就在终端前按的键）。status 一变监视器就刷新（见「等你」）；只有 transcript 那一路靠 60 秒一次的重算发现，最多晚一分钟。下一句话来了 hook 写 running、Claude Code 写 busy，自然回到「忙」；配额重置后自动续跑的回合没有 `UserPromptSubmit`，status 变回 busy、尾巴上出现新的 assistant 记录，同样回到「忙」。
 - **hook**：等输入三种通知在现有状态是 `running` 时先看 transcript 尾巴，回合已结束就不写（`HookDecision.decide` 的 `turnEnded`，只有这一行才读文件）；`idle_prompt` 另外看 status，是 `idle` 也不写——它只在回合结束后一分钟发，文件这时还是 `running` 就是打断或报错没发 Stop，而打断标记常常还没进 transcript。elicitation 两种是回合中途等人，只看 transcript。不拦的话「完成」会变成「等输入」再弹一次。
 
 不注册 `StopFailure`：打断只能靠上面两个信号，API 报错顺带一起判，就不用多改用户的 `settings.json`——2.1.78 之前没有这个事件，2.1.101 之前遇到不认识的事件名会让整份 settings.json 失效；装过 hook 的机器升级 Tally 也不用重新点「安装」；「回复到一半断连」那种报错走不走 `StopFailure` 也确认不了。
@@ -88,13 +88,25 @@ Claude 的 transcript 是 JSONL，标题记录两种：`{"type":"ai-title","aiTi
 
 `SessionStore.reload()` 对盘上已经是 done 的 Claude 记录读一次 status，busy 记成「后台 agent 在跑」、shell 记成「后台命令在跑」（`SessionRecord.backgroundWork`），只在内存里、不进 JSON、不回写（和补判一样，回写会和 hook 抢）。行上图标变成绿色虚线圆（在跑的形状、完成的颜色），标题旁加绿底绿字的小标签；分组仍在「最近」，Stop 那次完成提示照弹、不另弹。
 
-busy 有一个坑：上一回合的 busy 要等**所有** Stop hook 跑完才换成 idle（本机实测 Tally 的 done 之后 45 ms 写 idle；门禁类 Stop hook 超时 10 到 15 秒，能拖几秒），而 Tally 的 hook 一写 done 目录监视就 reload，这时读到的 busy 是上一回合的。所以 done 不满 10 秒（`SessionStore.backgroundGrace`）读到 busy 不算，排一次 10 秒后的重读（连着几个回合结束只留最后一次）；shell 是主回合空闲时才写的值，没有残留问题，当场算。补判那轮（打断 / API 报错把 running 改成 done）也不标：下一句话的 busy 先于 UserPromptSubmit hook，读到的是新回合。后台的活干完了 Claude Code 会把主会话再叫起来跑一回合（`<task-notification>`），hook 写 running 再 done，status 回到 idle，标注自然消失；文件不变时靠 60 秒一次的重算发现，最多晚一分钟。不用 `SubagentStart` / `SubagentStop` hook 数：要改每台机器的 `settings.json` 重新「安装」，而且盖不住后台命令。Codex 没有这种状态文件，不标。
+busy 有一个坑：上一回合的 busy 要等**所有** Stop hook 跑完才换成 idle（本机实测 Tally 的 done 之后 45 ms 写 idle；门禁类 Stop hook 超时 10 到 15 秒，能拖几秒），而 Tally 的 hook 一写 done 目录监视就 reload，这时读到的 busy 是上一回合的。所以 done 不满 10 秒（`SessionStore.backgroundGrace`）读到 busy 不算，排一次 10 秒后的重读（连着几个回合结束只留最后一次）；shell 是主回合空闲时才写的值，没有残留问题，当场算。补判那轮（打断 / API 报错把 running 改成 done）也不标：下一句话的 busy 先于 UserPromptSubmit hook，读到的是新回合。后台的活干完了 Claude Code 会把主会话再叫起来跑一回合（`<task-notification>`），hook 写 running 再 done，status 回到 idle，标注自然消失；状态文件一改监视器就刷新（见「等你」），不用等 60 秒一次的重算。不用 `SubagentStart` / `SubagentStop` hook 数：要改每台机器的 `settings.json` 重新「安装」，而且盖不住后台命令。Codex 没有这种状态文件，不标。
+
+### 等你（Claude Code 的 `sessions/<pid>.json`）
+
+hook 这一路看「等你」有三处接不住，Claude Code 自己的状态文件都看得到（2.1.311 实测）：`status` 是 `waiting` 时多一个 `waitingFor`——审批框（含计划审批）是 `permission prompt`（对话框没单独起名时的默认值，源码 `by[kind]?.waitingFor ?? "permission prompt"`），AskUserQuestion 和 MCP elicitation 是 `input needed`，其余是 `dialog open` / `sandbox request` / `worker request` / `goal proposal`。
+
+- `permission_prompt` 通知要等 6 秒才发（源码 `setTimeout(…, 6000)`，6 秒内答掉就不发）：等审批的前 6 秒 hook 什么都不知道。AskUserQuestion 走的也是这条通知。
+- 主回合 Stop 写了 done 之后后台 agent 要审批：通知照发，但几个 agent 并行时别人的 `PostToolUse`（带 `agent_id`、现有等审批）紧跟着把文件冲回 running（「事件到状态」那行「审批过了」），app 看到的是在跑，提示和徽标都没有。
+- 对话框关了 hook 不一定写：AskUserQuestion 答完那次 `PostToolUse` 看到文件已经是 running 不会再写；拒掉审批没有任何事件。
+
+所以 `SessionStore.reload()` 对每条 Claude 记录一轮只读一次这个文件，按它定「等你」：`waiting` → 按 `waitingFor` 标成等审批（`permission prompt`，没这个字段也按它）或等输入（其余），不管 hook 写的是 done / running / 等审批；hook 写的是等审批或等输入而 status 是 `busy` → 回到忙。都只改内存不回写（理由同「打断与 API 报错」）。提示照「提示」那节：done → 等审批照样是状态变了。Codex 没有这种文件，只有 hook 一路。
+
+这个文件是原地改写的（inode 不变），Tally 的目录没动、盯 Claude 的 sessions 目录也收不到内容变化，所以每条活着的 Claude 记录按 pid 给 `<pid>.json` 挂一个 vnode 监视器（`DispatchSource`，`.write` / `.extend` / `.delete` / `.rename`），改了就 reload：等你、审批过了、后台还在跑、回合结束都当场刷新，不用等 hook 或 60 秒一次的重算；Claude Code 退出时删这个文件，`.delete` 一来存活判断就把行收掉。监视器在读文件之前挂（挂在读之后，读完到挂上之间的那次改写会丢），文件还没建出来（SessionStart hook 比它早几毫秒）就下一轮再挂；删了、换了的丢掉监视器，下一轮文件还在再挂回去。
 
 ### 陈旧、存活、清理（`SessionRecord`，纯函数）
 
 | 条件 | 处理 |
 |---|---|
-| `pid` 非空且 `kill(pid, 0)` 返回 `ESRCH`，`state` 不是 `ended` | 会话没了（关终端不触发 SessionEnd）：交互会话且设置里「保留已关闭的会话」开着，就把文件原地改成 `ended`（进程已经没了，不会和 hook 抢着写）；否则删文件 |
+| `pid` 非空且会话的进程不在了：进程表里没有这个 pid，或那一行不再是 agent 本体（`AgentLocator.isAgent`，和 hook 找 pid 同一套），或 Claude 自己的 `sessions/<pid>.json` 写着别的 sessionId（没有这个字段的文件说不清是谁的，不算）且记录不是 10 秒内刚写的；`state` 不是 `ended`。路径或 argv 读不到（瞬时失败；root 的进程也读得到路径，不是权限问题）当还活着，判不了就不收 | 会话没了（关终端不触发 SessionEnd）：交互会话且设置里「保留已关闭的会话」开着，就把文件原地改成 `ended`（进程已经没了，不会和 hook 抢着写）；否则删文件。只看 `kill(pid, 0)` 不够：关机重启后低位 pid 很快被系统进程拿走，`kill` 对别人的进程返回 EPERM、看着像活着，那一行就一直留到 24 小时清理，点了按目录匹配跳到别的终端、看着像没反应。sessionId 对不上是 pid 被别的 Claude 拿走，或同一个进程里 `/resume` 换了会话（`/clear` 会给旧会话发 SessionEnd，hook 自己写成 `ended`，状态文件里的 sessionId 跟着换）；10 秒内刚写的不算，`/clear` 之后新会话的 SessionStart hook 和状态文件改写 sessionId 谁先谁后没有保证。进程表拿不到时退回 `kill(pid, 0)` |
 | Codex TUI 的记录由无 tty 的常驻 app-server 代写，且启动目录里已无运行中的 Codex TUI 进程 | app-server 的 PID 不代表单个会话还开着；该目录的交互会话按上一行转为 `ended` 或删掉。只对 rollout 标明 `codex-tui` 的记录用这条规则；60 秒刷新时重算。同目录还有 TUI 时无法可靠对应到具体会话，暂不自动关闭其中任何一条 |
 | `state` 不是 `done` / `ended` 且两小时没更新 | 标「失联」，灰斜体，不删 |
 | `ended` | 最多留设置里的条数（「面板 → 会话列表 → 最多留」，默认 10，夹在 1 到 50），多出来的删最旧的；「保留已关闭的会话」关着就读到即删 |
@@ -103,7 +115,7 @@ busy 有一个坑：上一回合的 busy 要等**所有** Stop hook 跑完才换
 
 ### 提示
 
-`SessionStore.reload()` 每次把上一轮和这一轮的记录按 `session_id` 对比：上一轮见过、这一轮进入了 `done` / `waiting_permission` / `waiting_input` 且和上一轮状态不同的会话（进入压缩中、已关闭不算），逐个回调 `sessionAlert`，控制器在面板闭合时弹提示（外观、时长、点击跳回见 [panel.md](panel.md) 的「提示」）。第一次露面就已经在那个状态的不算（Tally 晚于会话启动，或刚装上 hook）；`done → running → done` 每个回合都算；审批过了回到 `running` 不弹；打断补判出来的 `done` 不弹（见「打断与 API 报错」）。
+`SessionStore.reload()` 每次把上一轮和这一轮的记录按 `session_id` 对比：上一轮见过、这一轮进入了 `done` / `waiting_permission` / `waiting_input` 且和上一轮状态不同的会话（进入压缩中、已关闭不算），逐个回调 `sessionAlert`，控制器在面板闭合时弹提示（外观、时长、点击跳回见 [panel.md](panel.md) 的「提示」）。第一次露面就已经在那个状态的不算（Tally 晚于会话启动，或刚装上 hook）；`done → running → done` 每个回合都算；审批过了回到 `running` 不弹；打断补判出来的 `done` 不弹（见「打断与 API 报错」）；Claude Code 的 status 标出来的等审批 / 等输入（见「等你」）和 hook 写的一样算进入了那个状态。
 
 ### 会话行
 

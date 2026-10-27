@@ -1,6 +1,16 @@
 import XCTest
 @testable import Tally
 
+/// 测试里把本进程当成 agent 本体：真进程表里 xctest 不是 claude / codex，存活判断会把带本进程 pid 的记录当成「进程没了」。
+struct AgentProcessTable: ProcessTable {
+    var comm = "claude"
+    var args: [String] = []
+    func entries() -> [ProcessEntry] {
+        [ProcessEntry(pid: ProcessInfo.processInfo.processIdentifier, ppid: 1, comm: comm, path: "/usr/local/bin/\(comm)", tdev: nil)]
+    }
+    func arguments(of pid: Int32) -> [String] { args }
+}
+
 final class SessionModelTests: XCTestCase {
 
     private func record(state: SessionRecord.State, ageSeconds: Double, now: Date, title: String? = "标题") -> SessionRecord {
@@ -95,6 +105,45 @@ final class SessionModelTests: XCTestCase {
         var unknown = alive
         unknown.pid = nil
         XCTAssertFalse(unknown.processIsGone)
+    }
+
+    func testProcessIsGoneWhenThePidNoLongerBelongsToAnAgent() {
+        // 关机重启后低位 pid 很快被系统进程拿走，kill(pid, 0) 对别人的进程返回 EPERM、看着像活着：进程表里那一行得是 agent 本体
+        var record = record(state: .done, ageSeconds: 0, now: Date())
+        record.pid = 2297
+        let agent = ProcessEntry(pid: 2297, ppid: 1, comm: "2.1.311", path: "/Users/me/.local/share/claude/versions/2.1.311", tdev: nil)
+        let daemon = ProcessEntry(pid: 2297, ppid: 1, comm: "mdworker", path: "/System/Library/Frameworks/CoreServices.framework/mdworker", tdev: nil)
+        let table = AgentProcessTable()
+        XCTAssertFalse(record.processIsGone(in: [2297: agent], table: table))
+        XCTAssertTrue(record.processIsGone(in: [2297: daemon], table: table), "pid 被系统进程复用")
+        XCTAssertTrue(record.processIsGone(in: [:], table: table), "进程表里没有")
+        // 路径或 argv 读不到是瞬时失败（root 的进程也读得到路径，不是权限问题）：判不了就当还活着，误判成没了会把活会话改成已关闭
+        let unreadable = ProcessEntry(pid: 2297, ppid: 1, comm: "2.1.311", path: "", tdev: nil)
+        XCTAssertFalse(record.processIsGone(in: [2297: unreadable], table: table), "路径读不到")
+        let node = ProcessEntry(pid: 2297, ppid: 1, comm: "node", path: "/opt/homebrew/bin/node", tdev: nil)
+        XCTAssertFalse(record.processIsGone(in: [2297: node], table: AgentProcessTable(args: [])), "argv 读不到")
+        XCTAssertTrue(record.processIsGone(in: [2297: node], table: AgentProcessTable(args: ["node", "/srv/app.js"])), "是别的 node")
+        XCTAssertFalse(record.processIsGone(in: [2297: node], table: AgentProcessTable(args: ["node", "/x/claude-code/cli.js"])))
+        record.pid = nil
+        XCTAssertFalse(record.processIsGone(in: [:], table: table), "没拿到 pid 的记录不按进程判")
+    }
+
+    func testClaudeCodeStatusDistinguishesMissingSessionIdFromAnotherSession() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tally-status-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var record = record(state: .done, ageSeconds: 0, now: Date())
+        record.pid = 4242
+        let file = dir.appendingPathComponent("4242.json")
+        try Data(#"{"pid":4242,"status":"busy"}"#.utf8).write(to: file)
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .unknown, "没有 sessionId 的文件说不清是谁的，不能当成别的会话把活会话收掉")
+        try Data(#"{"pid":4242,"sessionId":"someone-else","status":"busy"}"#.utf8).write(to: file)
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .anotherSession)
+        try Data(#"{"pid":4242,"sessionId":"s1","status":"waiting","waitingFor":"input needed"}"#.utf8).write(to: file)
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .reported(status: "waiting", waitingFor: "input needed"))
+        try Data(#"{"pid":4242,"sessionId":"s1"}"#.utf8).write(to: file)
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .unknown, "没有 status 字段")
+        record.pid = nil
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .unknown)
     }
 
     // 徽标与显示
@@ -192,15 +241,16 @@ final class SessionTurnEndTests: XCTestCase {
     }
 
     /// 模拟 Claude Code 自己写的 `~/.claude/sessions/<pid>.json`；pid 用测试进程自己的，存活判定才过得去。
-    private func writeClaudeStatus(_ status: String, sessionId: String = "s1") throws {
+    private func writeClaudeStatus(_ status: String, sessionId: String = "s1", waitingFor: String? = nil) throws {
         let pid = ProcessInfo.processInfo.processIdentifier
-        let json = #"{"pid":\#(pid),"sessionId":"\#(sessionId)","status":"\#(status)","statusUpdatedAt":1}"#
+        let extra = waitingFor.map { #","waitingFor":"\#($0)""# } ?? ""
+        let json = #"{"pid":\#(pid),"sessionId":"\#(sessionId)","status":"\#(status)","statusUpdatedAt":1\#(extra)}"#
         try Data(json.utf8).write(to: claudeSessions.appendingPathComponent("\(pid).json"))
     }
 
     @MainActor
     private func makeStore() -> SessionStore {
-        SessionStore(directory: directory, claudeSessions: claudeSessions)
+        SessionStore(directory: directory, claudeSessions: claudeSessions, processTable: AgentProcessTable())
     }
 
     @MainActor
@@ -329,6 +379,7 @@ final class SessionTurnEndTests: XCTestCase {
         try writeClaudeStatus("busy", sessionId: "someone-else")
         store.reload()
         XCTAssertNil(store.sessions.first?.backgroundWork, "pid 被复用、sessionId 对不上不算")
+        XCTAssertEqual(store.sessions.first?.state, .ended, "状态文件属于别的会话，这条的会话已经不在了")
 
         try write(state: .done, provider: "codex", transcript: [prompt])
         try writeClaudeStatus("busy")
@@ -367,11 +418,74 @@ final class SessionTurnEndTests: XCTestCase {
 
         try writeClaudeStatus("idle", sessionId: "someone-else")
         store.reload()
-        XCTAssertEqual(store.sessions.first?.state, .waitingPermission, "pid 被复用成了别的会话")
+        XCTAssertEqual(store.sessions.first?.state, .ended, "pid 被复用成了别的会话，或同一进程 /clear 换了会话：这条记录的会话没了")
 
         try write(state: .waitingInput, transcript: [prompt])
         try writeClaudeStatus("idle")
         store.reload()
-        XCTAssertEqual(store.sessions.first?.state, .waitingInput, "等输入（elicitation 对话框）不看 status")
+        XCTAssertEqual(store.sessions.first?.state, .waitingInput, "等输入（elicitation 对话框）不看 idle")
+    }
+
+    @MainActor
+    func testClaudeCodeWaitingStatusMarksWaitingWhateverTheHookWrote() throws {
+        // AskUserQuestion、后台 agent 要审批、几个 agent 并行时别人的 PostToolUse 把等审批冲回 running：hook 那一路都看不出在等人，
+        // Claude Code 自己的 status 是 waiting、waitingFor 说在等什么（docs/ai.md「等你」）
+        var alerts: [SessionRecord] = []
+        let store = makeStore()
+        store.sessionAlert = { alerts.append($0) }
+
+        try write(state: .done, transcript: [prompt])
+        try writeClaudeStatus("idle")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .done)
+
+        try writeClaudeStatus("waiting", waitingFor: "permission prompt")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .waitingPermission, "主回合 done 之后后台 agent 要审批")
+        XCTAssertEqual(alerts.map(\.state), [.waitingPermission])
+        XCTAssertNil(store.sessions.first?.backgroundWork, "标成等你的不再标后台")
+
+        try write(state: .running, transcript: [prompt])
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .waitingPermission, "别的 agent 的 PostToolUse 把文件冲回 running，还是等你")
+        XCTAssertEqual(alerts.count, 1, "状态没变就不再弹")
+
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .running, "审批过了")
+
+        try writeClaudeStatus("waiting", waitingFor: "input needed")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .waitingInput, "AskUserQuestion、elicitation 是等输入")
+        XCTAssertEqual(alerts.map(\.state), [.waitingPermission, .waitingInput])
+
+        // hook 写了等审批、Claude Code 已经在忙：对话框关了（答完、拒了）hook 还没写
+        try write(state: .waitingPermission, transcript: [prompt])
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .running)
+        XCTAssertEqual(alerts.count, 2)
+    }
+
+    @MainActor
+    func testClaudeStatusFileChangeReloadsWithoutAHookEvent() async throws {
+        // Claude Code 原地改写 <pid>.json（inode 不变），Tally 的目录没动：靠文件上的 vnode 监视器当场刷新
+        let store = makeStore()
+        try write(state: .done, transcript: [prompt])
+        try writeClaudeStatus("idle")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .done)
+
+        try writeClaudeStatus("waiting", waitingFor: "permission prompt")
+        for _ in 0..<40 where store.sessions.first?.state != .waitingPermission {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(store.sessions.first?.state, .waitingPermission)
+
+        try FileManager.default.removeItem(at: claudeSessions.appendingPathComponent("\(ProcessInfo.processInfo.processIdentifier).json"))
+        for _ in 0..<40 where store.sessions.first?.state != .done {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(store.sessions.first?.state, .done, "文件删了（.delete 也触发刷新）就回到 hook 写的状态；进程没了的话存活判断另算")
     }
 }

@@ -68,18 +68,18 @@ final class SessionLifecycleTests: XCTestCase {
     }
 
     /// entrypoint 决定是不是交互会话；pid 999_999 超过 macOS 的 pid 上限，一定是「进程没了」。
-    private func write(_ id: String, state: SessionRecord.State, entrypoint: String = "cli", updatedAt: Double = 1) throws {
+    private func write(_ id: String, state: SessionRecord.State, entrypoint: String = "cli", updatedAt: Double = 1, pid: Int = 999_999) throws {
         let transcript = transcripts.appendingPathComponent("\(id).jsonl")
         try (#"{"type":"user","entrypoint":"\#(entrypoint)","message":{"content":"跑一下"}}"# + "\n").write(to: transcript, atomically: true, encoding: .utf8)
-        let record = SessionRecord(sessionId: id, pid: 999_999, state: state, cwd: "/tmp/x", title: id,
+        let record = SessionRecord(sessionId: id, pid: pid, state: state, cwd: "/tmp/x", title: id,
                                    transcriptPath: transcript.path, message: "上一句", updatedAt: updatedAt)
         try JSONEncoder().encode(record).write(to: directory.appendingPathComponent("\(id).json"))
     }
 
     @MainActor
-    private func makeStore() -> SessionStore {
+    private func makeStore(table: AgentProcessTable = AgentProcessTable()) -> SessionStore {
         SessionStore(directory: directory, claudeSessions: transcripts, keepClosed: { [unowned self] in self.keep },
-                     closedLimit: { [unowned self] in self.limit })
+                     closedLimit: { [unowned self] in self.limit }, processTable: table)
     }
 
     private func onDisk(_ id: String) throws -> SessionRecord? {
@@ -126,6 +126,21 @@ final class SessionLifecycleTests: XCTestCase {
         XCTAssertTrue(alerts.isEmpty, "进入已关闭不弹")
     }
 
+    /// 关机重启后低位 pid 很快被系统进程拿走，kill(pid, 0) 对它返回 EPERM、看着像活着：那一行会一直留在「最近」，点了跳不到哪儿去。
+    @MainActor
+    func testPidTakenByAnotherProcessCountsAsDead() throws {
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        try write("reused", state: .done, pid: pid)
+        let daemon = makeStore(table: AgentProcessTable(comm: "mdworker"))
+        daemon.reload()
+        XCTAssertEqual(daemon.sessions.first?.state, .ended, "进程表里那一行不是 agent 本体")
+
+        try write("alive", state: .done, pid: pid)
+        let agent = makeStore()
+        agent.reload()
+        XCTAssertEqual(agent.sessions.first { $0.sessionId == "alive" }?.state, .done)
+    }
+
     @MainActor
     func testOnlyNewestEndedAreKeptUpToTheSetting() throws {
         limit = 3
@@ -167,7 +182,8 @@ final class SessionLifecycleTests: XCTestCase {
         var active = 1
         let store = SessionStore(directory: directory, claudeSessions: transcripts,
                                  keepClosed: { true }, closedLimit: { 10 },
-                                 activeCodexTUIByCWD: { [unowned self] in [self.transcripts.path: active] })
+                                 activeCodexTUIByCWD: { [unowned self] _, _ in [self.transcripts.path: active] },
+                                 processTable: AgentProcessTable(comm: "codex"))
         store.reload()
         XCTAssertEqual(try onDisk("old")?.state, .done, "An idle older session may be the live TUI")
         XCTAssertEqual(try onDisk("middle")?.state, .done)

@@ -203,10 +203,22 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         return last.isEmpty ? "/" : last
     }
 
-    /// 带 pid 的记录：进程不在了就是会话没了（SessionEnd 没来的那种）。
+    /// 带 pid 的记录：进程不在了就是会话没了（SessionEnd 没来的那种）。进程表拿不到时的退路。
     public var processIsGone: Bool {
         guard let pid else { return false }
         return kill(pid_t(pid), 0) == -1 && errno == ESRCH
+    }
+
+    /// 进程表版：pid 对应的那一行还得是 agent 本体。关机重启后低位 pid 很快被系统进程拿走，`kill(pid, 0)` 对别人的进程返回 EPERM，
+    /// 看着像活着，那一行就一直留在「最近」里、点了也跳不到哪儿去。认 agent 的长相和 hook 找 pid 用同一套（`AgentLocator.isAgent`）。
+    /// 路径或 argv 读不到是瞬时失败（root 的进程也读得到路径，不是权限问题）：判不了就当还活着，误判成没了会把活会话改成已关闭。
+    public func processIsGone(in byPid: [Int32: ProcessEntry], table: ProcessTable) -> Bool {
+        guard let pid else { return false }
+        guard let entry = byPid[Int32(pid)] else { return true }
+        if entry.path.isEmpty { return false }
+        var arguments: [String]?
+        if AgentLocator.isAgent(entry, arguments: { let read = table.arguments(of: entry.pid); arguments = read; return read }) { return false }
+        return arguments?.isEmpty != true
     }
 
     /// Claude Code 的家：`CLAUDE_CONFIG_DIR` 设了就是它，没有就 `~/.claude`。hook 从 Claude Code 继承环境，直接看得到；
@@ -222,20 +234,38 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         claudeHome(configDir: configDir).appendingPathComponent("sessions")
     }
 
-    /// Claude Code 自己维护的 `<pid>.json` 里的 `status`：busy / shell / waiting / idle（docs/ai.md「打断与 API 报错」「后台还在跑」）。
-    /// pid 会被系统复用，对上 sessionId 才算；没有文件或字段（老版本、桌面版托管的会话）为 nil。
-    public func claudeCodeStatus(in directory: URL) -> String? {
+    /// Claude Code 自己维护的 `<pid>.json`（docs/ai.md「等你」「打断与 API 报错」「后台还在跑」）。
+    public enum ClaudeCodeStatus: Equatable {
+        /// 没有文件或没有 status 字段：老版本、桌面版托管的会话。
+        case unknown
+        /// 文件里的 sessionId 不是这条记录的：pid 被别的 Claude 拿走了，或同一个进程 /clear、/resume 换了会话，这条记录的会话都已经不在了。
+        case anotherSession
+        /// busy / shell / waiting / idle；waiting 时 `waitingFor` 说在等什么（「permission prompt」「input needed」「dialog open」…）。
+        case reported(status: String, waitingFor: String?)
+    }
+
+    public func claudeCodeStatus(in directory: URL) -> ClaudeCodeStatus {
         guard let pid,
               let data = try? Data(contentsOf: directory.appendingPathComponent("\(pid).json")),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["sessionId"] as? String == sessionId
-        else { return nil }
-        return object["status"] as? String
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return .unknown }
+        // 没有 sessionId 的文件说不清是谁的（老版本、半截文件），不能当成别的会话把活会话收掉
+        guard let owner = object["sessionId"] as? String else { return .unknown }
+        guard owner == sessionId else { return .anotherSession }
+        guard let status = object["status"] as? String else { return .unknown }
+        return .reported(status: status, waitingFor: object["waitingFor"] as? String)
     }
 
     /// 回合一结束就写 idle，打断和 API 报错（这两种不发 Stop）也写，等审批写 waiting。
     public func claudeCodeReportsIdle(in directory: URL) -> Bool {
-        claudeCodeStatus(in: directory) == "idle"
+        if case .reported("idle", _) = claudeCodeStatus(in: directory) { return true }
+        return false
+    }
+
+    /// Claude Code 说有对话框在等人时该标成哪种「等你」：审批框（含计划审批）是等审批，其余（AskUserQuestion、MCP elicitation、
+    /// 各种对话框）是等输入。`waitingFor` 的默认值就是「permission prompt」，没单独标名字的对话框都按它报；字段都没有的版本也按等审批。
+    public static func waitingState(for waitingFor: String?) -> State {
+        waitingFor == nil || waitingFor == "permission prompt" ? .waitingPermission : .waitingInput
     }
 
     /// 超过 24 小时没更新的文件该删。活着但一天没事件的会话也会被清，

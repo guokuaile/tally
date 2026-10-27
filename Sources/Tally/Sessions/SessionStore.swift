@@ -21,7 +21,7 @@ final class SessionStore {
     var sessionAlert: ((SessionRecord) -> Void)?
 
     let directory: URL
-    /// Claude Code 自己的 `~/.claude/sessions/<pid>.json`，见 `SessionRecord.claudeCodeReportsIdle`。
+    /// Claude Code 自己的 `~/.claude/sessions/<pid>.json`，见 `SessionRecord.claudeCodeStatus`。
     let claudeSessions: URL
     private var source: DispatchSourceFileSystemObject?
     private var descriptor: Int32 = -1
@@ -42,19 +42,25 @@ final class SessionStore {
     private let keepClosed: () -> Bool
     /// 已关闭的会话最多留几条（设置里调，默认 10）：一天开关几十个会话的话，那一页会被它们挤满；测试注入。
     private let closedLimit: () -> Int
-    private let activeCodexTUIByCWD: () -> [String: Int]?
+    private let activeCodexTUIByCWD: (ProcessTable, [ProcessEntry]) -> [String: Int]?
+    /// 进程表：存活判断和找 Codex TUI 都用它，一轮刷新只拿一次；测试注入假表把自己当成 agent（真表里 xctest 不是）。
+    private let processTable: ProcessTable
+    /// Claude Code 自己的 `<pid>.json` 是原地改写的（inode 不变），盯目录收不到，按 pid 一个文件一个 vnode 监视器（docs/ai.md「等你」）。
+    private var statusSources: [Int: DispatchSourceFileSystemObject] = [:]
 
     /// 单例整个进程周期都活着，不需要 deinit 里收 source。
     init(directory: URL = PreferencesStore.directory.appendingPathComponent("sessions"),
          claudeSessions: URL = ClaudeHome.url.appendingPathComponent("sessions"),
          keepClosed: (() -> Bool)? = nil,
          closedLimit: (() -> Int)? = nil,
-         activeCodexTUIByCWD: (() -> [String: Int]?)? = nil) {
+         activeCodexTUIByCWD: ((ProcessTable, [ProcessEntry]) -> [String: Int]?)? = nil,
+         processTable: ProcessTable = SysctlProcessTable()) {
         self.directory = directory
         self.claudeSessions = claudeSessions
         self.keepClosed = keepClosed ?? { PreferencesStore.shared.prefs.keepClosedSessions }
         self.closedLimit = closedLimit ?? { PreferencesStore.shared.prefs.closedSessionLimit }
-        self.activeCodexTUIByCWD = activeCodexTUIByCWD ?? Self.liveCodexTUIByCWD
+        self.activeCodexTUIByCWD = activeCodexTUIByCWD ?? Self.liveCodexTUIByCWD(table:entries:)
+        self.processTable = processTable
     }
 
     // MARK: 启动
@@ -137,18 +143,35 @@ final class SessionStore {
                   let record = try? decoder.decode(SessionRecord.self, from: data) else { return nil }
             return (file, record)
         }
-        let closedCodexIDs = activeCodexTUIByCWD().map { Self.codexSessionsWithoutTUI(decoded.map(\.1), activeByCWD: $0) } ?? []
+        let table = processTable
+        let entries = table.entries()
+        let byPid = Dictionary(entries.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
+        let closedCodexIDs = activeCodexTUIByCWD(table, entries).map { Self.codexSessionsWithoutTUI(decoded.map(\.1), activeByCWD: $0) } ?? []
+        // 先挂监视器再读：挂在读之后的话，读完到挂上之间的那次改写会丢
+        watchClaudeStatus(of: decoded.map(\.1))
         var loaded: [SessionRecord] = []
         var quiet: Set<String> = []
         for (file, original) in decoded {
             var record = original
+            // Claude 会话一轮只读一次 Claude Code 自己的状态文件：存活、等你、补判、后台还在跑都看它
+            var claudeStatus: String?
+            var claudeWaitingFor: String?
+            let claude = record.isClaude && record.state != .ended ? record.claudeCodeStatus(in: claudeSessions) : .unknown
+            if case .reported(let status, let waitingFor) = claude {
+                claudeStatus = status
+                claudeWaitingFor = waitingFor
+            }
             if record.state == .ended {
                 // 已关闭的本来就没有进程，不走下面的存活判断；开关关着就删
                 guard keepClosed() else {
                     try? FileManager.default.removeItem(at: file)
                     continue
                 }
-            } else if record.processIsGone || closedCodexIDs.contains(record.sessionId) {
+            } else if (entries.isEmpty ? record.processIsGone : record.processIsGone(in: byPid, table: table))
+                        || (claude == .anotherSession && now.timeIntervalSince(record.updatedDate) >= Self.backgroundGrace)
+                        || closedCodexIDs.contains(record.sessionId) {
+                // 状态文件写着别的会话也算没了（pid 被别的 Claude 拿走、同一进程 /resume 换了会话）；刚写的记录不算：
+                // /clear 之后新会话的 SessionStart hook 和 Claude Code 改写 sessionId 谁先谁后没有保证
                 // 进程没了就是会话没了：终端被直接关掉时 SessionEnd 不会来。交互会话改成已关闭留着接着聊——
                 // 进程已经没了，改文件不会和 hook 抢着写；脚本里跑的 claude -p / codex exec 直接删
                 guard keepClosed(), !record.transcriptPath.isEmpty,
@@ -171,14 +194,23 @@ final class SessionStore {
             if record.title == nil {
                 record.title = resolveTitle(for: record)
             }
+            // Claude Code 说有对话框在等人，就是等你，不管 hook 写的是什么（docs/ai.md「等你」）：permission_prompt 通知要等 6 秒才发；
+            // 主回合 done 之后后台 agent 要审批、几个 agent 并行时别人的 PostToolUse 把等审批冲回 running，hook 这一路都接不住。
+            // 反过来 hook 说等、Claude Code 说忙，就是对话框已经关了（审批过了、答完了、拒了）hook 还没写：AskUserQuestion 答完那次
+            // PostToolUse 看到文件已经是 running 不会再写，不补这一笔「等你」会挂到下一次事件。
             // 打断和 API 报错结束的回合不发 Stop，文件停在 running / 等审批 / 等输入：补判成 done（docs/ai.md「打断与 API 报错」）。
-            // 只改内存不回写：回写会和 hook 抢，刚判完用户就发了下一句的话，app 写的 done 会盖掉 hook 写的 running。
-            if record.state != .done, record.state != .ended {
+            // 都只改内存不回写：回写会和 hook 抢，刚判完用户就发了下一句的话，app 写的 done 会盖掉 hook 写的 running。
+            if claudeStatus == "waiting", record.state != .ended {
+                record.state = SessionRecord.waitingState(for: claudeWaitingFor)
+            } else if record.isWaiting, claudeStatus == "busy" {
+                // busy 一定没有对话框：Claude Code 算 status 时先看对话框（有就是 waiting），没有才按在不在跑分 busy / idle
+                record.state = .running
+            } else if record.state != .done, record.state != .ended {
                 let end = record.transcriptPath.isEmpty ? nil
                     : TranscriptTitle.turnEnd(in: URL(fileURLWithPath: record.transcriptPath), provider: record.provider)
-                // 等输入不看 status：elicitation 对话框是回合中途等人，那时写不写 idle 没验证过；idle_prompt 那种 hook 已经不写成等输入。
+                // 等输入不看 idle：elicitation 对话框是回合中途等人，那时写不写 idle 没验证过；idle_prompt 那种 hook 已经不写成等输入。
                 // Codex 没有 status 文件，只看 rollout
-                if end != nil || (record.isClaude && record.state != .waitingInput && record.claudeCodeReportsIdle(in: claudeSessions)) {
+                if end != nil || (record.state != .waitingInput && claudeStatus == "idle") {
                     record.state = .done
                     if case .apiError(let text) = end {
                         record.message = HookDecision.clip(text)
@@ -191,9 +223,9 @@ final class SessionStore {
             }
             // 主回合 Stop 写了 done，后台 agent / 命令可能还在跑：子 agent 的 PostToolUse 故意不翻回 running（docs/ai.md「事件到状态」），
             // 「还有活」只有 Claude Code 自己的 status 知道——没结束的 agent 类任务是 busy，只剩后台命令是 shell。只标在内存里。
-            // 只认盘上已经是 done 的：补判那轮读到的 busy 是下一句话的（busy 先于 UserPromptSubmit hook）
-            if original.state == .done, record.isClaude {
-                switch record.claudeCodeStatus(in: claudeSessions) {
+            // 只认盘上已经是 done 的：补判那轮读到的 busy 是下一句话的（busy 先于 UserPromptSubmit hook）；上面标成等你的不算
+            if original.state == .done, record.state == .done {
+                switch claudeStatus {
                 case "busy":
                     if now.timeIntervalSince(record.updatedDate) >= Self.backgroundGrace {
                         record.backgroundWork = .agents
@@ -221,11 +253,35 @@ final class SessionStore {
         for record in alerts { sessionAlert?(record) }
     }
 
+    /// Claude Code 原地改写 `<pid>.json`，目录级 kqueue 收不到内容变化，按文件挂 vnode 监视器：等你、后台还在跑、回合结束当场刷新，
+    /// 不用等 hook 或 60 秒一次的重算；进程退出时它删文件，`.delete` 一来存活判断就把行收掉。
+    /// 文件还没建出来（SessionStart hook 比它早几毫秒）就先不挂，下一轮读目录再试。
+    private func watchClaudeStatus(of records: [SessionRecord]) {
+        let wanted = Set(records.filter { $0.isClaude && $0.state != .ended }.compactMap(\.pid))
+        for pid in statusSources.keys where !wanted.contains(pid) {
+            statusSources.removeValue(forKey: pid)?.cancel()
+        }
+        for pid in wanted where statusSources[pid] == nil {
+            let fd = open(claudeSessions.appendingPathComponent("\(pid).json").path, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .extend, .delete, .rename], queue: .main)
+            source.setEventHandler { [weak self, weak source] in
+                guard let self, let source else { return }
+                // 删了、换了就丢掉监视器：旧 inode 上再也不会有事；下一轮读目录时文件还在再挂回去。只丢自己这个，别碰已经重挂的新监视器
+                if !source.data.intersection([.delete, .rename]).isEmpty, self.statusSources[pid] === source {
+                    self.statusSources.removeValue(forKey: pid)?.cancel()
+                }
+                self.scheduleReload()
+            }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            statusSources[pid] = source
+        }
+    }
+
     /// Only a Codex TUI with a controlling terminal can keep one of the daemon-owned records open.
     /// If any TUI directory cannot be read, retain records until the next refresh.
-    private static func liveCodexTUIByCWD() -> [String: Int]? {
-        let table = SysctlProcessTable()
-        let entries = table.entries()
+    private static func liveCodexTUIByCWD(table: ProcessTable, entries: [ProcessEntry]) -> [String: Int]? {
         guard !entries.isEmpty else { return nil }
         var counts: [String: Int] = [:]
         for entry in entries where entry.tdev != nil && URL(fileURLWithPath: entry.path).lastPathComponent == "codex" {
