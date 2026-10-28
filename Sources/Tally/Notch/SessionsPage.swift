@@ -203,6 +203,8 @@ final class SessionJump {
             return nil
         } catch TerminalLocator.Failure.notFound {
             return "找不到窗口"
+        } catch TerminalLocator.Failure.ambiguous {
+            return "无法确定窗口"
         } catch TerminalLocator.Failure.notRunning(let app) {
             return "\(app) 没在跑"
         } catch TerminalLocator.Failure.directoryMissing {

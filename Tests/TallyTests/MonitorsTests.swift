@@ -65,6 +65,17 @@ final class PeekTests: XCTestCase {
         XCTAssertEqual(peek.title, "标题")
         XCTAssertEqual(peek.subtitle, "第一行 第二行")
         XCTAssertEqual(peek.sessionId, "s", "点一下能跳回去")
+        XCTAssertEqual(peek.provider, "claude")
+        XCTAssertEqual(peek.modelLabel, "Claude")
+        XCTAssertEqual(peek.cwdLabel, "x")
+        XCTAssertEqual(peek.sessionState, .done)
+        let failure = peek.failed("无法确定窗口")
+        XCTAssertEqual(failure.failureMessage, "无法确定窗口")
+        XCTAssertEqual(failure.notificationText.title, "无法跳转 · 标题")
+        XCTAssertEqual(failure.notificationText.body, "无法确定窗口")
+        XCTAssertEqual(failure.sessionId, "s")
+        XCTAssertNotEqual(failure.id, peek.id)
+        XCTAssertNil(peek.failureMessage)
         XCTAssertEqual(peek.duration(session: 5, battery: 4), 5)
         XCTAssertEqual(Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: nil, transcriptPath: "", message: "", updatedAt: 1)).subtitle, "跑完了 · 点这里跳过去")
     }
@@ -75,7 +86,6 @@ final class PeekTests: XCTestCase {
         XCTAssertEqual(ask.label, "等审批")
         XCTAssertEqual(ask.duration(session: 5, battery: 4), 8, "等审批停得最久")
         XCTAssertEqual(Peek.session(SessionRecord(sessionId: "s", state: .waitingInput, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1)).label, "等输入")
-        XCTAssertGreaterThan(ask.estimatedContentWidth, 100)
     }
 
     /// 停留时长跟着设置走：等审批固定比跑完多 askExtra，电池走自己那个。
@@ -101,37 +111,6 @@ final class PeekTests: XCTestCase {
         XCTAssertEqual(exhausted.tint, .red)
         XCTAssertTrue(exhausted.subtitle?.hasPrefix("用完了 · ") == true, "带重置时刻")
         XCTAssertEqual(Peek.quota(QuotaEvent(provider: .codex, window: "7 天", kind: .reset, resetsAt: nil), now: now).style, .quotaReset)
-    }
-
-    /// 这条钉的是那个 bug 的一半：会话提示条挂着时不许悬停展开，
-    /// 否则 open() 的 clearPeek() 抢在人按下鼠标之前把它清掉，点击落到空处。
-    func testSessionPeekBlocksHoverOpen() {
-        let session = Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "", updatedAt: 1))
-        XCTAssertTrue(Peek.holdsHoverOpen(session), "会话类要拦住悬停展开")
-        XCTAssertFalse(Peek.holdsHoverOpen(Peek.battery(.full)), "电池类不拦，拦了悬停展开要被堵住一整条提示条的时间")
-        XCTAssertFalse(Peek.holdsHoverOpen(nil))
-    }
-
-    /// 低优先级的不顶掉正挂着的高优先级：电池提示不许盖掉「等输入」；同一个会话的新状态直接换。
-    func testPeekPriorityQueue() {
-        func session(_ id: String, _ state: SessionRecord.State) -> Peek {
-            Peek.session(SessionRecord(sessionId: id, state: state, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1))
-        }
-        let ask = session("a", .waitingInput)
-        let done = session("b", .done)
-        let battery = Peek.battery(.full)
-        let quota = Peek.quota(QuotaEvent(provider: .claude, window: "5 小时", kind: .exhausted, resetsAt: nil))
-        XCTAssertEqual(PeekQueue.decide(incoming: battery, showing: nil), .show)
-        XCTAssertEqual(PeekQueue.decide(incoming: battery, showing: ask), .wait, "电池提示不许盖掉等输入")
-        XCTAssertEqual(PeekQueue.decide(incoming: quota, showing: done), .wait)
-        XCTAssertEqual(PeekQueue.decide(incoming: Peek.shelf(names: ["a"], enabled: true), showing: quota), .wait, "一样高排队，不顶掉")
-        XCTAssertEqual(PeekQueue.decide(incoming: session("c", .waitingPermission), showing: ask), .wait,
-                       "两个会话前后脚都在等审批：后来的排队，先来的不能被顶掉")
-        XCTAssertEqual(PeekQueue.decide(incoming: ask, showing: done), .show, "等你的顶掉跑完的")
-        XCTAssertEqual(PeekQueue.decide(incoming: session("a", .done), showing: ask), .show, "同一个会话的新状态直接换，不留过时的等输入")
-        XCTAssertEqual(PeekQueue.keep(battery, over: quota), quota, "队里留高的")
-        XCTAssertEqual(PeekQueue.keep(quota, over: battery), quota)
-        XCTAssertEqual(PeekQueue.keep(battery, over: nil), battery)
     }
 
     func testAlertSoundCoalescesBursts() {

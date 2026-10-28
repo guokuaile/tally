@@ -19,6 +19,7 @@ enum TerminalLocator {
 
     enum Failure: Error, Equatable {
         case notFound
+        case ambiguous
         case notRunning(String)
         /// 没给或拒过「控制 <app>」的自动化授权。拒过之后系统不再弹框，每次点都静默失败，
         /// 所以要和「找不到窗口」分开，单独告诉用户去哪儿开。
@@ -64,6 +65,8 @@ enum TerminalLocator {
                 throw Failure.notRunning("Ghostty")
             } catch GhosttyLocator.Failure.notFound {
                 throw Failure.notFound
+            } catch GhosttyLocator.Failure.ambiguous {
+                throw Failure.ambiguous
             } catch let failure as Failure {
                 // 未授权是从 runAppleScript 抛上来的，别被下面那条压成「定位失败」
                 throw failure

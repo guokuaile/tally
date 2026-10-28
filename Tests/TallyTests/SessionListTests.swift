@@ -279,6 +279,8 @@ final class SessionResumeTests: XCTestCase {
                        "cd '/Users/me/my repo' && claude --resume 'abc-123'")
         XCTAssertEqual(SessionResume.command(for: record(provider: "codex", cwd: "/tmp/it's")),
                        "cd '/tmp/it'\\''s' && codex resume 'abc-123'")
+        XCTAssertEqual(SessionResume.resumeCommand(for: record(provider: "codex", cwd: "/x")),
+                       "codex resume 'abc-123'")
     }
 
     func testAppleScriptStringEscapesQuotesAndBackslashes() {

@@ -254,7 +254,7 @@ struct AlertSettings: View {
             } header: {
                 Text("AI 会话提示")
             } footer: {
-                Text("Claude Code / Codex 的会话跑完或在等你时，面板闭合就从刘海垂一条，点它跳回那个终端 / 展开到 AI 页。「等审批」「等输入」那两种比跑完多留 3 秒——真要人来的该多给点时间。提示条挂着的时候鼠标停上去不会展开面板，不然还没等你点它就被展开动作清掉了。跑完响 Glass，在等你响 Ping。那个会话的终端标签正在前台时（Ghostty / Terminal / iTerm，且已经允许 Tally 控制它）不响也不弹：你正看着它。")
+                Text("Claude Code / Codex 的会话跑完或在等你时，刘海下方显示药丸，点它跳回终端或展开 AI 页；最多同时显示三条，各自计时。「等审批」「等输入」比跑完多留 3 秒。跑完响 Glass，在等你响 Ping。能确认对应终端标签正在前台时不响也不弹。")
             }
             Section {
                 Toggle("配额涨过 80%、用完、重置时提示", isOn: preferenceToggle(\.quotaPeek))

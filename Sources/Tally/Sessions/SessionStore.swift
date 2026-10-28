@@ -19,6 +19,7 @@ final class SessionStore {
     private(set) var sessions: [SessionRecord] = []
     /// 一个会话进入 done / 等审批 / 等输入时调一次，控制器拿它在闭合态弹提示。
     var sessionAlert: ((SessionRecord) -> Void)?
+    var sessionsChanged: (([SessionRecord]) -> Void)?
 
     let directory: URL
     /// Claude Code 自己的 `~/.claude/sessions/<pid>.json`，见 `SessionRecord.claudeCodeStatus`。
@@ -250,6 +251,7 @@ final class SessionStore {
         if recheck { scheduleRecheck() }
         let alerts = Self.alerts(previous: sessions, current: loaded, quiet: quiet)
         sessions = loaded.sorted { $0.updatedAt > $1.updatedAt }
+        sessionsChanged?(sessions)
         for record in alerts { sessionAlert?(record) }
     }
 

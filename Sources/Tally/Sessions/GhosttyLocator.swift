@@ -6,12 +6,21 @@ struct GhosttyTerminal: Equatable {
     let id: String
     let name: String
     let workingDirectory: String
+    var tty: String? = nil
 }
 
 /// 从终端列表里挑出会话对应的那一个。纯函数，便于测试。
 enum GhosttyMatch: Equatable {
     case found(id: String)
     case notFound
+    case ambiguous
+
+    static func codexCandidates(_ terminals: [GhosttyTerminal], ttys: Set<String>) -> [GhosttyTerminal] {
+        terminals.filter { terminal in
+            guard let tty = terminal.tty, !tty.isEmpty else { return false }
+            return ttys.contains(TerminalLocator.devicePath(tty))
+        }
+    }
 
     /// 顺序：
     /// 1. 有会话标题就先按标题找（Claude 的终端标题是「状态符号 + 空格 + 会话标题」）。恰好一个就是它；
@@ -21,8 +30,16 @@ enum GhosttyMatch: Equatable {
     ///    （会话在子目录里干活时就是这种情况），祖先里取最深的那层。
     /// 3. 候选仍多于一个且没有会话标题时（Codex 不起会话标题，终端标题是「状态符号 + 空格 + 目录名」），
     ///    用目录名再筛一次。
-    /// 4. 取第一个（Ghostty 返回的第一个窗口是最前面的）；一个都没有返回 notFound。
-    static func pick(terminals: [GhosttyTerminal], cwd: String, title: String?, provider: String = "claude") -> GhosttyMatch {
+    /// 4. Do not guess when multiple candidates remain: that would focus another session.
+    static func pick(terminals: [GhosttyTerminal], cwd: String, title: String?, provider: String = "claude", tty: String? = nil) -> GhosttyMatch {
+        if let tty, !tty.isEmpty, terminals.contains(where: { $0.tty != nil }) {
+            let matches = terminals.filter { terminal in
+                guard let terminalTTY = terminal.tty, !terminalTTY.isEmpty else { return false }
+                return TerminalLocator.devicePath(terminalTTY) == TerminalLocator.devicePath(tty)
+            }
+            if matches.isEmpty { return .notFound }
+            return matches.count == 1 ? .found(id: matches[0].id) : .ambiguous
+        }
         let target = normalize(cwd)
         let cleanTitle = title?.trimmingCharacters(in: .whitespaces) ?? ""
 
@@ -31,7 +48,8 @@ enum GhosttyMatch: Equatable {
             if byTitle.count == 1 { return .found(id: byTitle[0].id) }
             if byTitle.count > 1 {
                 let narrowed = directoryCandidates(in: byTitle, target: target)
-                return .found(id: (narrowed.isEmpty ? byTitle : narrowed)[0].id)
+                let candidates = narrowed.isEmpty ? byTitle : narrowed
+                return candidates.count == 1 ? .found(id: candidates[0].id) : .ambiguous
             }
         }
 
@@ -42,7 +60,7 @@ enum GhosttyMatch: Equatable {
             let narrowed = candidates.filter { matchesTitle($0.name, dirName) }
             if !narrowed.isEmpty { candidates = narrowed }
         }
-        return .found(id: candidates[0].id)
+        return candidates.count == 1 ? .found(id: candidates[0].id) : .ambiguous
     }
 
     /// 精确相等的终端；没有就取目录是 `target` 祖先的终端里最深的那一层。
@@ -85,6 +103,7 @@ enum GhosttyLocator {
         case ghosttyNotRunning
         case scriptFailed(String)
         case notFound
+        case ambiguous
     }
 
     /// 分隔符在 tell 块外取：Ghostty 的字典里有 `tab` 类，块内写 `tab` 会被它遮蔽，
@@ -95,7 +114,15 @@ enum GhosttyLocator {
         set out to ""
         repeat with w in windows
             repeat with t in terminals of w
-                set out to out & (id of t) & sep & (name of t) & sep & (working directory of t) & linefeed
+                set ttyValue to ""
+                set ttySupported to "0"
+                try
+                    set ttyValue to «class Gtty» of t
+                    set ttySupported to "1"
+                on error errText number errNumber
+                    if errNumber is not -1728 then error errText number errNumber
+                end try
+                set out to out & (id of t) & sep & (name of t) & sep & (working directory of t) & sep & ttySupported & sep & ttyValue & linefeed
             end repeat
         end repeat
         return out
@@ -111,19 +138,30 @@ enum GhosttyLocator {
         guard runningGhostty() != nil else { throw Failure.ghosttyNotRunning }
         let output = try await execute(listScript)
         return output.split(separator: "\n").compactMap { line in
-            let parts = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
-            guard parts.count == 3 else { return nil }
-            return GhosttyTerminal(id: String(parts[0]), name: String(parts[1]), workingDirectory: String(parts[2]))
+            let parts = line.split(separator: "\t", maxSplits: 4, omittingEmptySubsequences: false)
+            guard parts.count == 5 else { return nil }
+            return GhosttyTerminal(id: String(parts[0]), name: String(parts[1]), workingDirectory: String(parts[2]),
+                                   tty: parts[3] == "1" ? String(parts[4]) : nil)
         }
     }
 
     /// 找到就聚焦并把 Ghostty 激活。
     static func focus(session: SessionRecord) async throws {
         let list = try await terminals()
-        guard case .found(let id) = GhosttyMatch.pick(
-            terminals: list, cwd: session.cwd, title: session.title, provider: session.provider
-        ) else {
-            throw Failure.notFound
+        var eligible = list
+        if session.provider == "codex", session.tty == nil, list.contains(where: { $0.tty != nil }) {
+            let ttys = Set(SysctlProcessTable().entries().compactMap { entry -> String? in
+                guard URL(fileURLWithPath: entry.path).lastPathComponent == "codex",
+                      let tdev = entry.tdev, let tty = AgentLocator.ttyName(tdev) else { return nil }
+                return TerminalLocator.devicePath(tty)
+            })
+            eligible = GhosttyMatch.codexCandidates(list, ttys: ttys)
+        }
+        let id: String
+        switch GhosttyMatch.pick(terminals: eligible, cwd: session.cwd, title: session.title, provider: session.provider, tty: session.tty) {
+        case .found(let found): id = found
+        case .notFound: throw Failure.notFound
+        case .ambiguous: throw Failure.ambiguous
         }
         let escaped = id.replacingOccurrences(of: "\"", with: "\\\"")
         _ = try await execute("tell application id \"com.mitchellh.ghostty\" to focus terminal id \"\(escaped)\"")

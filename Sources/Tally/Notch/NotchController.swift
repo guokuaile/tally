@@ -14,20 +14,6 @@ final class NotchState {
     /// 闭合态刘海宽高：标题行按宽在中间留空，提示条按高把内容排在刘海下面。
     var notchWidth: CGFloat = 189
     var notchHeight: CGFloat = 32
-    /// 闭合态正在弹的提示；nil 就是普通闭合态。
-    var peek: Peek?
-    /// 提示条内容量出来的宽度，面板宽度跟着它收紧。
-    var peekContentWidth: CGFloat = 0
-    var peekContentWidthChanged: (() -> Void)?
-    /// 点了提示条：会话类的跳回终端。
-    var peekTapped: (() -> Void)?
-
-    func reportPeekContentWidth(_ width: CGFloat) {
-        guard abs(width - peekContentWidth) > 0.5 else { return }
-        peekContentWidth = width
-        peekContentWidthChanged?()
-    }
-
     /// 当前页内容的自然高度，页视图量了报上来；面板高度跟着它走。
     var contentHeight: CGFloat = 0
     var contentHeightChanged: (() -> Void)?
@@ -79,6 +65,25 @@ struct Peek: Equatable {
     var title: String
     var subtitle: String?
     var sessionId: String?
+    var provider: String? = nil
+    var modelLabel: String? = nil
+    var cwdLabel: String? = nil
+    var sessionState: SessionRecord.State? = nil
+    var failureMessage: String? = nil
+
+    var notificationText: (title: String, body: String) {
+        if let failureMessage { return ("无法跳转 · \(title)", failureMessage) }
+        return ("\(label) · \(title)", subtitle ?? "")
+    }
+
+    func failed(_ message: String) -> Peek {
+        var copy = self
+        copy.id = "failure-\(UUID().uuidString)"
+        copy.style = .session
+        copy.tint = .red
+        copy.failureMessage = message
+        return copy
+    }
 
     /// 等审批比跑完多留这么久：真要人来的那种该多给点时间。原来两档写死 8 和 5，差值就是它。
     static let askExtra: TimeInterval = 3
@@ -95,7 +100,7 @@ struct Peek: Equatable {
     /// 没有刘海屏时改发系统通知的那几种：电池的不发，系统自己会说。
     var notifiesWithoutNotch: Bool { priority > 0 }
 
-    /// 抢占顺序：等你 > 跑完 > 配额、文件架 > 电池。低的不顶掉正挂着的高的（`PeekQueue`）。
+    /// Pending notifications are ordered by priority; visible pills are not preempted.
     var priority: Int {
         switch style {
         case .ask: return 3
@@ -104,12 +109,6 @@ struct Peek: Equatable {
         case .pluggedIn, .unplugged, .low, .full: return 0
         }
     }
-
-    /// 会话类提示条挂着时不许按悬停展开：`open()` 头一件事就是 `clearPeek()`，
-    /// 而人从光标落到提示条上到按下鼠标要 200–400 ms，150 ms 的悬停定时器一定抢在前面，
-    /// 提示条被清掉，点击落到展开态标题行的空位上——「点了没反应」就是这么来的。
-    /// 电池类不拦：拦了悬停展开要被堵住整整一条提示条的时间。
-    static func holdsHoverOpen(_ peek: Peek?) -> Bool { peek?.sessionId != nil }
 
     /// 点一下要干的事。电池类不可点，给个空计划。
     struct TapPlan: Equatable {
@@ -126,29 +125,25 @@ struct Peek: Equatable {
         }
     }
 
-    /// 估一个宽度给第一帧用，量出实际宽度后控制器再收紧：中文按 11pt、其余按 6.5pt 一个字。
-    var estimatedContentWidth: CGFloat {
-        func width(_ text: String) -> CGFloat {
-            text.unicodeScalars.reduce(0) { $0 + ($1.value > 0x2E80 ? 11 : 6.5) }
-        }
-        let top = width(label) + 5 + width(title)
-        let bottom = subtitle.map(width) ?? 0
-        return 24 + 8 + max(top, bottom)
-    }
-
     /// 会话跑完（绿勾）或在等我（橙色叹号 / 问号）。
     static func session(_ record: SessionRecord) -> Peek {
         let id = "session-\(record.sessionId)-\(record.state.rawValue)-\(record.updatedAt)"
+        var peek: Peek
         switch record.state {
         case .waitingPermission:
-            return Peek(id: id, style: .ask, tint: .orange, label: "等审批", title: record.displayTitle, subtitle: "\(record.providerLabel) 在等你点一下 · 点这里跳过去", sessionId: record.sessionId)
+            peek = Peek(id: id, style: .ask, tint: .orange, label: "等审批", title: record.displayTitle, subtitle: "\(record.providerLabel) 在等你点一下 · 点这里跳过去", sessionId: record.sessionId)
         case .waitingInput:
-            return Peek(id: id, style: .ask, tint: .yellow, label: "等输入", title: record.displayTitle, subtitle: "\(record.providerLabel) 有话问你 · 点这里跳过去", sessionId: record.sessionId)
+            peek = Peek(id: id, style: .ask, tint: .yellow, label: "等输入", title: record.displayTitle, subtitle: "\(record.providerLabel) 有话问你 · 点这里跳过去", sessionId: record.sessionId)
         default:
-            return Peek(id: id, style: .session, tint: .green, label: record.providerLabel, title: record.displayTitle,
+            peek = Peek(id: id, style: .session, tint: .green, label: record.providerLabel, title: record.displayTitle,
                         subtitle: record.message.flatMap { $0.isEmpty ? nil : $0.replacingOccurrences(of: "\n", with: " ") } ?? "跑完了 · 点这里跳过去",
                         sessionId: record.sessionId)
         }
+        peek.provider = record.provider
+        peek.modelLabel = record.modelLabel ?? record.providerLabel
+        peek.cwdLabel = record.cwdLabel
+        peek.sessionState = record.state
+        return peek
     }
 
     /// 配额涨过 80%（橙）、用完（红）、重置（绿）。不可点。
@@ -214,25 +209,6 @@ struct Peek: Equatable {
     }
 }
 
-/// 新提示来时怎么排，纯函数。不然一条电池提示能把「等输入」顶掉，人就错过了。
-enum PeekQueue {
-    enum Decision: Equatable { case show, wait }
-
-    /// 没有正挂着的、比它高、或是同一个会话的新状态（等输入之后跑完了，不留过时的那条）→ 马上换上；否则排队。
-    /// 一样高也排队：两个会话前后脚都在等审批，后来的顶掉先来的，先来的那个就再没人提醒了。
-    static func decide(incoming: Peek, showing: Peek?) -> Decision {
-        guard let showing else { return .show }
-        if incoming.sessionId != nil, incoming.sessionId == showing.sessionId { return .show }
-        return incoming.priority > showing.priority ? .show : .wait
-    }
-
-    /// 队里只留一条：留优先级高的，一样高留新的。
-    static func keep(_ incoming: Peek, over pending: Peek?) -> Peek {
-        guard let pending, pending.priority > incoming.priority else { return incoming }
-        return pending
-    }
-}
-
 /// 刘海面板的生命周期：定位、悬停展开、点外收起、右键菜单、屏幕变化。
 @MainActor
 final class NotchController {
@@ -253,9 +229,12 @@ final class NotchController {
     /// 点菜单栏小恐龙打开时，恐龙按钮到刘海正中这段菜单栏：光标从没进过面板，停在恐龙上或顺着菜单栏滑进面板都不算离开。
     /// 和 `shrunkFrom` 分开存：切到系统页面板变矮时 `applyFrame` 会拿当时的 frame 覆盖掉 `shrunkFrom`。
     private var openedFrom: CGRect?
-    private var peekTimer: Timer?
-    /// 被正挂着的高优先级提示挡住、等它收回再垂的那一条。
-    private var pendingPeek: Peek?
+    private var pillQueue = PillQueue()
+    private var pillTimer: Timer?
+    private var pillPanels: [String: PillNotificationPanel] = [:]
+    private var pillContent: [String: Peek] = [:]
+    private var pillInteractivity: [String: Bool] = [:]
+    private var alertVersions: [String: UUID] = [:]
     /// 「全屏 app 时隐藏面板」开着、内建屏上有别的 app 在系统全屏时为 true：面板整个不上屏，展开、悬停、提示条都不出来。
     private var hiddenForFullScreen = false
     private var fullScreenObservers: [NSObjectProtocol] = []
@@ -265,7 +244,7 @@ final class NotchController {
     private var keyMonitor: Any?
     private var swipe = SwipeTracker()
 
-    init(openOnLaunch: LaunchOptions.Page?, openSettings: @escaping () -> Void) {
+    init(openOnLaunch: LaunchOptions.Page?, peekTest: Bool = false, openSettings: @escaping () -> Void) {
         state.openSettings = openSettings
         panel = NotchPanel(contentRect: CGRect(origin: .zero, size: CGSize(width: NotchGeometry.openWidth, height: NotchGeometry.minOpenHeight)))
         hostView = NotchHostView(rootView: NotchView(state: state))
@@ -304,16 +283,25 @@ final class NotchController {
             guard let self, self.state.isOpen else { return }
             self.applyFrame(animated: true)
         }
-        SessionStore.shared.sessionAlert = { [weak self] record in Task { await self?.sessionAlerted(record) } }
+        SessionStore.shared.sessionAlert = { [weak self] record in
+            guard let self else { return }
+            let version = UUID()
+            self.alertVersions[record.sessionId] = version
+            Task { await self.sessionAlerted(record, version: version) }
+        }
+        SessionStore.shared.sessionsChanged = { [weak self] records in
+            guard let self else { return }
+            let active = Set(records.map(\.sessionId))
+            self.alertVersions = self.alertVersions.filter { active.contains($0.key) }
+            guard !self.pillQueue.visible.isEmpty || !self.pillQueue.pending.isEmpty else { return }
+            let waiting = Set(records.filter(\.isWaiting).map(\.sessionId))
+            self.pillQueue.reconcileWaiting(activeSessionIDs: waiting, at: Date())
+            self.refreshPills()
+        }
         UsageStore.shared.quotaAlert = { [weak self] event in
             guard PreferencesStore.shared.prefs.quotaPeek else { return }
             self?.showPeek(.quota(event))
         }
-        state.peekContentWidthChanged = { [weak self] in
-            guard let self, !self.state.isOpen, self.state.peek != nil else { return }
-            self.applyFrame(animated: true)
-        }
-        state.peekTapped = { [weak self] in self?.peekTapped() }
         BatteryWatcher.shared.onEvent = { [weak self] event in self?.showPeek(.battery(event)) }
         ScreenshotWatcher.shared.onScreenshots = { [weak self] urls in self?.receiveFiles(urls, kind: .screenshot) }
         NowPlayingMonitor.shared.visibilityChanged = { [weak self] in self?.musicVisibilityChanged() }
@@ -359,13 +347,27 @@ final class NotchController {
             let last = LaunchOptions.Page(rawValue: PreferencesStore.shared.prefs.lastPage) ?? .ai
             state.page = LaunchOptions.Page.visibleNow.contains(last) ? last : .ai
         }
-        if DemoMode.isOn { scheduleDemoPeeks() }
+        if DemoMode.isOn { scheduleDemoPeeks(peekTest: peekTest) }
     }
 
     /// 演示模式：会话目录不盯，不会有真提示；按固定时刻垂两条，录 GIF 时照着时间点拍。
     /// 不走 `sessionAlerted`：它要跑 AppleScript 问终端前台，还会响提示音。面板展开着或全屏藏着时 showPeek 自己会跳过。
-    private func scheduleDemoPeeks() {
+    private func scheduleDemoPeeks(peekTest: Bool) {
         Task { @MainActor [weak self] in
+            if peekTest {
+                try? await Task.sleep(for: .seconds(1))
+                let records = DemoData.sessions(now: Date())
+                for record in records.filter({ $0.state == .waitingPermission || $0.state == .waitingInput || $0.state == .done }) {
+                    self?.showPeek(.session(record))
+                }
+                try? await Task.sleep(for: .seconds(1))
+                if var record = records.first(where: { $0.state == .done }) {
+                    record.sessionId = "demo-queued"
+                    record.title = "检查队列中的第四条"
+                    self?.showPeek(.session(record))
+                }
+                return
+            }
             try? await Task.sleep(for: .seconds(4))
             if let record = SessionStore.shared.sessions.first(where: { $0.sessionId == DemoData.peekSessionId }) {
                 self?.showPeek(.session(record))
@@ -382,6 +384,8 @@ final class NotchController {
         let prefs = PreferencesStore.shared.prefs
         // 截屏和共享屏幕时隐藏：窗口服务器层面不给别的进程读这个窗口
         panel.sharingType = prefs.hideFromCapture ? .none : .readOnly
+        for pill in pillPanels.values { pill.sharingType = panel.sharingType }
+        if !pillQueue.visible.isEmpty || !pillQueue.pending.isEmpty { refreshPills() }
         BatteryWatcher.shared.setEnabled(prefs.batteryPeek)
         PrivacyWatcher.shared.setEnabled(prefs.privacyDots)
         ShelfStore.shared.setEnabled(prefs.shelfEnabled)
@@ -473,6 +477,7 @@ final class NotchController {
         guard let screen = NotchGeometry.builtInNotchScreen() else {
             // 合盖或只剩外接屏：按收起处理，网络 / 系统的采样跟着停，不能只把窗口藏起来
             close()
+            clearPeek()
             metrics = nil
             panel.orderOut(nil)
             Log.debug("没有带刘海的内建屏，面板隐藏")
@@ -486,13 +491,14 @@ final class NotchController {
             state.notchWidth = closed.width
             state.notchHeight = closed.height
         }
-        if hiddenForFullScreen { close() }
+        if hiddenForFullScreen { close(); clearPeek() }
         applyFrame(animated: false)
         // 全屏隐藏期间只更新尺寸，不上屏：任何一次 orderFront 都会把面板放回全屏空间
         if hiddenForFullScreen {
             panel.orderOut(nil)
         } else {
             panel.orderFrontRegardless()
+            refreshPills()
         }
     }
 
@@ -502,8 +508,6 @@ final class NotchController {
         if state.isOpen {
             size = CGSize(width: NotchGeometry.openWidth,
                           height: NotchGeometry.openHeight(content: state.contentHeight, screenHeight: metrics.frame.height))
-        } else if let peek = state.peek {
-            size = NotchGeometry.peekSize(closed: closed, content: state.peekContentWidth > 0 ? state.peekContentWidth : peek.estimatedContentWidth)
         } else {
             size = closed
         }
@@ -582,43 +586,75 @@ final class NotchController {
 
     // MARK: 完成提示
 
-    /// 面板闭合时弹提示：提示条垂下几秒再收回（时长 `Peek.duration(session:battery:)`，秒数在设置里）；
-    /// 连着来按 `PeekQueue` 排：比正挂着的高就换成新的并重新计时，一样高或更低的等它收回再垂。
     private func showPeek(_ peek: Peek) {
-        guard !state.isOpen else { return }
-        // 全屏隐藏期间不垂提示条（提示音照响）；不然退出全屏时会冒出一条过时的
-        guard !hiddenForFullScreen else { return }
-        // 没有刘海屏（合盖接外接屏）提示条画不出来：改发系统通知，不然会话提醒只剩一声响
+        guard !state.isOpen, !hiddenForFullScreen else { return }
         guard metrics != nil else {
             if PreferencesStore.shared.prefs.notifyWithoutNotch, peek.notifiesWithoutNotch { SystemNotifier.shared.post(peek) }
             return
         }
-        guard PeekQueue.decide(incoming: peek, showing: state.peek) == .show else {
-            pendingPeek = PeekQueue.keep(peek, over: pendingPeek)
-            return
-        }
-        peekTimer?.invalidate()
-        state.peekContentWidth = 0
-        state.peek = peek
-        applyFrame(animated: true)
         let prefs = PreferencesStore.shared.prefs
-        let seconds = peek.duration(session: prefs.peekSessionSeconds, battery: prefs.peekBatterySeconds)
-        peekTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.state.peek != nil else { return }
-                let heldHover = Peek.holdsHoverOpen(self.state.peek)
-                // clearPeek 会连队里那条一起丢，先取出来
-                let next = self.pendingPeek
-                self.clearPeek()
-                if let next {
-                    self.showPeek(next)
-                } else {
-                    self.applyFrame(animated: true)
+        pillQueue.enqueue(peek, at: Date(), sessionSeconds: prefs.peekSessionSeconds, batterySeconds: prefs.peekBatterySeconds)
+        refreshPills()
+    }
+
+    private func refreshPills() {
+        pillTimer?.invalidate()
+        pillTimer = nil
+        let items = pillQueue.visible
+        let ids = Set(items.map(\.id))
+        for id in pillPanels.keys where !ids.contains(id) {
+            pillPanels.removeValue(forKey: id)?.close()
+            pillContent[id] = nil
+            pillInteractivity[id] = nil
+        }
+        guard !hiddenForFullScreen, !state.isOpen, let screen = NotchGeometry.builtInNotchScreen() else { return }
+        for (index, item) in items.enumerated() {
+            let peek: Peek
+            let interactive: Bool
+            switch item.content {
+            case .peek(let original):
+                peek = original
+                interactive = original.sessionId != nil
+            case .summary(let summary):
+                let style: Peek.Style
+                switch summary.category {
+                case .aiCompletion: style = .session
+                case .quota: style = .quotaHigh
+                case .battery: style = .low
+                case .shelf: style = .shelf
+                case .update: style = .update
                 }
-                // 提示条挂着时拦下了悬停展开，收回这一刻光标还在面板上就补一次：
-                // 追踪区只在光标真正跨界时发 mouseEntered，光标不动就再也不发了
-                if heldHover, !Peek.holdsHoverOpen(self.state.peek), self.panel.frame.contains(NSEvent.mouseLocation) { self.hoverStarted() }
+                peek = Peek(id: item.id, style: style, tint: .orange, label: summary.category.title,
+                            title: summary.title, subtitle: nil, sessionId: nil)
+                interactive = summary.route != .shelf || PreferencesStore.shared.prefs.shelfEnabled
             }
+            let action: () -> Void = { [weak self] in self?.pillTapped(id: item.id) }
+            let pill: PillNotificationPanel
+            if let existing = pillPanels[item.id] {
+                pill = existing
+                if pillContent[item.id] != peek || pillInteractivity[item.id] != interactive {
+                    pill.update(peek: peek, isInteractive: interactive, onTap: action)
+                }
+            } else {
+                pill = PillNotificationPanel(peek: peek, isInteractive: interactive, onTap: action)
+                pillPanels[item.id] = pill
+            }
+            pillContent[item.id] = peek
+            pillInteractivity[item.id] = interactive
+            pill.sharingType = panel.sharingType
+            pill.place(on: screen, index: index)
+            pill.orderFrontRegardless()
+        }
+        if let deadline = pillQueue.nextDeadline {
+            let timer = Timer(timeInterval: max(0.01, deadline.timeIntervalSinceNow), repeats: false) { [weak self] timer in
+                Task { @MainActor in
+                    guard let self, self.pillTimer === timer else { return }
+                    self.pillQueue.advance(to: Date())
+                    self.refreshPills()
+                }
+            }
+            pillTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
         }
     }
 
@@ -642,44 +678,67 @@ final class NotchController {
     }
 
     /// 会话提示：那个会话的终端标签就在前台时不响也不弹（人正看着它）；不然按设置响一声，再垂提示条。
-    private func sessionAlerted(_ record: SessionRecord) async {
+    private func sessionAlerted(_ record: SessionRecord, version: UUID) async {
         guard !state.isOpen else { return }
         if await SessionFrontmost.check(record) { return }
+        guard alertVersions[record.sessionId] == version,
+              SessionStore.shared.sessions.contains(where: { $0.sessionId == record.sessionId && $0.state == record.state && $0.updatedAt == record.updatedAt }) else { return }
         if PreferencesStore.shared.prefs.sessionSound { AlertSound.play(for: record.state) }
         showPeek(.session(record))
     }
 
-    /// 连队里那条一起丢：展开面板、点了提示条，人已经在看了，过会儿再垂一条旧消息只会添乱。
     private func clearPeek() {
-        peekTimer?.invalidate()
-        peekTimer = nil
-        pendingPeek = nil
-        state.peek = nil
-        state.peekContentWidth = 0
+        pillTimer?.invalidate()
+        pillTimer = nil
+        pillQueue.clear()
+        for pill in pillPanels.values { pill.close() }
+        pillPanels.removeAll()
+        pillContent.removeAll()
+        pillInteractivity.removeAll()
     }
 
-    /// 点提示条：按设置里的「点提示条时」三选一，提示条一律收起。
-    private func peekTapped() {
-        guard let peek = state.peek else { return }
-        let plan = peek.tapPlan(PeekTapAction.parse(PreferencesStore.shared.prefs.peekTapAction))
-        // open() 头一件事是 clearPeek()，要用的东西必须先取出来
-        let session = peek.sessionId.flatMap { id in SessionStore.shared.sessions.first { $0.sessionId == id } }
-        clearPeek()
-        if plan.openAI {
-            // 钉住：人是特意点过来看的，不钉的话手一挪面板就收了
-            state.select(.ai)
-            open(pinned: true)
-        } else {
-            applyFrame(animated: true)
-        }
-        // 演示模式的会话没有终端，跳过去只会把别的真窗口叫到前台
-        guard plan.focusTerminal, let session, !DemoMode.isOn else { return }
-        // 脚本在后台跑，提示条不等它（第一次跳会弹自动化授权框）
-        Task {
-            do {
-                try await TerminalLocator.focus(session: session)
-            } catch {
-                Log.error("从提示条跳回终端失败: \(error)")
+    private func pillTapped(id: String) {
+        guard let item = pillQueue.visible.first(where: { $0.id == id }) else { return }
+        pillQueue.dismiss(id: id, at: Date())
+        refreshPills()
+        switch item.content {
+        case .summary(let summary):
+            switch summary.route {
+            case .ai: state.select(.ai); open(pinned: true)
+            case .system: state.select(.system); open(pinned: true)
+            case .shelf:
+                guard PreferencesStore.shared.prefs.shelfEnabled else { return }
+                state.select(.shelf); open(pinned: true)
+            case .settings: state.openSettings?()
+            }
+        case .peek(let peek):
+            let plan = peek.tapPlan(PeekTapAction.parse(PreferencesStore.shared.prefs.peekTapAction))
+            let session = peek.sessionId.flatMap { id in SessionStore.shared.sessions.first { $0.sessionId == id } }
+            guard plan.focusTerminal, !DemoMode.isOn else {
+                if plan.openAI { state.select(.ai); open(pinned: true) }
+                return
+            }
+            guard let session else {
+                showPeek(peek.failed("会话已不在列表"))
+                return
+            }
+            if plan.openAI { state.select(.ai); open(pinned: true) }
+            Task { [weak self] in
+                guard await SessionJump.shared.run(session) == false, let self else { return }
+                if !self.state.isOpen, !self.hiddenForFullScreen {
+                    let message = SessionJump.shared.failures[session.sessionId] ?? "定位失败"
+                    let failure = peek.failed(message)
+                    let prefs = PreferencesStore.shared.prefs
+                    if self.metrics == nil {
+                        if prefs.notifyWithoutNotch && self.pillQueue.canEnqueueFailure(for: session, current: SessionStore.shared.sessions) {
+                            SystemNotifier.shared.post(failure)
+                        }
+                    } else if self.pillQueue.enqueueFailure(failure, for: session, current: SessionStore.shared.sessions,
+                                                            at: Date(), sessionSeconds: prefs.peekSessionSeconds,
+                                                            batterySeconds: prefs.peekBatterySeconds) {
+                        self.refreshPills()
+                    }
+                }
             }
         }
     }
@@ -709,11 +768,12 @@ final class NotchController {
     /// AppKit 拿闭合态的矩形比对已经长大的窗口，会合成光标明明在面板上的离开事件。所以展开后改为轮询。
     private func hoverStarted() {
         guard PreferencesStore.shared.prefs.hoverToOpen, !state.isOpen, Date().timeIntervalSince(closedAt) > 0.4 else { return }
-        // 会话提示条挂着就别展开：展开会把它清掉，人还没来得及点
-        guard !Peek.holdsHoverOpen(state.peek) else { return }
         openTimer?.invalidate()
         openTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.open() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.open()
+            }
         }
     }
 

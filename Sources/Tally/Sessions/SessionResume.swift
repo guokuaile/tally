@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// 接着聊一个已关闭的会话：在新终端里到会话目录再 `claude --resume` / `codex resume`（docs/ai.md「已关闭的会话」）。
+/// 接着聊一个已关闭的会话：在新终端里到会话目录再恢复（docs/ai.md「已关闭的会话」）。
 enum SessionResume {
 
     /// `claude --resume <id>` 默认沿用原来的 session_id，接上之后 hook 写回同一个文件，还是这一行。

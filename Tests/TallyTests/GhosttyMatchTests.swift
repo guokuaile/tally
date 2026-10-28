@@ -3,6 +3,14 @@ import XCTest
 
 final class GhosttyMatchTests: XCTestCase {
 
+    func testCodexCandidatesExcludeClaudeAndUnknownTTY() {
+        let codex = GhosttyTerminal(id: "codex", name: "same", workingDirectory: "/tmp", tty: "ttys002")
+        let claude = GhosttyTerminal(id: "claude", name: "same", workingDirectory: "/tmp", tty: "/dev/ttys001")
+        let unknown = GhosttyTerminal(id: "unknown", name: "same", workingDirectory: "/tmp")
+        XCTAssertEqual(GhosttyMatch.codexCandidates([codex, claude, unknown], ttys: ["/dev/ttys002"]), [codex])
+        XCTAssertTrue(GhosttyMatch.codexCandidates([codex, claude, unknown], ttys: []).isEmpty)
+    }
+
     private let a = GhosttyTerminal(id: "A", name: "✳ Foo", workingDirectory: "/Users/me/workspace/x")
     private let b = GhosttyTerminal(id: "B", name: "◐ Bar", workingDirectory: "/Users/me/workspace/x")
     private let c = GhosttyTerminal(id: "C", name: "⠇ Baz", workingDirectory: "/Users/me/workspace/y")
@@ -26,9 +34,29 @@ final class GhosttyMatchTests: XCTestCase {
         XCTAssertEqual(GhosttyMatch.pick(terminals: [a, b, c], cwd: "/Users/me/workspace/x", title: "Bar"), .found(id: "B"))
     }
 
-    func testTitleMissFallsBackToDirectory() {
-        XCTAssertEqual(GhosttyMatch.pick(terminals: [a, b], cwd: "/Users/me/workspace/x", title: "Nope"), .found(id: "A"))
-        XCTAssertEqual(GhosttyMatch.pick(terminals: [a, b], cwd: "/Users/me/workspace/x", title: nil), .found(id: "A"))
+    func testTitleMissDoesNotChooseArbitraryTerminal() {
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [a, b], cwd: "/Users/me/workspace/x", title: "Nope"), .ambiguous)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [a, b], cwd: "/Users/me/workspace/x", title: nil), .ambiguous)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [a], cwd: "/Users/me/workspace/x", title: "Nope"), .found(id: "A"))
+    }
+
+    func testDuplicateTitlesInSameDirectoryAreAmbiguous() {
+        let t1 = GhosttyTerminal(id: "T1", name: "✳ 同名", workingDirectory: "/Users/me/one")
+        let t2 = GhosttyTerminal(id: "T2", name: "◐ 同名", workingDirectory: "/Users/me/one")
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [t1, t2], cwd: "/Users/me/one", title: "同名"), .ambiguous)
+    }
+
+    func testTTYDistinguishesSameDirectoryAndSameTitle() {
+        let first = GhosttyTerminal(id: "A", name: "✳ Claude Code", workingDirectory: "/tmp", tty: "/dev/ttys005")
+        let second = GhosttyTerminal(id: "B", name: "✳ Claude Code", workingDirectory: "/tmp", tty: "/dev/ttys008")
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [first, second], cwd: "/tmp", title: nil, tty: "ttys008"), .found(id: "B"))
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [first, second], cwd: "/tmp", title: nil, tty: "ttys009"), .notFound)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [first, second], cwd: "/tmp", title: nil, tty: nil), .ambiguous)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [first, second], cwd: "/elsewhere", title: "Claude Code", tty: "/dev/ttys008"), .found(id: "B"))
+        let unavailable = GhosttyTerminal(id: "C", name: "✳ Claude Code", workingDirectory: "/tmp", tty: "")
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [unavailable], cwd: "/tmp", title: nil, tty: "ttys005"), .notFound)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [a], cwd: "/Users/me/workspace/x", title: nil, tty: "ttys005"), .found(id: "A"))
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [first, first], cwd: "/tmp", title: nil, tty: "ttys005"), .ambiguous)
     }
 
     func testAncestorDirectoryMatchesAndDeepestWins() {
@@ -71,7 +99,7 @@ final class GhosttyMatchTests: XCTestCase {
         let other = GhosttyTerminal(id: "OT", name: "vim", workingDirectory: "/Users/me/workspace/GoldFever")
         XCTAssertEqual(
             GhosttyMatch.pick(terminals: [plain, other], cwd: "/Users/me/workspace/GoldFever", title: nil, provider: "codex"),
-            .found(id: "PL")
+            .ambiguous
         )
     }
 }

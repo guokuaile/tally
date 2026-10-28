@@ -33,6 +33,27 @@ final class NotchPanelTests: XCTestCase {
                           "让路期间要低于模态窗口，否则弹框还是被盖住")
         XCTAssertEqual(panel.level, original, "出来还原成原来的 level")
     }
+
+    @MainActor
+    func testPillAcceptsFirstClickWithoutBecomingKey() throws {
+        _ = NSApplication.shared
+        var clicks = 0
+        let peek = Peek(id: "test", style: .session, tint: .green, label: "Claude", title: "test", subtitle: nil, sessionId: "s")
+        let pill = PillNotificationPanel(peek: peek, isInteractive: true) { clicks += 1 }
+        defer { pill.close() }
+        pill.orderFrontRegardless()
+        pill.displayIfNeeded()
+        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: CGPoint(x: 160, y: 22),
+                                                     modifierFlags: [], timestamp: 0, windowNumber: pill.windowNumber,
+                                                     context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        pill.sendEvent(event)
+        XCTAssertEqual(clicks, 1)
+        XCTAssertFalse(pill.canBecomeKey)
+        XCTAssertFalse(pill.isKeyWindow)
+        let original = pill.level
+        NotchPanel.steppingAside { XCTAssertLessThan(pill.level.rawValue, NSWindow.Level.modalPanel.rawValue) }
+        XCTAssertEqual(pill.level, original)
+    }
 }
 
 final class PanelKeyTests: XCTestCase {

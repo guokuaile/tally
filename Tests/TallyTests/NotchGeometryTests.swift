@@ -21,12 +21,17 @@ final class NotchGeometryTests: XCTestCase {
         XCTAssertEqual(NotchGeometry.openHeight(content: 2000, screenHeight: 982), 589, "上限是屏幕高的六成")
     }
 
-    func testPeekFollowsContentWidthWithinBounds() {
-        let closed = CGSize(width: 189, height: 32)
-        XCTAssertEqual(NotchGeometry.peekSize(closed: closed, content: 100), CGSize(width: 189, height: 32 + NotchGeometry.peekDrop), "内容窄就和刘海一样宽")
-        XCTAssertEqual(NotchGeometry.peekSize(closed: closed, content: 240).width, 240 + 2 * NotchGeometry.peekPadding, "内容宽就跟着内容")
-        XCTAssertEqual(NotchGeometry.peekSize(closed: closed, content: 900).width, NotchGeometry.peekMaxWidth, "有上限")
-        XCTAssertLessThan(NotchGeometry.peekSize(closed: closed, content: 240).height, NotchGeometry.minOpenHeight, "提示态比最矮的展开态还矮")
+    func testPillsFitBelowNotchWithSeparateWindows() {
+        let first = PillNotificationPanel.placementFrame(in: builtIn14.frame, safeAreaTop: builtIn14.safeAreaTop, index: 0)
+        let second = PillNotificationPanel.placementFrame(in: builtIn14.frame, safeAreaTop: builtIn14.safeAreaTop, index: 1)
+        XCTAssertEqual(first.width, 320)
+        XCTAssertEqual(first.height, 44)
+        XCTAssertEqual(first.midX, builtIn14.frame.midX)
+        XCTAssertEqual(first.maxY, builtIn14.frame.maxY - 32 - 6)
+        XCTAssertEqual(first.minY - second.maxY, 6)
+        let narrow = PillNotificationPanel.placementFrame(in: CGRect(x: 0, y: 0, width: 250, height: 600), safeAreaTop: 32, index: 0)
+        XCTAssertEqual(narrow.width, 218)
+        XCTAssertEqual(narrow.minX, 16)
     }
 
     func testHeaderGapCoversNotchWithMargin() {

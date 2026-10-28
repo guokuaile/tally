@@ -11,6 +11,7 @@ final class DemoModeTests: XCTestCase {
         let openOnly = LaunchOptions.parse(["Tally", "--open", "ai"])
         XCTAssertFalse(openOnly.demo)
         XCTAssertEqual(openOnly.openPage, .ai)
+        XCTAssertTrue(LaunchOptions.parse(["Tally", "--demo", "--peek-test"]).peekTest)
     }
 
     /// 测试进程不许进演示模式：进了的话各 store 的 shared 全是假数据，别的用例测的就不是真路径。

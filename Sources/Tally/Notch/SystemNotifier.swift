@@ -22,8 +22,9 @@ final class SystemNotifier: NSObject, UNUserNotificationCenterDelegate {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         let content = UNMutableNotificationContent()
-        content.title = "\(peek.label) · \(peek.title)"
-        content.body = peek.subtitle ?? ""
+        let text = peek.notificationText
+        content.title = text.title
+        content.body = text.body
         if let sessionId = peek.sessionId { content.userInfo = ["sessionId": sessionId] }
         let request = UNNotificationRequest(identifier: peek.id, content: content, trigger: nil)
         center.requestAuthorization(options: [.alert]) { [weak self] granted, error in

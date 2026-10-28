@@ -95,6 +95,7 @@ struct LaunchOptions: Equatable {
     var openPage: Page?
     var installHooks = false
     var demo = false
+    var peekTest = false
 
     static func parse(_ arguments: [String]) -> LaunchOptions {
         var options = LaunchOptions()
@@ -106,6 +107,8 @@ struct LaunchOptions: Equatable {
                 options.installHooks = true
             } else if argument == "--demo" {
                 options.demo = true
+            } else if argument == "--peek-test" {
+                options.peekTest = true
             }
         }
         return options
@@ -150,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panelPage = options.openPage.flatMap { LaunchOptions.Page.panelPages.contains($0) ? $0 : nil }
         // 面板浮在所有窗口之上，不先收起来会盖住设置窗口的上半截；所有打开设置的入口都经过 show()
         SettingsWindowController.shared.willShow = { [weak self] in self?.notch?.close() }
-        notch = NotchController(openOnLaunch: panelPage) {
+        notch = NotchController(openOnLaunch: panelPage, peekTest: options.demo && options.peekTest) {
             SettingsWindowController.shared.show()
         }
         if !pendingFiles.isEmpty {

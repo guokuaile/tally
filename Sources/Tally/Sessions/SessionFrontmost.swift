@@ -16,7 +16,7 @@ enum SessionFrontmost {
             guard front == GhosttyLocator.bundleIdentifier, hasAutomation(front),
                   let focused = try? await TerminalLocator.runAppleScript(ghosttyFocusedScript, target: "Ghostty"),
                   let terminals = try? await GhosttyLocator.terminals(),
-                  case .found(let id) = GhosttyMatch.pick(terminals: terminals, cwd: session.cwd, title: session.title, provider: session.provider)
+                  case .found(let id) = GhosttyMatch.pick(terminals: terminals, cwd: session.cwd, title: session.title, provider: session.provider, tty: session.tty)
             else { return false }
             return id == focused
         case .terminalApp:

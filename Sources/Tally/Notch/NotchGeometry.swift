@@ -40,13 +40,6 @@ enum NotchGeometry {
     /// 顶栏、页签、内边距加起来的固定高度。
     static let chrome: CGFloat = 56
     static let minOpenHeight: CGFloat = 160
-    /// 提示态：从刘海往下垂一条（照 Atoll 的 sneak peek 标准式），宽度跟着内容走：最窄和刘海一样宽，最宽 `peekMaxWidth`。
-    static let peekDrop: CGFloat = 46
-    static let peekBottomRadius: CGFloat = 18
-    static let peekMaxWidth: CGFloat = 420
-    /// 内容两侧的留白。
-    static let peekPadding: CGFloat = 12
-
     /// 展开态高度 = 固定部分 + 当前页内容的自然高度，夹在下限与屏幕高的六成之间；超过上限页内容才滚。
     static func openHeight(content: CGFloat, screenHeight: CGFloat) -> CGFloat {
         min(max(content + chrome, minOpenHeight), (screenHeight * 0.6).rounded())
@@ -68,11 +61,6 @@ enum NotchGeometry {
     /// 面板里每次左键都会经过 `NotchHostView.mouseDown`，不按位置判的话点页签也会把钉住的面板收起。
     static func hitsNotch(_ point: CGPoint, panelSize: CGSize, notch: CGSize) -> Bool {
         point.y >= panelSize.height - notch.height && abs(point.x - panelSize.width / 2) <= headerGap(closedWidth: notch.width) / 2
-    }
-
-    /// 提示态：宽 = 内容宽 + 两侧留白，夹在刘海宽和上限之间；高 = 闭合高 + `peekDrop`。
-    static func peekSize(closed: CGSize, content: CGFloat) -> CGSize {
-        CGSize(width: min(max(content + 2 * peekPadding, closed.width), peekMaxWidth), height: closed.height + peekDrop)
     }
 
     /// 把一个尺寸钉在屏幕顶部中央。AppKit 坐标原点在左下，所以 y 用 maxY 往下减。

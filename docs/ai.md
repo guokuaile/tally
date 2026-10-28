@@ -127,15 +127,25 @@ hook 这一路看「等你」有三处接不住，Claude Code 自己的状态文
 
 | `term` | 做法 |
 |---|---|
-| nil / `ghostty` | AppleScript 枚举 `window → tab → terminal`（id / name / working directory），`focus terminal id`。分隔符在 tell 块外取 `character id 9`：块内写 `tab` 会被 Ghostty 的 `tab` 类遮蔽 |
+| nil / `ghostty` | AppleScript 枚举 `window → tab → terminal`（id / name / working directory；支持时也读 tty），`focus terminal id`。分隔符在 tell 块外取 `character id 9`：块内写 `tab` 会被 Ghostty 的 `tab` 类遮蔽 |
 | `Apple_Terminal` | AppleScript 找 `tty` 相等的 tab，`set selected tab`，窗口置前，块内 `activate` |
 | `iTerm.app` | 同上，遍历 `windows → tabs → sessions` 比 `tty`，`select` 会话与窗口，块内 `activate` |
-
-三段脚本都写 `tell application id "<bundle id>"` 而不是按名字：iTerm2 的文件叫 `iTerm.app`、`CFBundleName` 却是 `iTerm2`，按名字找碰上改过名的安装会解析不到，AppleScript 会弹「选择应用程序」或直接报错。`activate` 不在这几个 app 的字典里，但它是 AppleScript 内置词汇，照样能用（实测）。
 | `vscode` | VS Code 与 Cursor 都报 vscode，哪个在跑用哪个（`com.microsoft.VSCode` / `com.todesktop.230313mzl4w4u92`）。它们没有能定位到某个终端标签的脚本接口，所以用它打开会话的 `cwd`：编辑器会把那个工程的窗口带到前台，比单纯 `activate()` 接近「跳回这个会话」——而且后台 app 调 `activate()` 常被系统的协作激活规则挡掉，点了没反应 |
 | `WarpTerminal` / `kitty` / `WezTerm` | 只激活对应 app |
 | `tmux`（tmux 3.2 起在 pane 里设 `TERM_PROGRAM=tmux`，实测 3.7b） | `TmuxLocator`：`tmux list-panes -a` 按记录里的 tty（就是 pane 的 tty）找到 pane；`list-clients` 挑挂在这个 tmux 会话上的客户端，没有就取最近活动的；`switch-client -c <客户端 tty> -t <pane>` 再 `select-window`、`select-pane`。然后顺着客户端进程的父进程找到它所在的终端 app：Terminal / iTerm 按客户端 tty 选中标签，其他（Ghostty 等）只激活 app。一个客户端都没挂（detach 在后台的会话）报「tmux 客户端 没在跑」。tmux 先找 `/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`，都没有再问登录 shell |
 | 其他 | 「找不到窗口」 |
+
+三段脚本都写 `tell application id "<bundle id>"` 而不是按名字：iTerm2 的文件叫 `iTerm.app`、`CFBundleName` 却是 `iTerm2`，按名字找碰上改过名的安装会解析不到，AppleScript 会弹「选择应用程序」或直接报错。`activate` 不在这几个 app 的字典里，但它是 AppleScript 内置词汇，照样能用（实测）。
+
+运行中会话的定位和已关闭会话的恢复是两个操作：前者选已有终端，后者新开终端执行恢复命令。精确跳转以会话仍在运行、正确记录 tty、终端提供对应接口及自动化授权为前提：
+
+| 会话来源 | Ghostty 1.4 / Terminal.app / iTerm2 | 其他终端 |
+|---|---|---|
+| Claude Code 新建或恢复 | hook 通常能记录 tty；有正确 tty 时可定位到对应终端 | 依各终端上表能力，不能保证选中会话 |
+| Codex 使用 `--no-daemon` 启动或恢复 | 隔离测试可记录客户端 tty；还需目标终端支持 tty 和实际点击验证 | 依各终端上表能力 |
+| Codex 共享后台启动或恢复 | hook 由共享后台执行，可能没有客户端 tty；同目录多个 Codex 会话无法可靠区分 | 依各终端上表能力 |
+
+`--no-daemon` 不解除会话占用锁；同一会话已被其他客户端占用时恢复可能受阻。Tally 的「接着聊」目前使用普通 `codex resume`，不替用户改变 Codex 启动模式。启动别名由用户自己的 shell 配置决定，Tally 不安装或修改它们。Ghostty 1.3 没有 tty 脚本属性，不能按 tty 精确定位；1.4 提供该属性。内容匹配的实验已撤回：对话文字可能重复或已不可见，唯一命中也可能跳错。
 
 ### 自动化授权
 
@@ -145,7 +155,10 @@ Terminal.app、iTerm2、Ghostty 三条路都是发 Apple Event，macOS 按「哪
 
 脚本里在 tell 块内加 `activate`：让目标 app 自己把自己叫到前台。后台 app 调 `NSRunningApplication.activate()` 会被协作激活规则挡掉，只靠它经常是「标签选中了但窗口没到前台」。
 
-Ghostty 的匹配（`GhosttyMatch.pick`）：路径两边都 `resolvingSymlinksInPath` 并去尾斜杠；有标题先按标题（终端名等于标题或以「空格 + 标题」结尾，Claude 的标题格式是「状态符号 空格 会话标题」），多个再按目录挑；没标题或没命中按目录：精确相等优先，否则取目录是 cwd 祖先里最深的；Codex 不起会话标题，它的终端叫「状态符号 空格 目录名」，多候选时用目录名再筛一次；取最前面窗口里的那个。首次跳会弹「Tally 想控制 <终端>」的系统授权。
+Ghostty 的匹配（`GhosttyMatch.pick`）：支持终端 tty 属性且记录有 tty 时按它精确匹配；没有匹配时不退回猜标题或目录。终端不支持 tty，或者记录没有 tty 时按标题与目录匹配：路径两边都 `resolvingSymlinksInPath` 并去尾斜杠；有标题先按标题（终端名等于标题或以「空格 + 标题」结尾），多个再按目录挑；标题没命中或没标题时按目录：精确相等优先，否则取目录是 cwd 祖先里最深的；多候选时用目录名再筛一次。只有候选唯一才跳；多个候选无法区分时显示「无法确定窗口」。标题与目录只能作为线索，唯一候选也不能证明就是对应会话。
+
+Ghostty 提供 tty 但 Codex 记录没有 tty 时，只把控制终端上有 Codex 进程的终端作为候选；无法确认进程时不猜，以免把同目录的 Claude 当作候选。多个 Codex 会话仍不能仅靠 tty 列表区分；匹配到多个候选时显示「无法确定窗口」。
+
 
 ### 已关闭的会话（`SessionResume`）
 

@@ -13,8 +13,7 @@ struct NotchView: View {
         let waiting = store.waitingCount()
         ZStack(alignment: .top) {
             NotchShape(top: state.isOpen ? NotchGeometry.shoulder : 0,
-                       bottom: state.isOpen ? NotchGeometry.openBottomRadius
-                           : (state.peek != nil ? NotchGeometry.peekBottomRadius : NotchGeometry.closedBottomRadius))
+                       bottom: state.isOpen ? NotchGeometry.openBottomRadius : NotchGeometry.closedBottomRadius)
                 .fill(.black)
             if state.isOpen {
                 openContent(waiting: waiting)
@@ -23,11 +22,6 @@ struct NotchView: View {
                         insertion: BlurReplaceTransition(configuration: .downUp).animation(.smooth(duration: 0.3).delay(0.1)),
                         removal: OpacityTransition().animation(.easeOut(duration: 0.12))
                     ))
-            } else if let peek = state.peek {
-                // id 跟着提示走：新的一条重建视图，入场动画重放
-                PeekContent(peek: peek, notchHeight: state.notchHeight, onWidth: { state.reportPeekContentWidth($0) }, onTap: { state.peekTapped?() })
-                    .id(peek.id)
-                    .transition(.opacity)
             }
             // 闭合态什么都不画：刘海正下方是摄像头外壳，没有像素，画了也看不见（截图却拍得到）
         }
@@ -39,7 +33,6 @@ struct NotchView: View {
         }
         // 圆角和窗口 frame 用同一条曲线、同一个时长，看起来才是一体的
         .animation(.timingCurve(0.16, 1, 0.3, 1, duration: state.isOpen ? 0.38 : 0.30), value: state.isOpen)
-        .animation(.easeOut(duration: 0.2), value: state.peek?.id)
     }
 
     // MARK: 展开态
@@ -301,62 +294,8 @@ struct RefreshControl: View {
     }
 }
 
-/// 提示条：从刘海往下垂一条，上面 `notchHeight` 那段留给刘海，下面一行是着色图标 + 短标签 + 标题 / 副标题。
-/// 入场：图标从中心弹出（欠阻尼弹簧）并向外扩一圈涟漪，文字从刘海底下往下滑出来，副标题晚一拍；图标按 `style` 各有动作。
-struct PeekContent: View {
-    let peek: Peek
-    let notchHeight: CGFloat
-    /// 内容量出来的自然宽度，面板宽度跟着它收紧。
-    let onWidth: (CGFloat) -> Void
-    let onTap: () -> Void
-    @State private var appeared = false
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(height: notchHeight)
-            HStack(spacing: 8) {
-                PeekIcon(peek: peek, appeared: appeared)
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 5) {
-                        Text(peek.label)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(peek.tint)
-                        Text(peek.title)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white)
-                    }
-                    .opacity(appeared ? 1 : 0)
-                    .offset(y: appeared ? 0 : -8)
-                    .animation(.spring(response: 0.45, dampingFraction: 0.8).delay(0.1), value: appeared)
-                    if let subtitle = peek.subtitle {
-                        Text(subtitle)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white.opacity(0.55))
-                            .opacity(appeared ? 1 : 0)
-                            .offset(y: appeared ? 0 : -8)
-                            .animation(.spring(response: 0.45, dampingFraction: 0.8).delay(0.2), value: appeared)
-                    }
-                }
-                .lineLimit(1)
-            }
-            .fixedSize()
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { onWidth($0) }
-            .frame(maxWidth: NotchGeometry.peekMaxWidth - 2 * NotchGeometry.peekPadding, alignment: .leading)
-            .padding(.horizontal, NotchGeometry.peekPadding)
-            .frame(height: NotchGeometry.peekDrop)
-            .frame(maxWidth: .infinity)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        // 只有会话类可点：电池类挂着手势就成了「点一下提早收起」，文档说它不可点
-        .allowsHitTesting(peek.sessionId != nil)
-        .onAppear { appeared = true }
-    }
-}
-
 /// 提示和会话行共用表情，避免同一状态出现两套视觉含义。
-private struct PeekIcon: View {
+struct PeekIcon: View {
     let peek: Peek
     let appeared: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -387,7 +326,9 @@ private struct PeekIcon: View {
 
     @ViewBuilder
     private var glyph: some View {
-        switch peek.style {
+        if peek.failureMessage != nil {
+            Image(systemName: "exclamationmark.triangle.fill")
+        } else { switch peek.style {
         case .session:
             SessionEyes(mood: .happy, identity: peek.sessionId ?? "", size: 28)
         case .ask:
@@ -430,6 +371,7 @@ private struct PeekIcon: View {
                     .opacity(appeared ? 1 : 0)
                     .animation(.spring(response: 0.5, dampingFraction: 0.5).delay(0.3), value: appeared)
             }
+        }
         }
     }
 }
