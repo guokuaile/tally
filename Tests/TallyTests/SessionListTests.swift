@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import Tally
 
 /// 会话列表的分组顺序（docs/ai.md「会话行」）。
@@ -23,10 +24,28 @@ final class SessionOrderTests: XCTestCase {
             record("done-ancient", .done, age: 24 * 3600, now: now),
         ]
         XCTAssertEqual(SessionRecord.displayOrder(sessions, now: now).map(\.sessionId),
-                       ["permission", "ask", "compacting", "running-old", "done-new", "done-old", "done-ancient", "stale", "ended-newest"])
+                       ["ask", "permission", "compacting", "running-old", "done-new", "done-old", "done-ancient", "stale", "ended-newest"],
+                       "等你组按开始等的时刻正序：等了 10 分钟的 ask 排在等了 20 秒的 permission 前面")
         XCTAssertEqual(SessionRecord.shortcutOrder(sessions, now: now).map(\.sessionId),
-                       ["permission", "ask", "compacting", "running-old", "done-new", "done-old", "done-ancient", "stale"],
-                       "⌘N 不数已关闭的：按到它会开新终端")
+                       ["ask", "permission", "compacting", "running-old", "done-new", "done-old", "done-ancient", "stale"],
+                       "⌘N 不数已关闭的：按到它会开新终端；⌘1 是等得最久的")
+    }
+
+    func testWaitingGroupOrdersByWaitingSinceNotUpdatedAt() {
+        let now = Date()
+        var fresh = record("fresh", .waitingPermission, age: 100, now: now)
+        fresh.waitingSince = now.addingTimeInterval(-30)
+        var old = record("old", .waitingInput, age: 5, now: now)
+        old.waitingSince = now.addingTimeInterval(-900)
+        XCTAssertEqual(SessionRecord.displayOrder([fresh, old], now: now).map(\.sessionId), ["old", "fresh"], "有 waitingSince 就按它，不看 updated_at")
+    }
+
+    func testProvisionalSessionsDoNotConsumeShortcutNumbers() {
+        let now = Date()
+        var provisional = record("pending", .running, age: 1, now: now)
+        provisional.isProvisional = true
+        let real = record("real", .done, age: 2, now: now)
+        XCTAssertEqual(SessionRecord.shortcutOrder([provisional, real], now: now).map(\.sessionId), ["real"])
     }
 
     func testBackgroundWorkStaysWorkingUntilItFinishes() {
@@ -123,6 +142,100 @@ final class SessionLifecycleTests: XCTestCase {
         let file = directory.appendingPathComponent("\(id).json")
         guard FileManager.default.fileExists(atPath: file.path) else { return nil }
         return try JSONDecoder().decode(SessionRecord.self, from: Data(contentsOf: file))
+    }
+
+    @MainActor
+    func testBadgeObserverReceivesEndedRecordBeforeClosedSessionIsDeleted() throws {
+        keep = false
+        try write("closed", state: .ended)
+        let store = makeStore()
+        var observed: [SessionRecord] = []
+        store.badgeSessionsChanged = { observed = $0 }
+        store.reload()
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertEqual(observed.first?.sessionId, "closed")
+        XCTAssertEqual(observed.first?.state, .ended)
+        XCTAssertNil(try onDisk("closed"))
+    }
+
+    @MainActor
+    func testImmediateExitWithoutTranscriptReachesBadgeObserver() throws {
+        try write("quick", state: .running, pid: Int(ProcessInfo.processInfo.processIdentifier))
+        let store = makeStore()
+        var lifecycle = BadgeLifecycle()
+        var events: [BadgeLifecycle.Kind] = []
+        store.badgeSessionsChanged = { records in
+            events += lifecycle.update(records, emit: true).map(\.0)
+        }
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .running)
+        let input: [String: Any] = ["session_id": "quick", "hook_event_name": "SessionEnd", "transcript_path": ""]
+        let options = HookOptions(directory: directory, environment: [:])
+        guard case .deleted = HookRunner.run(input: input, options: options, table: AgentProcessTable()) else { return XCTFail() }
+        store.reload()
+        XCTAssertEqual(events, [.departed])
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.hasSuffix(".tally-end") })
+        store.reload()
+        XCTAssertEqual(events, [.departed])
+    }
+
+    @MainActor
+    func testStaleEndMarkerDoesNotCloseNewerSession() throws {
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        try write("quick", state: .running, updatedAt: 2000, pid: pid)
+        var ended = try XCTUnwrap(onDisk("quick"))
+        ended.state = .ended
+        ended.updatedAt = 1000
+        try JSONEncoder().encode(ended).write(to: directory.appendingPathComponent("quick.tally-end"))
+        let store = makeStore()
+        var records: [SessionRecord] = []
+        store.badgeSessionsChanged = { records = $0 }
+        store.reload()
+        XCTAssertEqual(records.map(\.state), [.running])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("quick.tally-end").path))
+    }
+
+    @MainActor
+    func testPendingProcessAlreadyGoneDoesNotTriggerOnboarding() {
+        let store = makeStore()
+        var records: [SessionRecord] = []
+        store.badgeSessionsChanged = { records = $0 }
+        store.applyCodexPending([CodexPendingProcess(pid: 999_999, started: 1_000_000, tty: "ttys010", cwd: "/tmp/x")])
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertTrue(records.isEmpty)
+    }
+
+    @MainActor
+    func testPendingCodexAppearsAndClosesOnlyAfterConfirmedExit() throws {
+        let store = makeStore()
+        var lifecycle = BadgeLifecycle()
+        var events: [BadgeLifecycle.Kind] = []
+        store.badgeSessionsChanged = { events += lifecycle.update($0, emit: true).map(\.0) }
+        store.reload()
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        try child.run()
+        defer { if child.isRunning { child.terminate(); child.waitUntilExit() } }
+        var info = proc_bsdinfo()
+        XCTAssertEqual(proc_pidinfo(child.processIdentifier, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)), Int32(MemoryLayout<proc_bsdinfo>.size))
+        let started = UInt64(info.pbi_start_tvsec) * 1_000_000 + UInt64(info.pbi_start_tvusec)
+        let process = CodexPendingProcess(pid: child.processIdentifier, started: started, tty: "ttys010", cwd: "/tmp/x")
+        store.applyCodexPending([process])
+        XCTAssertEqual(store.sessions.count, 1)
+        XCTAssertTrue(try XCTUnwrap(store.sessions.first).isProvisional)
+        XCTAssertEqual(events, [.joined])
+        store.applyCodexPending(nil)
+        XCTAssertEqual(store.sessions.count, 1)
+        XCTAssertEqual(events, [.joined])
+        child.terminate()
+        child.waitUntilExit()
+        store.applyCodexPending([])
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertEqual(events, [.joined, .departed])
+        store.reload()
+        XCTAssertEqual(events, [.joined, .departed])
     }
 
     /// 没标题的会话用第一句话顶上：Codex 从不写标题，用户还没敲字时退回目录名，敲了之后下一次读目录就补上。

@@ -56,7 +56,7 @@ enum PeekTapAction: String, CaseIterable {
 
 /// 闭合态提示条里的内容：着色图标 + 短标签 + 标题 + 副标题。会话事件和电池事件都走它；`style` 决定图标怎么动，`sessionId` 非空时可点。
 struct Peek: Equatable {
-    enum Style { case session, ask, pluggedIn, unplugged, low, full, quotaHigh, quotaExhausted, quotaReset, shelf, update }
+    enum Style { case session, ask, badge, pluggedIn, unplugged, low, full, quotaHigh, quotaExhausted, quotaReset, shelf, update }
 
     var id: String
     var style: Style
@@ -70,6 +70,10 @@ struct Peek: Equatable {
     var cwdLabel: String? = nil
     var sessionState: SessionRecord.State? = nil
     var failureMessage: String? = nil
+    /// 工牌左侧那个小刻用哪套调色板（docs/crew.md「工牌」）
+    var crewMood: CrewMood = .done
+    var badgeKind: BadgeLifecycle.Kind = .joined
+    var isProvisional = false
 
     var notificationText: (title: String, body: String) {
         if let failureMessage { return ("无法跳转 · \(title)", failureMessage) }
@@ -92,20 +96,20 @@ struct Peek: Equatable {
     func duration(session: Int, battery: Int) -> TimeInterval {
         switch style {
         case .ask: return TimeInterval(session) + Self.askExtra
-        case .session, .quotaHigh, .quotaExhausted, .quotaReset, .update: return TimeInterval(session)
+        case .session, .badge, .quotaHigh, .quotaExhausted, .quotaReset, .update: return TimeInterval(session)
         default: return TimeInterval(battery)
         }
     }
 
-    /// 没有刘海屏时改发系统通知的那几种：电池的不发，系统自己会说。
-    var notifiesWithoutNotch: Bool { priority > 0 }
+    /// 没有刘海屏时改发系统通知的那几种：电池的不发，系统自己会说；工牌也不发，角色本来就只在刘海屏上。
+    var notifiesWithoutNotch: Bool { priority > 0 && style != .badge }
 
     /// Pending notifications are ordered by priority; visible pills are not preempted.
     var priority: Int {
         switch style {
         case .ask: return 3
         case .session: return 2
-        case .quotaHigh, .quotaExhausted, .quotaReset, .shelf, .update: return 1
+        case .badge, .quotaHigh, .quotaExhausted, .quotaReset, .shelf, .update: return 1
         case .pluggedIn, .unplugged, .low, .full: return 0
         }
     }
@@ -143,6 +147,21 @@ struct Peek: Equatable {
         peek.modelLabel = record.modelLabel ?? record.providerLabel
         peek.cwdLabel = record.cwdLabel
         peek.sessionState = record.state
+        return peek
+    }
+
+    /// 新会话工牌指向该会话；通用版式显示项目和提供方。
+    static func badge(_ project: CrewProject, session: SessionRecord? = nil, kind: BadgeLifecycle.Kind = .joined) -> Peek {
+        let first = session ?? project.sessions.first
+        let subtitle = first.map { session in
+            return [session.providerLabel, session.modelLabel].compactMap { $0 }.joined(separator: " · ")
+        }
+        let badgeID = first.map { "\(CrewRoster.tool(of: $0)):\($0.sessionId)" } ?? project.id
+        var peek = Peek(id: "badge-\(badgeID)", style: .badge, tint: CrewStyle.palette(for: project.mood).lid, label: "新会话",
+                        title: "\(project.name)项目组", subtitle: subtitle, sessionId: first?.sessionId)
+        peek.crewMood = project.mood
+        peek.badgeKind = kind
+        peek.isProvisional = first?.isProvisional ?? false
         return peek
     }
 
@@ -234,6 +253,13 @@ final class NotchController {
     private var pillPanels: [String: PillNotificationPanel] = [:]
     private var pillContent: [String: Peek] = [:]
     private var pillInteractivity: [String: Bool] = [:]
+    /// 刘海两侧的项目小人（docs/crew.md）：它不认识面板，五个接入点都在这里调它
+    let crew = CrewController()
+    /// 翅膀的悬停撑开与点击分派（docs/crew.md「悬停撑开与点击」）
+    private let crewExpand = CrewExpandController()
+    /// 本进程见过的项目 id（工牌去重用）；nil 是还没拿到第一份名册——第一份整个记住不发牌，开关关掉再开也从头记
+    private var badgeLifecycle = BadgeLifecycle()
+    private let launchedAt = Date()
     private var alertVersions: [String: UUID] = [:]
     /// 「全屏 app 时隐藏面板」开着、内建屏上有别的 app 在系统全屏时为 true：面板整个不上屏，展开、悬停、提示条都不出来。
     private var hiddenForFullScreen = false
@@ -289,8 +315,28 @@ final class NotchController {
             self.alertVersions[record.sessionId] = version
             Task { await self.sessionAlerted(record, version: version) }
         }
+        crew.onHover = { [weak self] in self?.crewExpand.hover($0) }
+        crew.onDismiss = { [weak self] in self?.crewExpand.dismiss() }
+        crew.onClick = { [weak self] in self?.crewExpand.click($0) }
+        crew.onSessionClick = { [weak self] session in
+            guard let self else { return }
+            self.crewExpand.dismiss()
+            self.jump(to: session, reporting: .session(session))
+        }
+        crew.rosterChanged = { [weak self] _ in
+            guard let self else { return }
+            self.crewExpand.refresh { self.crew.hover(matching: $0) }
+        }
+        crewExpand.apply = { [weak self] in self?.crew.setExpanded($0) }
+        // 点小人跳终端和点药丸走同一条失败路径：撑开的格点完就收，失败只写在 failures 里的话人什么都看不到
+        crewExpand.jump = { [weak self] session in self?.jump(to: session, reporting: .session(session)) }
+        crewExpand.openAI = { [weak self] in
+            self?.state.select(.ai)
+            self?.open(pinned: true)
+        }
         SessionStore.shared.sessionsChanged = { [weak self] records in
             guard let self else { return }
+            self.crew.refresh(records)
             let active = Set(records.map(\.sessionId))
             self.alertVersions = self.alertVersions.filter { active.contains($0.key) }
             guard !self.pillQueue.visible.isEmpty || !self.pillQueue.pending.isEmpty else { return }
@@ -298,6 +344,7 @@ final class NotchController {
             self.pillQueue.reconcileWaiting(activeSessionIDs: waiting, at: Date())
             self.refreshPills()
         }
+        SessionStore.shared.badgeSessionsChanged = { [weak self] records in self?.updateBadges(records) }
         UsageStore.shared.quotaAlert = { [weak self] event in
             guard PreferencesStore.shared.prefs.quotaPeek else { return }
             self?.showPeek(.quota(event))
@@ -355,7 +402,12 @@ final class NotchController {
     private func scheduleDemoPeeks(peekTest: Bool) {
         Task { @MainActor [weak self] in
             if peekTest {
-                try? await Task.sleep(for: .seconds(1))
+                // 第 0.5 秒先来一张工牌（直接注入，不经 newcomers 的 10 秒规则），它是首批可见三条之一
+                try? await Task.sleep(for: .seconds(0.5))
+                if let project = CrewRoster.projects(DemoData.sessions(now: Date()), now: Date()).first(where: { $0.name == "shop-web" }) {
+                    self?.showPeek(.badge(project))
+                }
+                try? await Task.sleep(for: .seconds(0.5))
                 let records = DemoData.sessions(now: Date())
                 for record in records.filter({ $0.state == .waitingPermission || $0.state == .waitingInput || $0.state == .done }) {
                     self?.showPeek(.session(record))
@@ -385,7 +437,19 @@ final class NotchController {
         // 截屏和共享屏幕时隐藏：窗口服务器层面不给别的进程读这个窗口
         panel.sharingType = prefs.hideFromCapture ? .none : .readOnly
         for pill in pillPanels.values { pill.sharingType = panel.sharingType }
-        if !pillQueue.visible.isEmpty || !pillQueue.pending.isEmpty { refreshPills() }
+        if !prefs.crewEnabled {
+            crewExpand.dismiss()
+        }
+        if !prefs.badgeEnabled {
+            badgeLifecycle.reset()
+            let badges = (pillQueue.visible + pillQueue.pending).filter { $0.peek?.style == .badge }.map(\.id)
+            for id in badges { pillQueue.dismiss(id: id, at: Date()) }
+        }
+        crew.apply(enabled: prefs.crewEnabled, perSide: prefs.crewPerSide, skin: prefs.crewSkin == "gradient" ? .gradient : .glass,
+                   sharingType: panel.sharingType)
+        crew.refresh(SessionStore.shared.sessions)
+        if prefs.badgeEnabled { updateBadges(SessionStore.shared.sessions) }
+        if !pillQueue.visible.isEmpty || !pillQueue.pending.isEmpty || !pillPanels.isEmpty { refreshPills() }
         BatteryWatcher.shared.setEnabled(prefs.batteryPeek)
         PrivacyWatcher.shared.setEnabled(prefs.privacyDots)
         ShelfStore.shared.setEnabled(prefs.shelfEnabled)
@@ -465,9 +529,15 @@ final class NotchController {
             close()
             clearPeek()
             panel.orderOut(nil)
+            syncCrewVisibility()
         } else {
             relayout()
         }
+    }
+
+    /// 两翼只在面板收着、没被全屏藏起时上屏。
+    private func syncCrewVisibility() {
+        crew.setHidden(state.isOpen || hiddenForFullScreen)
     }
 
     // MARK: 定位
@@ -480,6 +550,7 @@ final class NotchController {
             clearPeek()
             metrics = nil
             panel.orderOut(nil)
+            crew.relayout(metrics: nil)
             Log.debug("没有带刘海的内建屏，面板隐藏")
             return
         }
@@ -487,12 +558,15 @@ final class NotchController {
         // 沿用的话开盖后面板一直藏着，界面上什么都看不出来
         if !fullScreenObservers.isEmpty { hiddenForFullScreen = FullScreenDetector.current(on: screen) }
         metrics = ScreenMetrics(screen: screen)
+        pillQueue.setHeightLimit(max(0, screen.frame.height - screen.safeAreaInsets.top - 22), at: Date())
         if let metrics, let closed = NotchGeometry.closedSize(metrics) {
             state.notchWidth = closed.width
             state.notchHeight = closed.height
         }
         if hiddenForFullScreen { close(); clearPeek() }
         applyFrame(animated: false)
+        crew.relayout(metrics: metrics)
+        syncCrewVisibility()
         // 全屏隐藏期间只更新尺寸，不上屏：任何一次 orderFront 都会把面板放回全屏空间
         if hiddenForFullScreen {
             panel.orderOut(nil)
@@ -544,6 +618,8 @@ final class NotchController {
         clearPeek()
         state.isPinned = pinned
         state.isOpen = true
+        crewExpand.dismiss()
+        crew.setHidden(true)
         applyFrame(animated: true)
         panel.makeKeyAndOrderFront(nil)
         installOutsideClickMonitor()
@@ -578,6 +654,11 @@ final class NotchController {
         // 之后打的字照样全进它，直到用户点一下别处。探针实测 resignKey 能把焦点还给原来的 app，再 makeKey 照常拿回
         if panel.isKeyWindow { panel.resignKey() }
         applyFrame(animated: true)
+        // 两翼等收起动画（0.30 s）走完再回来，不然缩回去的面板和冒出来的翅膀在半路撞上
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
+            guard let self, !self.state.isOpen else { return }
+            self.syncCrewVisibility()
+        }
         NetworkStore.shared.stop()
         SystemStore.shared.stop()
         RunningAppsStore.shared.stop()
@@ -586,21 +667,36 @@ final class NotchController {
 
     // MARK: 完成提示
 
+    /// 名册第一份只记住，之后首次出现的会话按启动宽限发工牌。
+    private func updateBadges(_ records: [SessionRecord]) {
+        guard PreferencesStore.shared.prefs.badgeEnabled else { return }
+        let now = Date()
+        for (kind, session) in badgeLifecycle.update(records, emit: now.timeIntervalSince(launchedAt) >= CrewRoster.launchGrace) {
+            var active = session
+            active.state = .running
+            guard let project = CrewRoster.projects([active], now: now).first else { continue }
+            showPeek(.badge(project, session: session, kind: kind))
+        }
+    }
+
     private func showPeek(_ peek: Peek) {
         guard !state.isOpen, !hiddenForFullScreen else { return }
         guard metrics != nil else {
             if PreferencesStore.shared.prefs.notifyWithoutNotch, peek.notifiesWithoutNotch { SystemNotifier.shared.post(peek) }
             return
         }
+        if let metrics { pillQueue.setHeightLimit(max(0, metrics.frame.height - metrics.safeAreaTop - 22), at: Date()) }
         let prefs = PreferencesStore.shared.prefs
-        pillQueue.enqueue(peek, at: Date(), sessionSeconds: prefs.peekSessionSeconds, batterySeconds: prefs.peekBatterySeconds)
+        pillQueue.enqueue(peek, at: Date(), sessionSeconds: peek.style == .badge ? prefs.badgeSeconds : prefs.peekSessionSeconds, batterySeconds: prefs.peekBatterySeconds)
         refreshPills()
     }
 
     private func refreshPills() {
         pillTimer?.invalidate()
         pillTimer = nil
-        let items = pillQueue.visible
+        let items = pillQueue.visible.sorted { left, right in
+            (left.peek?.style == .badge ? 0 : 1) < (right.peek?.style == .badge ? 0 : 1)
+        }
         let ids = Set(items.map(\.id))
         for id in pillPanels.keys where !ids.contains(id) {
             pillPanels.removeValue(forKey: id)?.close()
@@ -608,13 +704,14 @@ final class NotchController {
             pillInteractivity[id] = nil
         }
         guard !hiddenForFullScreen, !state.isOpen, let screen = NotchGeometry.builtInNotchScreen() else { return }
-        for (index, item) in items.enumerated() {
+        var verticalOffset: CGFloat = items.first?.peek?.style == .badge ? -PillNotificationPanel.gap : 0
+        for item in items {
             let peek: Peek
             let interactive: Bool
             switch item.content {
             case .peek(let original):
                 peek = original
-                interactive = original.sessionId != nil
+                interactive = original.sessionId != nil && !original.isProvisional && !(original.style == .badge && original.badgeKind == .departed)
             case .summary(let summary):
                 let style: Peek.Style
                 switch summary.category {
@@ -642,7 +739,8 @@ final class NotchController {
             pillContent[item.id] = peek
             pillInteractivity[item.id] = interactive
             pill.sharingType = panel.sharingType
-            pill.place(on: screen, index: index)
+            pill.place(on: screen, offset: verticalOffset, style: peek.style)
+            verticalOffset += PillNotificationPanel.height(for: peek.style) + PillNotificationPanel.gap
             pill.orderFrontRegardless()
         }
         if let deadline = pillQueue.nextDeadline {
@@ -723,21 +821,27 @@ final class NotchController {
                 return
             }
             if plan.openAI { state.select(.ai); open(pinned: true) }
-            Task { [weak self] in
-                guard await SessionJump.shared.run(session) == false, let self else { return }
-                if !self.state.isOpen, !self.hiddenForFullScreen {
-                    let message = SessionJump.shared.failures[session.sessionId] ?? "定位失败"
-                    let failure = peek.failed(message)
-                    let prefs = PreferencesStore.shared.prefs
-                    if self.metrics == nil {
-                        if prefs.notifyWithoutNotch && self.pillQueue.canEnqueueFailure(for: session, current: SessionStore.shared.sessions) {
-                            SystemNotifier.shared.post(failure)
-                        }
-                    } else if self.pillQueue.enqueueFailure(failure, for: session, current: SessionStore.shared.sessions,
-                                                            at: Date(), sessionSeconds: prefs.peekSessionSeconds,
-                                                            batterySeconds: prefs.peekBatterySeconds) {
-                        self.refreshPills()
+            jump(to: session, reporting: peek)
+        }
+    }
+
+    /// 跳回会话的终端；跳不成就垂一条红色失败药丸（没有刘海屏改发系统通知），面板展开或全屏藏着时不垂。
+    /// 点药丸和点刘海小人共用。
+    private func jump(to session: SessionRecord, reporting peek: Peek) {
+        Task { [weak self] in
+            guard await SessionJump.shared.run(session) == false, let self else { return }
+            if !self.state.isOpen, !self.hiddenForFullScreen {
+                let message = SessionJump.shared.failures[session.sessionId] ?? "定位失败"
+                let failure = peek.failed(message)
+                let prefs = PreferencesStore.shared.prefs
+                if self.metrics == nil {
+                    if prefs.notifyWithoutNotch && self.pillQueue.canEnqueueFailure(for: session, current: SessionStore.shared.sessions) {
+                        SystemNotifier.shared.post(failure)
                     }
+                } else if self.pillQueue.enqueueFailure(failure, for: session, current: SessionStore.shared.sessions,
+                                                        at: Date(), sessionSeconds: prefs.peekSessionSeconds,
+                                                        batterySeconds: prefs.peekBatterySeconds) {
+                    self.refreshPills()
                 }
             }
         }

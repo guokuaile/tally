@@ -9,6 +9,17 @@ private struct FakeTable: ProcessTable {
     func arguments(of pid: Int32) -> [String] { args[pid] ?? [] }
 }
 
+private struct BlockingTable: ProcessTable {
+    let entered: DispatchSemaphore
+    let proceed: DispatchSemaphore
+    func entries() -> [ProcessEntry] {
+        entered.signal()
+        _ = proceed.wait(timeout: .now() + 2)
+        return []
+    }
+    func arguments(of pid: Int32) -> [String] { [] }
+}
+
 /// node 版 hooks/claude-event.test.js 的用例逐条改写，加上 pid / tty / term。
 final class HookRunnerTests: XCTestCase {
 
@@ -55,6 +66,40 @@ final class HookRunnerTests: XCTestCase {
 
     private func rawJSON(_ id: String = "abc-123") throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("\(id).json"))) as? [String: Any])
+    }
+
+    func testDetailsForBothProvidersAndLifecycle() throws {
+        for provider in ["claude", "codex"] {
+            let opts = options(provider: provider)
+            _ = run(event("SessionStart"), options: opts)
+            _ = run(event("PermissionRequest", ["tool_name": "Bash", "tool_input": ["command": "swift test"]]), options: opts)
+            XCTAssertEqual(try read().waitingDetail, "请求：执行命令")
+            _ = run(event("PostToolUse", ["tool_name": "Edit", "tool_input": ["file_path": "/tmp/Shelf.swift"]]), options: opts)
+            var record = try read()
+            XCTAssertNil(record.waitingDetail)
+            XCTAssertEqual(record.recentActivity, "最近：修改 Shelf.swift")
+            let stamp = record.updatedAt
+            _ = run(event("PostToolUse", ["tool_name": "Read", "tool_input": ["file_path": "/tmp/README.md"]]), options: opts)
+            record = try read()
+            XCTAssertEqual(record.updatedAt, stamp)
+            XCTAssertEqual(record.recentActivity, "最近：读取 README.md")
+            _ = run(event("PostToolUse", ["agent_id": "child", "tool_name": "Bash", "tool_input": ["command": "child"]]), options: opts)
+            XCTAssertEqual(try read().recentActivity, "最近：读取 README.md")
+            _ = run(event("Stop"), options: opts)
+            XCTAssertEqual(try read().recentActivity, "最近：读取 README.md")
+            _ = run(event("UserPromptSubmit"), options: opts)
+            XCTAssertNil(try read().recentActivity)
+        }
+    }
+
+    func testClaudeDelayedNotificationPreservesApprovalDetail() throws {
+        _ = run(event("PermissionRequest", ["tool_name": "Bash", "tool_input": ["command": "swift test"]]))
+        _ = run(event("Notification", ["notification_type": "permission_prompt"]))
+        XCTAssertEqual(try read().waitingDetail, "请求：执行命令")
+    }
+
+    func testUnknownToolDoesNotExposeArguments() {
+        XCTAssertNil(HookDecision.toolDetail(["tool_name": "custom", "tool_input": ["secret": "value"]], waiting: true))
     }
 
     // ── 映射表 ────────────────────────────────────────────────
@@ -214,8 +259,57 @@ final class HookRunnerTests: XCTestCase {
     func testSessionEndDeletesNonInteractiveAndIsIdempotent() throws {
         try writeState("abc-123", "done")
         guard case .deleted = run(event("SessionEnd")) else { return XCTFail() }
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        let markers = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertEqual(markers.count, 1)
+        XCTAssertTrue(try XCTUnwrap(markers.first).hasSuffix(".tally-end"))
         guard case .deleted = run(event("SessionEnd")) else { return XCTFail("不存在也算删成功") }
+    }
+
+    func testImmediateExitWithoutTranscriptLeavesBadgeEvent() throws {
+        guard case .written = run(event("SessionStart")) else { return XCTFail() }
+        guard case .deleted = run(event("SessionEnd")) else { return XCTFail() }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("abc-123.json").path))
+        let name = try XCTUnwrap(FileManager.default.contentsOfDirectory(atPath: directory.path).first { $0.hasSuffix(".tally-end") })
+        let marker = directory.appendingPathComponent(name)
+        let record = try JSONDecoder().decode(SessionRecord.self, from: Data(contentsOf: marker))
+        XCTAssertEqual(record.sessionId, "abc-123")
+        XCTAssertEqual(record.state, .running)
+    }
+
+    func testRepeatedQuickSessionsKeepDistinctEndEvents() throws {
+        for _ in 0..<2 {
+            guard case .written = run(event("SessionStart")) else { return XCTFail() }
+            guard case .deleted = run(event("SessionEnd")) else { return XCTFail() }
+        }
+        let markers = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasSuffix(".tally-end") }
+        XCTAssertEqual(markers.count, 2)
+    }
+
+    func testConcurrentStartAndEndAreSerialized() throws {
+        try writeState("abc-123", "done")
+        let entered = DispatchSemaphore(value: 0)
+        let proceed = DispatchSemaphore(value: 0)
+        let completed = DispatchGroup()
+        let options = self.options()
+        let start = event("SessionStart")
+        let end = event("SessionEnd")
+        completed.enter()
+        DispatchQueue.global().async {
+            _ = HookRunner.run(input: start, options: options, table: BlockingTable(entered: entered, proceed: proceed))
+            completed.leave()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        completed.enter()
+        DispatchQueue.global().async {
+            _ = HookRunner.run(input: end, options: options, table: FakeTable(rows: []))
+            completed.leave()
+        }
+        // 让结束事件有机会与持锁的启动事件竞争。
+        Thread.sleep(forTimeInterval: 0.1)
+        proceed.signal()
+        XCTAssertEqual(completed.wait(timeout: .now() + 3), .success)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("abc-123.json").path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasSuffix(".tally-end") }.count, 1)
     }
 
     func testSessionEndKeepsInteractiveSessionAsEnded() throws {

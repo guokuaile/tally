@@ -102,6 +102,66 @@ final class PreferencesTests: XCTestCase {
         XCTAssertEqual(LaunchOptions.Page.visible(shelf: false, music: true).last, .music, "音乐排最后：它出现、消失不挪别的页签")
     }
 
+    func testCrewKeysDefaultOnThreePerSideGlass() throws {
+        let prefs = try JSONDecoder().decode(Preferences.self, from: Data(#"{"launchAtLogin":true}"#.utf8))
+        XCTAssertTrue(prefs.crewEnabled, "刘海小人默认开")
+        XCTAssertEqual(prefs.crewPerSide, 3)
+        XCTAssertEqual(prefs.crewSkin, "glass")
+        XCTAssertTrue(prefs.badgeEnabled)
+        XCTAssertEqual(prefs.badgeSeconds, 8)
+        XCTAssertEqual(prefs.badgePosition, "right")
+        XCTAssertEqual(prefs.badgeTitle, "员工证")
+        let custom = try JSONDecoder().decode(Preferences.self, from: Data(#"{"badgeEnabled":false,"badgeSeconds":99,"badgePosition":"bad","badgeTitle":"研发组"}"#.utf8))
+        XCTAssertFalse(custom.badgeEnabled)
+        XCTAssertEqual(custom.badgeSeconds, 30)
+        XCTAssertEqual(custom.badgePosition, "right")
+        XCTAssertEqual(custom.badgeTitle, "研发组")
+    }
+
+    func testBadgeThemesOldDefaultsNormalizationAndRoundTrip() throws {
+        let old = try JSONDecoder().decode(Preferences.self, from: Data(#"{}"#.utf8))
+        XCTAssertEqual(old.badgeThemes, [])
+        let selected = try JSONDecoder().decode(Preferences.self, from: Data(#"{"badgeThemes":["design","writing","design","unknown"]}"#.utf8))
+        XCTAssertEqual(selected.badgeThemes, ["writing", "design"])
+        let decoded = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(selected))
+        XCTAssertEqual(decoded.badgeThemes, ["writing", "design"])
+    }
+
+    func testCrewPerSideIsClampedOneToFour() throws {
+        let zero = try JSONDecoder().decode(Preferences.self, from: Data(#"{"crewPerSide":0}"#.utf8))
+        XCTAssertEqual(zero.crewPerSide, 1, "0 等于关掉，关掉有单独的开关")
+        let many = try JSONDecoder().decode(Preferences.self, from: Data(#"{"crewPerSide":9}"#.utf8))
+        XCTAssertEqual(many.crewPerSide, 4, "再多就压到菜单栏项目了")
+        let two = try JSONDecoder().decode(Preferences.self, from: Data(#"{"crewPerSide":2}"#.utf8))
+        XCTAssertEqual(two.crewPerSide, 2)
+    }
+
+    func testCrewSkinFallsBackToGlass() throws {
+        let bogus = try JSONDecoder().decode(Preferences.self, from: Data(#"{"crewSkin":"neon"}"#.utf8))
+        XCTAssertEqual(bogus.crewSkin, "glass")
+        let gradient = try JSONDecoder().decode(Preferences.self, from: Data(#"{"crewSkin":"gradient","crewEnabled":false}"#.utf8))
+        XCTAssertEqual(gradient.crewSkin, "gradient")
+        XCTAssertFalse(gradient.crewEnabled)
+        XCTAssertEqual(Preferences.crewSkin("GLASS"), "glass", "大小写也不认，只认两个字面值")
+    }
+
+    @MainActor
+    func testCrewKeysRoundTripThroughTheStore() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tally-prefs-crew-\(UUID().uuidString)")
+            .appendingPathComponent("preferences.json")
+        let store = PreferencesStore(url: url)
+        store.prefs.crewEnabled = false
+        store.prefs.crewPerSide = 2
+        store.prefs.crewSkin = "gradient"
+        store.prefs.badgeThemes = ["writing", "data"]
+        let reloaded = PreferencesStore(url: url)
+        XCTAssertFalse(reloaded.prefs.crewEnabled)
+        XCTAssertEqual(reloaded.prefs.crewPerSide, 2)
+        XCTAssertEqual(reloaded.prefs.crewSkin, "gradient")
+        XCTAssertEqual(reloaded.prefs.badgeThemes, ["writing", "data"])
+    }
+
     func testEnabledKeyPathsWrite() {
         var prefs = Preferences()
         prefs[keyPath: ProviderID.antigravity.enabledKey] = false

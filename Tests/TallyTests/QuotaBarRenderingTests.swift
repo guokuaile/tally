@@ -7,8 +7,9 @@ final class QuotaBarRenderingTests: XCTestCase {
         let art = try XCTUnwrap(BloubArt(url: root.appendingPathComponent("Resources/bloub/frames.json")))
         for mood in [SessionEyes.Mood.permission, .input] {
             let expected: BloubArt.ExpressionSymbol = mood == .permission ? .approval : .question
-            let frames = try XCTUnwrap(art.clips[mood.rawValue])
-            XCTAssertEqual(Double(frames.count) / art.fps, 4, accuracy: 0.001)
+            let clip = try XCTUnwrap(art.clips[mood.rawValue])
+            let frames = clip.frames
+            XCTAssertEqual(Double(frames.count) / clip.fps, 4, accuracy: 0.001)
             XCTAssertTrue(frames.allSatisfy { !$0.body.isEmpty && !$0.eyes.isEmpty && $0.alpha == 1 })
             XCTAssertTrue(frames.allSatisfy { $0.symbol == expected })
             XCTAssertTrue(frames.allSatisfy { $0.symbolAnchor.x > 100 && $0.symbolAnchor.y < -70 })
@@ -73,9 +74,10 @@ final class QuotaBarRenderingTests: XCTestCase {
         XCTAssertFalse(burst.dots.isEmpty)
         XCTAssertTrue(burst.dotsBehind)
         for mood in SessionEyes.Mood.allCases where mood != .sleeping {
-            let frames = try XCTUnwrap(art.clips[mood.rawValue])
+            let clip = try XCTUnwrap(art.clips[mood.rawValue])
+            let frames = clip.frames
             XCTAssertFalse(frames.isEmpty)
-            let loop = try XCTUnwrap(art.frame(mood: mood, time: Double(frames.count)/art.fps))
+            let loop = try XCTUnwrap(art.frame(mood: mood, time: Double(frames.count)/clip.fps))
             XCTAssertEqual(loop.body, frames[0].body)
         }
         XCTAssertNil(art.clips[SessionEyes.Mood.sleeping.rawValue], "Closed sessions use static dots, not an animation clip")

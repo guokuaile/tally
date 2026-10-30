@@ -65,7 +65,7 @@ struct AntigravityUsageProvider: UsageProvider {
 
         let token = try await loadKeychainToken()
         guard let token else {
-            throw UsageError.notConfigured("Antigravity not signed in")
+            throw UsageError.notConfigured("Antigravity 没开、也没找到它的登录，打开 Antigravity 登录一次")
         }
 
         return try await fetchFromCloudCode(token: token, now: now)
@@ -645,7 +645,7 @@ struct AntigravityUsageProvider: UsageProvider {
                     }
                 }
 
-                throw UsageError.notConfigured(authRejected ? "Antigravity auth expired" : "Unable to fetch Antigravity usage")
+                throw UsageError.notConfigured(authRejected ? "登录已过期，去 Antigravity 跑一轮" : "Antigravity 配额取不到，打开 Antigravity 再试")
             }
 
             group.addTask {
@@ -675,7 +675,7 @@ struct AntigravityUsageProvider: UsageProvider {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
             if http.statusCode == 401 || http.statusCode == 403 {
-                throw UsageError.notConfigured("Antigravity auth expired")
+                throw UsageError.notConfigured("登录已过期，去 Antigravity 跑一轮")
             }
             if (200..<300).contains(http.statusCode) {
                 return data

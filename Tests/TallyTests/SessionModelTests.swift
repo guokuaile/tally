@@ -139,7 +139,9 @@ final class SessionModelTests: XCTestCase {
         try Data(#"{"pid":4242,"sessionId":"someone-else","status":"busy"}"#.utf8).write(to: file)
         XCTAssertEqual(record.claudeCodeStatus(in: dir), .anotherSession)
         try Data(#"{"pid":4242,"sessionId":"s1","status":"waiting","waitingFor":"input needed"}"#.utf8).write(to: file)
-        XCTAssertEqual(record.claudeCodeStatus(in: dir), .reported(status: "waiting", waitingFor: "input needed"))
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .reported(status: "waiting", waitingFor: "input needed", since: nil))
+        try Data(#"{"pid":4242,"sessionId":"s1","status":"waiting","statusUpdatedAt":1700000000500}"#.utf8).write(to: file)
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .reported(status: "waiting", waitingFor: nil, since: Date(timeIntervalSince1970: 1_700_000_000.5)), "statusUpdatedAt 是毫秒")
         try Data(#"{"pid":4242,"sessionId":"s1"}"#.utf8).write(to: file)
         XCTAssertEqual(record.claudeCodeStatus(in: dir), .unknown, "没有 status 字段")
         record.pid = nil
@@ -241,16 +243,66 @@ final class SessionTurnEndTests: XCTestCase {
     }
 
     /// 模拟 Claude Code 自己写的 `~/.claude/sessions/<pid>.json`；pid 用测试进程自己的，存活判定才过得去。
-    private func writeClaudeStatus(_ status: String, sessionId: String = "s1", waitingFor: String? = nil) throws {
+    private func writeClaudeStatus(_ status: String, sessionId: String = "s1", waitingFor: String? = nil, sinceMs: Int = 1) throws {
         let pid = ProcessInfo.processInfo.processIdentifier
         let extra = waitingFor.map { #","waitingFor":"\#($0)""# } ?? ""
-        let json = #"{"pid":\#(pid),"sessionId":"\#(sessionId)","status":"\#(status)","statusUpdatedAt":1\#(extra)}"#
+        let json = #"{"pid":\#(pid),"sessionId":"\#(sessionId)","status":"\#(status)","statusUpdatedAt":\#(sinceMs)\#(extra)}"#
         try Data(json.utf8).write(to: claudeSessions.appendingPathComponent("\(pid).json"))
     }
 
     @MainActor
     private func makeStore() -> SessionStore {
         SessionStore(directory: directory, claudeSessions: claudeSessions, processTable: AgentProcessTable())
+    }
+
+    /// 开始等的时刻与等你账本（docs/ai.md「等你」「等你账本」）。
+    @MainActor
+    func testWaitingSinceFollowsClaudeAndFinishedWaitsGoToTheLedger() throws {
+        let store = makeStore()
+        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
+        let at = { (offsetMs: Int) in Date(timeIntervalSince1970: Double(nowMs + offsetMs) / 1000) }
+        try write(state: .waitingPermission, updatedAt: Double(nowMs), transcript: [prompt])
+        try writeClaudeStatus("waiting", waitingFor: "permission prompt", sinceMs: nowMs - 90_000)
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.waitingSince, at(-90_000), "Claude 记录取 statusUpdatedAt，比 hook 写文件早")
+        XCTAssertNil(store.todayWaits, "还在等，账本没有今天这行")
+
+        // 批了、马上又弹，两次刷新之间：Claude 的 statusUpdatedAt 变晚就是新的一次等，上一次按两个时刻之差记
+        try writeClaudeStatus("waiting", waitingFor: "permission prompt", sinceMs: nowMs - 30_000)
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.waitingSince, at(-30_000))
+        XCTAssertEqual(store.todayWaits, WaitLedger.Day(count: 1, totalMs: 60_000, maxMs: 60_000))
+
+        // 别的 agent 的 PostToolUse 把文件冲回 running、updated_at 变新：还在等，开始等的时刻不往后挪
+        try write(state: .running, updatedAt: Double(nowMs + 30_000), transcript: [prompt])
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .waitingPermission)
+        XCTAssertEqual(store.sessions.first?.waitingSince, at(-30_000))
+        XCTAssertEqual(store.todayWaits?.count, 1, "同一次等，不重复记")
+
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .running)
+        XCTAssertNil(store.sessions.first?.waitingSince)
+        let day = try XCTUnwrap(store.todayWaits, "批了：记一笔")
+        XCTAssertEqual(day.count, 2)
+        XCTAssertTrue((89_000...95_000).contains(day.totalMs), "60 秒加约 30 秒，实际 \(day.totalMs) ms")
+        XCTAssertEqual(day.maxMs, 60_000)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.deletingLastPathComponent().appendingPathComponent("waits.json").path),
+                      "账本落在会话目录旁边")
+
+        // 没有 statusUpdatedAt 的来源（老版本、Codex）退回 hook 写文件的时刻，之后沿用
+        try FileManager.default.removeItem(at: claudeSessions.appendingPathComponent("\(ProcessInfo.processInfo.processIdentifier).json"))
+        try write(state: .waitingInput, updatedAt: Double(nowMs + 60_000), transcript: [prompt])
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.waitingSince, at(60_000))
+        try write(state: .waitingInput, updatedAt: Double(nowMs + 61_000), transcript: [prompt])
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.waitingSince, at(60_000), "hook 再写不往后挪")
+
+        try write(state: .done, updatedAt: Double(nowMs + 62_000), transcript: [prompt])
+        store.reload()
+        XCTAssertEqual(store.todayWaits?.count, 3, "答了：又一笔")
     }
 
     @MainActor
@@ -427,6 +479,22 @@ final class SessionTurnEndTests: XCTestCase {
         try writeClaudeStatus("idle")
         store.reload()
         XCTAssertEqual(store.sessions.first?.state, .waitingInput, "等输入（elicitation 对话框）不看 idle")
+    }
+
+    @MainActor
+    func testWaitingQuestionAndAnswerFollowClaudeStatus() throws {
+        let store = makeStore()
+        let question = #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","id":"q","input":{"questions":[{"question":"保留多久？"}]}}]}}"#
+        let answer = #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"q","content":"一天"}]}}"#
+        try write(state: .waitingPermission, transcript: [prompt, question])
+        try writeClaudeStatus("waiting", waitingFor: "input needed")
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .waitingInput)
+        XCTAssertEqual(store.sessions.first?.waitingDetail, "问题：保留多久？")
+        try write(state: .running, transcript: [prompt, question, answer])
+        try writeClaudeStatus("busy")
+        store.reload()
+        XCTAssertNil(store.sessions.first?.waitingDetail)
     }
 
     @MainActor

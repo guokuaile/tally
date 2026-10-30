@@ -39,7 +39,7 @@ final class NotchPanel: NSPanel {
     /// 而且压面板连别的进程呈现的面板（AirDrop 那种）也一并救得了。
     @MainActor
     static func steppingAside<T>(_ body: () -> T) -> T {
-        let panels = NSApp.windows.filter { $0 is NotchPanel || $0 is PillNotificationPanel }
+        let panels = NSApp.windows.filter { $0 is NotchPanel || $0 is PillNotificationPanel || $0 is CrewPanel || $0 is CrewDropdownPanel || $0 is CrewAvatarPanel }
         let levels = panels.map(\.level)
         for panel in panels { panel.level = .normal }
         defer { for (panel, level) in zip(panels, levels) { panel.level = level } }

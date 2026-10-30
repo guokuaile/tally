@@ -20,6 +20,10 @@ final class SessionStore {
     /// 一个会话进入 done / 等审批 / 等输入时调一次，控制器拿它在闭合态弹提示。
     var sessionAlert: ((SessionRecord) -> Void)?
     var sessionsChanged: (([SessionRecord]) -> Void)?
+    var badgeSessionsChanged: (([SessionRecord]) -> Void)?
+    /// 等你账本（docs/ai.md「等你账本」）；`todayWaits` 是当天那一行，每轮刷新按当天重算，没等过为 nil。
+    let waits: WaitLedger
+    private(set) var todayWaits: WaitLedger.Day?
 
     let directory: URL
     /// Claude Code 自己的 `~/.claude/sessions/<pid>.json`，见 `SessionRecord.claudeCodeStatus`。
@@ -29,6 +33,10 @@ final class SessionStore {
     private var reloadWork: DispatchWorkItem?
     private var cleanupTimer: Timer?
     private var refreshTimer: Timer?
+    private var codexPendingTimer: Timer?
+    private var pendingScanInFlight = false
+    private var pendingProcesses: [CodexPendingProcess] = []
+    private var publishedPending: [String: SessionRecord] = [:]
     /// 宽限期到了再读一次 Claude Code 的 status，见「后台还在跑」。
     private var recheckWork: DispatchWorkItem?
     /// 刚写的 done 读到 busy 不算后台有活：上一回合的 busy 要等所有 Stop hook 跑完才换成 idle（本机实测 45 ms，门禁类 hook 能拖几秒）。
@@ -55,9 +63,12 @@ final class SessionStore {
          keepClosed: (() -> Bool)? = nil,
          closedLimit: (() -> Int)? = nil,
          activeCodexTUIByCWD: ((ProcessTable, [ProcessEntry]) -> [String: Int]?)? = nil,
-         processTable: ProcessTable = SysctlProcessTable()) {
+         processTable: ProcessTable = SysctlProcessTable(),
+         waits: WaitLedger? = nil) {
         self.directory = directory
         self.claudeSessions = claudeSessions
+        // 账本放在会话目录旁边（~/Library/Application Support/Tally/waits.json）；测试的临时会话目录也就落在临时目录旁，不碰真的
+        self.waits = waits ?? WaitLedger(file: directory.deletingLastPathComponent().appendingPathComponent("waits.json"))
         self.keepClosed = keepClosed ?? { PreferencesStore.shared.prefs.keepClosedSessions }
         self.closedLimit = closedLimit ?? { PreferencesStore.shared.prefs.closedSessionLimit }
         self.activeCodexTUIByCWD = activeCodexTUIByCWD ?? Self.liveCodexTUIByCWD(table:entries:)
@@ -70,12 +81,17 @@ final class SessionStore {
         // 演示模式：会话是编的；不建目录、不读、不盯、不清孤儿、不回写，也就不会冒出状态变化的提示
         if DemoMode.isOn {
             sessions = DemoData.sessions(now: Date()).sorted { $0.updatedAt > $1.updatedAt }
+            todayWaits = DemoData.waits
             return
         }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         cleanupOrphans(now: Date())
         reload()
         watch()
+        scanCodexPending()
+        codexPendingTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.scanCodexPending() }
+        }
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.cleanupOrphans(now: Date())
@@ -86,6 +102,25 @@ final class SessionStore {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.reload() }
         }
+    }
+
+    private func scanCodexPending() {
+        guard !pendingScanInFlight else { return }
+        pendingScanInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = CodexPending.scan()
+            Task { @MainActor in
+                guard let self else { return }
+                self.pendingScanInFlight = false
+                self.applyCodexPending(found)
+            }
+        }
+    }
+
+    func applyCodexPending(_ found: [CodexPendingProcess]?) {
+        guard let found, found != pendingProcesses else { return }
+        pendingProcesses = found
+        reload()
     }
 
     private func watch() {
@@ -139,6 +174,8 @@ final class SessionStore {
         let decoder = JSONDecoder()
         let now = Date()
         var recheck = false
+        // 开始等的时刻只在内存：上一轮已经在等的沿用上一轮的值
+        let previousBySession = Dictionary(sessions.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
         let decoded: [(URL, SessionRecord)] = files.filter { $0.pathExtension == "json" }.compactMap { file in
             guard let data = try? Data(contentsOf: file),
                   let record = try? decoder.decode(SessionRecord.self, from: data) else { return nil }
@@ -151,20 +188,35 @@ final class SessionStore {
         // 先挂监视器再读：挂在读之后的话，读完到挂上之间的那次改写会丢
         watchClaudeStatus(of: decoded.map(\.1))
         var loaded: [SessionRecord] = []
+        var closedForBadges: [SessionRecord] = []
+        for file in files where file.pathExtension == "tally-end" {
+            guard let data = try? Data(contentsOf: file),
+                  var ended = try? decoder.decode(SessionRecord.self, from: data) else { continue }
+            let active = decoded.contains { $0.1.sessionId == ended.sessionId && $0.1.provider == ended.provider && $0.1.state != .ended }
+            if !active {
+                ended.state = .ended
+                ended.message = nil
+                closedForBadges.append(ended)
+            }
+            try? FileManager.default.removeItem(at: file)
+        }
         var quiet: Set<String> = []
         for (file, original) in decoded {
             var record = original
             // Claude 会话一轮只读一次 Claude Code 自己的状态文件：存活、等你、补判、后台还在跑都看它
             var claudeStatus: String?
             var claudeWaitingFor: String?
+            var claudeSince: Date?
             let claude = record.isClaude && record.state != .ended ? record.claudeCodeStatus(in: claudeSessions) : .unknown
-            if case .reported(let status, let waitingFor) = claude {
+            if case .reported(let status, let waitingFor, let since) = claude {
                 claudeStatus = status
                 claudeWaitingFor = waitingFor
+                claudeSince = since
             }
             if record.state == .ended {
                 // 已关闭的本来就没有进程，不走下面的存活判断；开关关着就删
                 guard keepClosed() else {
+                    closedForBadges.append(record)
                     try? FileManager.default.removeItem(at: file)
                     continue
                 }
@@ -178,6 +230,8 @@ final class SessionStore {
                 guard keepClosed(), !record.transcriptPath.isEmpty,
                       TranscriptTitle.isInteractive(transcript: URL(fileURLWithPath: record.transcriptPath), provider: record.provider)
                 else {
+                    record.state = .ended
+                    closedForBadges.append(record)
                     try? FileManager.default.removeItem(at: file)
                     Log.debug("会话 \(record.sessionId) 的进程已退出，删掉状态文件")
                     continue
@@ -202,10 +256,13 @@ final class SessionStore {
             // 打断和 API 报错结束的回合不发 Stop，文件停在 running / 等审批 / 等输入：补判成 done（docs/ai.md「打断与 API 报错」）。
             // 都只改内存不回写：回写会和 hook 抢，刚判完用户就发了下一句的话，app 写的 done 会盖掉 hook 写的 running。
             if claudeStatus == "waiting", record.state != .ended {
-                record.state = SessionRecord.waitingState(for: claudeWaitingFor)
+                let reportedState = SessionRecord.waitingState(for: claudeWaitingFor)
+                if record.state != reportedState { record.waitingDetail = nil }
+                record.state = reportedState
             } else if record.isWaiting, claudeStatus == "busy" {
                 // busy 一定没有对话框：Claude Code 算 status 时先看对话框（有就是 waiting），没有才按在不在跑分 busy / idle
                 record.state = .running
+                record.waitingDetail = nil
             } else if record.state != .done, record.state != .ended {
                 let end = record.transcriptPath.isEmpty ? nil
                     : TranscriptTitle.turnEnd(in: URL(fileURLWithPath: record.transcriptPath), provider: record.provider)
@@ -221,6 +278,9 @@ final class SessionStore {
                         quiet.insert(record.sessionId)
                     }
                 }
+            }
+            if record.isClaude, record.state == .waitingInput, !record.transcriptPath.isEmpty {
+                record.waitingDetail = TranscriptTitle.pendingQuestion(in: URL(fileURLWithPath: record.transcriptPath))
             }
             // 主回合 Stop 写了 done，后台 agent / 命令可能还在跑：子 agent 的 PostToolUse 故意不翻回 running（docs/ai.md「事件到状态」），
             // 「还有活」只有 Claude Code 自己的 status 知道——没结束的 agent 类任务是 busy，只剩后台命令是 shell。只标在内存里。
@@ -239,6 +299,14 @@ final class SessionStore {
                 default: break
                 }
             }
+            // 开始等的时刻（docs/ai.md「等你」）：Claude 的 statusUpdatedAt 永远优先（status 翻成 waiting 的那一毫秒，比
+            // permission_prompt 通知早 6 秒；批完马上又弹它会变晚，那就是新的一次等）；没有这个字段的版本和 Codex 沿用上一轮的值、
+            // 不随 hook 再写往后挪，首次看到才退回 hook 写文件的时刻
+            if record.isWaiting {
+                let previous = previousBySession[record.sessionId]
+                record.waitingSince = (claudeStatus == "waiting" ? claudeSince : nil)
+                    ?? (previous?.isWaiting == true ? previous?.waitingSince : nil) ?? record.updatedDate
+            }
             loaded.append(record)
         }
         // 已关闭的只留最新几条
@@ -247,9 +315,34 @@ final class SessionStore {
         for id in dropped {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(id).json"))
         }
+        closedForBadges.append(contentsOf: loaded.filter { dropped.contains($0.sessionId) })
         loaded.removeAll { dropped.contains($0.sessionId) }
+        let liveProcesses = pendingProcesses.filter { CodexPending.confirmedAlive($0) }
+        let present = Set(liveProcesses.map(\.id))
+        var nextPending: [String: SessionRecord] = [:]
+        for (id, old) in publishedPending where !present.contains(id) {
+            if CodexPending.confirmedGone(old) {
+                var ended = old
+                ended.state = .ended
+                closedForBadges.append(ended)
+            } else {
+                nextPending[id] = old
+                loaded.append(old)
+            }
+        }
+        for process in liveProcesses {
+            let matches = loaded.filter { CodexPending.matches(process, $0) }
+            if matches.count == 1 && liveProcesses.filter({ CodexPending.matches($0, matches[0]) }).count == 1 { continue }
+            let record = process.record()
+            nextPending[record.sessionId] = record
+            loaded.append(record)
+        }
+        publishedPending = nextPending
         if recheck { scheduleRecheck() }
+        badgeSessionsChanged?(loaded + closedForBadges)
         let alerts = Self.alerts(previous: sessions, current: loaded, quiet: quiet)
+        waits.add(WaitLedger.finished(previous: sessions, current: loaded, now: now), now: now)
+        todayWaits = waits.summary(on: now)
         sessions = loaded.sorted { $0.updatedAt > $1.updatedAt }
         sessionsChanged?(sessions)
         for record in alerts { sessionAlert?(record) }

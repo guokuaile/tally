@@ -171,7 +171,23 @@ Other terminals show a "window not found" message. Resume opens a new window in 
 
 **Never requested**: screen recording, camera, microphone (the in-use dots only read device state), Accessibility, location, Full Disk Access.
 
-**Data**: sessions, usage statistics and settings stay on your Mac. No telemetry, no auto-update. Outbound traffic is limited to two things: quota and balance lookups against each provider's official endpoints (Anthropic, OpenAI (ChatGPT), Cursor, Google (Antigravity), plus DeepSeek, Kimi / Moonshot, Zhipu / Z.ai and your New API site only when turned on; turn a provider off in Settings to stop contacting it; keys you enter stay in `~/Library/Application Support/Tally/providers.json`, readable only by you), and a daily check of GitHub for a new version (can be turned off in Settings → 通用; it only notifies and never downloads or replaces anything).
+**Data**: sessions, usage statistics and settings stay on your Mac. No telemetry, no auto-update. Every outbound connection is in the table below, and each row can be switched off. Quota lookups run every 5 minutes (also when the panel opens or you refresh by hand, never twice within 60 s; a 429 backs off per endpoint). Tokens and keys travel only to the provider they belong to, never through any other server.
+
+| Connection | Where | What it carries | Turn off |
+|---|---|---|---|
+| Claude quota | api.anthropic.com | the access token Claude Code's login left behind; read-only, never refreshed | Settings → 用量, turn off Claude |
+| Codex quota | chatgpt.com | the access token in Codex's `auth.json`; read-only, never refreshed | Settings → 用量, turn off Codex |
+| Cursor quota | cursor.com, api2.cursor.sh | Cursor's login access token | Settings → 用量, turn off Cursor |
+| Antigravity quota | the local Antigravity language server first (127.0.0.1, never leaves the Mac); cloudcode-pa.googleapis.com only when it isn't running | the cloud step carries Antigravity's login token from the Keychain | Settings → 用量, turn off Antigravity |
+| DeepSeek balance (off by default) | api.deepseek.com | the key you entered, or the one in Claude Code's settings that points there | Settings → 用量 |
+| Kimi quota and balance (off by default) | api.kimi.com; api.moonshot.cn or api.moonshot.ai | the key you entered, the one in Claude Code's settings, or Kimi Code's login token | Settings → 用量 |
+| GLM quota (off by default) | open.bigmodel.cn or api.z.ai, following the key's region; never sent to the other region | the key you entered, or the one configured in Claude Code / zcode / opencode | Settings → 用量 |
+| New API balance (off by default) | the site you entered | access token and user ID | Settings → 用量 |
+| Update check | api.github.com, at launch and every 24 hours | no account information; GitHub sees your IP and the User-Agent "Tally" | Settings → 通用, turn off 检查新版本 |
+
+Keys you enter stay in `~/Library/Application Support/Tally/providers.json` (mode 600). The network page reads interface counters and system proxy settings, and the proxy card reads the local mihomo control socket; none of that leaves the Mac. The pricing table ships inside the app and is never fetched.
+
+**Footprint**: with the panel closed, 0.8% CPU (of one core, 60-second median) and 145 MB memory (Activity Monitor's Memory column). Measured on a 14-inch MacBook Pro (M3 Max) with default provider switches, the notch crew on, and a week of Claude logs at 480 MB.
 
 ## Troubleshooting
 

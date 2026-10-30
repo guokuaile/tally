@@ -1,5 +1,5 @@
 // 移植自 Atoll（https://github.com/Ebullioscopic/Atoll），Copyright (C) 2024-2026 Atoll Contributors，GPL-3.0，见仓库 LICENSE 与 NOTICE。
-// Tally 改动：配额不再调会回写凭据的客户端；先读 statusline 缓存，没有或陈旧再用只读客户端；按模型分的周窗口只有接口有，单独按 10 分钟节流取；凭据被改写（切账号）时清掉那条窗口重取，手动刷新不等节流；日志走 UsageScanCache 增量扫描；projects 与 .claude.json 跟着 ClaudeHome（CLAUDE_CONFIG_DIR）。
+// Tally 改动：配额不再调会回写凭据的客户端；先读 statusline 缓存，没有或陈旧再用只读客户端；按模型分的周窗口只有接口有，单独按 10 分钟节流取；凭据被改写（切账号）时清掉那条窗口重取，手动刷新不等节流；日志走 UsageScanCache 增量扫描；projects 与 .claude.json 跟着 ClaudeHome（CLAUDE_CONFIG_DIR）；没有日志的提示改成中文并写明下一步。
 import Foundation
 
 struct ClaudeUsageProvider: UsageProvider {
@@ -124,7 +124,7 @@ struct ClaudeUsageProvider: UsageProvider {
             throw UsageError.notFound("没找到 \(root.path)：没装 Claude Code，或 CLAUDE_CONFIG_DIR 指到了别处")
         }
         let files = jsonlFiles(under: root)
-        guard !files.isEmpty else { throw UsageError.notFound("No Claude usage logs found") }
+        guard !files.isEmpty else { throw UsageError.notFound("还没有 Claude Code 的用量日志，跑一轮就有了") }
         var snapshot = scan.aggregate(files: files, now: now)
         // 每轮都比一次，不能只在要问接口时才比：缓存新鲜时十分钟才问一次，切了账号那条窗口会挂着上一个账号的数
         if quota.dropTokenIfCredentialsChanged() { scopedBox.reset(owner: owner) }

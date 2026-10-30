@@ -34,35 +34,61 @@ enum DemoData {
         // 用量条多一家才看得出能并排；再多一家 AI 页就超过面板最高的六成屏高，底部被裁
         prefs.enableDeepSeek = true
         prefs.lastPage = "ai"
+        // 刘海两侧的小人：六个项目正好 3 + 3 放满，截图里六种状态都在
+        prefs.crewEnabled = true
+        prefs.crewPerSide = 3
+        prefs.crewSkin = "glass"
         return prefs
     }
 
     // MARK: AI 页
 
-    /// 等你两个、在跑两个、最近一个、已关闭两个；没关闭的都在两小时内动过，不会被画成失联。条数刚好让 AI 页放进面板最高高度。
-    static func sessions(now: Date) -> [SessionRecord] {
+    /// 等你账本的当天一行（docs/ai.md「等你账本」）：固定数字，不落盘。
+    static let waits = WaitLedger.Day(count: 4, totalMs: 12 * 60_000, maxMs: 6 * 60_000)
+
+    /// 七个没关闭的会话落在六个目录，shop-web 等审批 12 分钟（落灰档）、infra 等输入 4 分钟（橙光晕），正好覆盖刘海小人的六种状态：Claude 占等审批、等输入、压缩中，Codex 占在跑、完成、失联，
+    /// 默认左三 Claude 右三 Codex 放满不溢出；mobile-app 有两条 Codex 在跑的，撑开时第二行写「2 个会话」；已关闭两个。
+    /// 失联那条 3 小时没动，AI 页因此多一个「失联」组。`overflow` 再给两个在跑的项目，Claude 四个把交界推过刘海，右翼最外是「+N」。
+    static func sessions(now: Date, overflow: Bool = DemoMode.crewOverflow) -> [SessionRecord] {
         func ago(_ seconds: TimeInterval) -> Double { ((now.timeIntervalSince1970 - seconds) * 1000).rounded() }
-        return [
+        var sessions = [
             SessionRecord(sessionId: "demo-order-pagination", provider: "claude", pid: firstPid, term: "ghostty", tty: "ttys003",
                           state: .waitingPermission, cwd: "/Users/demo/code/shop-web", title: "给订单列表加分页", transcriptPath: "",
-                          message: nil, updatedAt: ago(40), model: "claude-opus-5"),
-            SessionRecord(sessionId: "demo-ci-migration", provider: "codex", pid: firstPid + 1, term: "tmux", tty: "ttys005",
+                          message: nil, updatedAt: ago(12 * 60), model: "claude-opus-5"),
+            SessionRecord(sessionId: "demo-ci-migration", provider: "claude", pid: firstPid + 1, term: "tmux", tty: "ttys005",
                           state: .waitingInput, cwd: "/Users/demo/code/infra", title: "迁移 CI 到 GitHub Actions", transcriptPath: "",
-                          message: nil, updatedAt: ago(4 * 60), model: "gpt-6-astra"),
+                          message: nil, updatedAt: ago(4 * 60), model: "claude-sonnet-5"),
             SessionRecord(sessionId: "demo-login-form", provider: "claude", pid: firstPid + 2, term: "ghostty", tty: "ttys004",
-                          state: .running, cwd: "/Users/demo/code/shop-web", title: "重构登录页的表单校验", transcriptPath: "",
+                          state: .compacting, cwd: "/Users/demo/code/api-server", title: "重构登录页的表单校验", transcriptPath: "",
                           message: nil, updatedAt: ago(25), model: "claude-sonnet-5"),
             SessionRecord(sessionId: "demo-rate-limit", provider: "codex", pid: firstPid + 3, term: "iTerm.app", tty: "ttys006",
-                          state: .running, cwd: "/Users/demo/code/api-server", title: "给接口加限流和重试", transcriptPath: "",
+                          state: .running, cwd: "/Users/demo/code/mobile-app", title: "给接口加限流和重试", transcriptPath: "",
                           message: nil, updatedAt: ago(2 * 60), model: "gpt-6-astra"),
-            SessionRecord(sessionId: peekSessionId, provider: "claude", pid: firstPid + 4, term: "ghostty", tty: "ttys002",
-                          state: .done, cwd: "/Users/demo/code/api-server", title: "修复支付回调重复入账", transcriptPath: "",
-                          message: "回调按订单号加了幂等键，重复通知不再入账，补了 3 个用例", updatedAt: ago(3 * 60), model: "claude-opus-5"),
+            SessionRecord(sessionId: "demo-e2e-tests", provider: "codex", pid: firstPid + 8, term: "ghostty", tty: "ttys010",
+                          state: .running, cwd: "/Users/demo/code/mobile-app", title: "跑端到端测试并修掉红的", transcriptPath: "",
+                          message: nil, updatedAt: ago(50), model: "gpt-6-astra"),
+            SessionRecord(sessionId: peekSessionId, provider: "codex", pid: firstPid + 4, term: "ghostty", tty: "ttys002",
+                          state: .done, cwd: "/Users/demo/code/payments", title: "修复支付回调重复入账", transcriptPath: "",
+                          message: "回调按订单号加了幂等键，重复通知不再入账，补了 3 个用例", updatedAt: ago(3 * 60), model: "gpt-6-astra"),
+            SessionRecord(sessionId: "demo-docs-site", provider: "codex", pid: firstPid + 5, term: "ghostty", tty: "ttys007",
+                          state: .running, cwd: "/Users/demo/code/docs-site", title: "把文档站迁到新域名", transcriptPath: "",
+                          message: nil, updatedAt: ago(3 * 3600), model: "gpt-6-astra"),
             SessionRecord(sessionId: "demo-memory-leak", provider: "claude", state: .ended, cwd: "/Users/demo/code/api-server",
                           title: "排查内存泄漏", transcriptPath: "", message: nil, updatedAt: ago(3 * 3600), model: "claude-opus-5"),
             SessionRecord(sessionId: "demo-upgrade-deps", provider: "codex", state: .ended, cwd: "/Users/demo/code/shop-web",
                           title: "升级依赖到最新版", transcriptPath: "", message: nil, updatedAt: ago(20 * 3600), model: "gpt-6-astra"),
         ]
+        if overflow {
+            sessions += [
+                SessionRecord(sessionId: "demo-ml-notebooks", provider: "codex", pid: firstPid + 6, term: "ghostty", tty: "ttys008",
+                              state: .running, cwd: "/Users/demo/code/ml-notebooks", title: "整理实验记录", transcriptPath: "",
+                              message: nil, updatedAt: ago(90), model: "gpt-6-astra"),
+                SessionRecord(sessionId: "demo-landing", provider: "claude", pid: firstPid + 7, term: "ghostty", tty: "ttys009",
+                              state: .running, cwd: "/Users/demo/code/landing", title: "落地页换新配色", transcriptPath: "",
+                              message: nil, updatedAt: ago(30), model: "claude-sonnet-5"),
+            ]
+        }
+        return sessions
     }
 
     static var usageProviders: [UsageProvider] {

@@ -295,6 +295,35 @@ struct RefreshControl: View {
 }
 
 /// 提示和会话行共用表情，避免同一状态出现两套视觉含义。
+extension Peek.Style {
+    /// 图标是个角色（眼睛 / 小刻）而不是 SF Symbol：不画底板、不做出场缩放
+    var isCharacter: Bool { self == .session || self == .ask || self == .badge }
+}
+
+/// 不动的小刻：该状态的静态帧、该状态的配色（工牌用项目当前的状态），28pt。
+struct CrewBadgeIcon: View {
+    let mood: CrewMood
+    /// 等久了的档（docs/crew.md「等久了换档」）；工牌和提示条用的是刚弹出那一档
+    var tier: CrewTier = .fresh
+    var size: CGFloat = 28
+    var inset: CGFloat = 0
+    var elapsed: Double? = nil
+    var prefs = PreferencesStore.shared
+
+    var body: some View {
+        Canvas { context, size in
+            guard let art = BloubArt.bundled, let picked = CrewPlayback.pick(mood: mood, tier: tier, elapsed: elapsed ?? 0, still: elapsed == nil, art: art),
+                  let clip = art.clips[picked.clip] else { return }
+            context.translateBy(x: size.width / 2, y: size.height / 2)
+            context.scaleBy(x: size.width * (1 - inset * 2) / 200, y: size.height * (1 - inset * 2) / 200)
+            clip.frames[picked.index].draw(in: context, time: Double(picked.index) / clip.fps,
+                                           style: CrewStyle.style(mood: mood, skin: prefs.prefs.crewSkin == "gradient" ? .gradient : .glass, tier: tier))
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
 struct PeekIcon: View {
     let peek: Peek
     let appeared: Bool
@@ -302,7 +331,7 @@ struct PeekIcon: View {
 
     var body: some View {
         ZStack {
-            if !reduceMotion && peek.style != .session && peek.style != .ask {
+            if !reduceMotion && !peek.style.isCharacter {
                 Circle()
                     .fill(peek.tint.opacity(0.4))
                     .frame(width: 24, height: 24)
@@ -310,7 +339,7 @@ struct PeekIcon: View {
                     .opacity(appeared ? 0 : 0.9)
                     .animation(.easeOut(duration: 0.8).delay(0.1), value: appeared)
             }
-            if peek.style != .session && peek.style != .ask {
+            if !peek.style.isCharacter {
                 RoundedRectangle(cornerRadius: 7)
                     .fill(peek.tint.opacity(0.16))
                     .frame(width: 24, height: 24)
@@ -320,7 +349,7 @@ struct PeekIcon: View {
                 .foregroundStyle(peek.tint)
         }
         .frame(width: 24, height: 24)
-        .scaleEffect(reduceMotion || appeared || peek.style == .session || peek.style == .ask ? 1 : 0.3)
+        .scaleEffect(reduceMotion || appeared || peek.style.isCharacter ? 1 : 0.3)
         .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.55), value: appeared)
     }
 
@@ -333,6 +362,8 @@ struct PeekIcon: View {
             SessionEyes(mood: .happy, identity: peek.sessionId ?? "", size: 28)
         case .ask:
             SessionEyes(mood: peek.label == "等输入" ? .input : .permission, identity: peek.sessionId ?? "", size: 28)
+        case .badge:
+            CrewBadgeIcon(mood: peek.crewMood)
         case .pluggedIn:
             Image(systemName: "bolt.fill")
                 .symbolEffect(.bounce.up, options: .nonRepeating, value: appeared)

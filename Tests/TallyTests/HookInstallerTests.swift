@@ -85,7 +85,7 @@ final class HookInstallerTests: XCTestCase {
                   "PreToolUse":[{"hooks":[{"type":"command","command":"node guard.js"}]}]}}
         """)
         let i = installer()
-        XCTAssertEqual(i.status(.claude), .pointsElsewhere("SessionStart、UserPromptSubmit、Notification、PostToolUse、PreCompact、SessionEnd 未注册；命令指向 node /old/claude-event.js"))
+        XCTAssertEqual(i.status(.claude), .pointsElsewhere("SessionStart、UserPromptSubmit、Notification、PermissionRequest、PostToolUse、PreCompact、SessionEnd 未注册；命令指向 node /old/claude-event.js"))
         try i.install(.claude)
         let root = try json("settings.json")
         XCTAssertEqual(commands(root, "Stop"), ["\"\(binary)\"", "node verify-gate.js"])
@@ -103,7 +103,7 @@ final class HookInstallerTests: XCTestCase {
         try write("settings.json", """
         {"hooks":{"Stop":[{"hooks":[{"type":"command","command":"\\"/x/tally-hook\\""}]},{"hooks":[{"type":"command","command":"\\"/y/tally-hook\\""}]}]}}
         """)
-        XCTAssertEqual(i.status(.claude), .pointsElsewhere("SessionStart、UserPromptSubmit、Notification、PostToolUse、PreCompact、SessionEnd 未注册；命令指向 \"/x/tally-hook\""))
+        XCTAssertEqual(i.status(.claude), .pointsElsewhere("SessionStart、UserPromptSubmit、Notification、PermissionRequest、PostToolUse、PreCompact、SessionEnd 未注册；命令指向 \"/x/tally-hook\""))
         try i.install(.claude)
         XCTAssertEqual(commands(try json("settings.json"), "Stop"), ["\"\(binary)\""])
     }
@@ -114,7 +114,7 @@ final class HookInstallerTests: XCTestCase {
             hooks[event] = [["hooks": [["type": "command", "command": "\"\(binary)\"", "timeout": 5]]]]
         }
         try HookInstaller.save(["hooks": hooks], to: dir.appendingPathComponent("settings.json"))
-        XCTAssertEqual(installer().status(.claude), .pointsElsewhere("Notification、PostToolUse、PreCompact 未注册"), "升级前装的机器会看到 PreCompact 未注册")
+        XCTAssertEqual(installer().status(.claude), .pointsElsewhere("Notification、PermissionRequest、PostToolUse、PreCompact 未注册"), "升级前装的机器会看到 PreCompact 未注册")
     }
 
     func testCodexInstallWritesProviderFlagAndPatchesTrustInPlace() throws {

@@ -6,7 +6,7 @@
 
 ### 数据怎么来
 
-Claude Code 与 Codex 的 hook 调 `Tally.app/Contents/MacOS/tally-hook`（Codex 加 `--provider codex`），它把事件写成 `~/Library/Application Support/Tally/sessions/<session_id>.json`（先写 `.tmp` 再 rename，app 读不到半个文件）；app 用 kqueue（`DispatchSource`）盯目录，不轮询、不起服务端。被拒绝的是「app 起 socket 让 hook 连」（为单向通知养一个服务端）和「读终端标题猜状态」（分不清等审批和等输入，Codex 不设标题）。
+Claude Code 与 Codex 的 hook 调 `Tally.app/Contents/MacOS/tally-hook`（Codex 加 `--provider codex`），它把事件写成 `~/Library/Application Support/Tally/sessions/<session_id>.json`（先写 `.tmp` 再 rename，app 读不到半个文件）；同一会话的 hook 事件通过固定数量的锁分片串行读写，避免结束事件移走并发的新状态；app 用 kqueue（`DispatchSource`）盯目录，不轮询、不起服务端。被拒绝的是「app 起 socket 让 hook 连」（为单向通知养一个服务端）和「读终端标题猜状态」（分不清等审批和等输入，Codex 不设标题）。
 
 只做 Claude Code 和 Codex：只有它们有 hook 机制。Cursor、Antigravity 只有用量。
 
@@ -24,12 +24,17 @@ Claude Code 与 Codex 的 hook 调 `Tally.app/Contents/MacOS/tally-hook`（Codex
 | `title` | string | 是 | 见「标题」；null 表示没读到，不会是空串 |
 | `transcript_path` | string | 否 | 原样透传，Codex 没有时写空串 |
 | `message` | string | 是 | `Stop` 的 `last_assistant_message` 前 120 个码点；其他事件 null |
-| `updated_at` | number | 否 | 毫秒时间戳，只在真正写文件时更新 |
+| `waiting_detail` / `recent_activity` | string | 是 | 本会话等待请求与本回合最近工具动作；无可信输入时为空，旧文件缺键按空值读 |
+| `updated_at` | number | 否 | 毫秒时间戳；仅详情改变时沿用原值 |
 | `model` | string | 是 | 会话在用的模型 id（如 `claude-opus-5`、`gpt-6-astra`）：hook 入参带 `model` 就用它（Codex 带），没有就取 transcript 尾 64 KB 里最后一条带模型名的记录（Claude 回复的 `message.model`，跳过它报错时写的 `<synthetic>`；Codex 的 `turn_context`），再没有沿用旧值；null 是还不知道。Codex 的 rollout 动辄几百 MB、一轮很长时尾巴里没有 `turn_context`，所以它得靠入参 |
 
 可空键永远写出、没有值写 JSON `null`（自定义 `encode(to:)`），读的一方靠键存在判格式版本。
 
+等输入时只在 Claude 的当前主会话 transcript 最后一条对话记录是未回答的 `AskUserQuestion` 时显示首个问题；其他对话框没有可靠问题内容时留空，不猜。
+
 ### 事件到状态（`HookDecision`，纯函数）
+
+Codex 空开未输入时可能没有启动 hook；Tally 另以终端进程识别「待关联」临时条目。无法从进程本身判断用户是否已输入，因而不将它标成「未开始」。临时身份只在内存中使用，不是 Codex 会话 ID，也不提供跳转或恢复。只有 PID、进程启动时间与 tty 等证据唯一吻合才可与 hook 会话合并；共享后台无法确认时保留未关联，不按目录猜测。
 
 | 事件 | 条件 | 写入 |
 |---|---|---|
@@ -38,17 +43,17 @@ Claude Code 与 Codex 的 hook 调 `Tally.app/Contents/MacOS/tally-hook`（Codex
 | `Notification` | `idle_prompt` / `elicitation_dialog` / `elicitation_url_dialog` 且现有 `state == running`，且 transcript 尾巴不显示回合已经结束 | `waiting_input` |
 | `Notification` | 同上三种但现有状态不是 `running`（含文件不存在），或回合已经结束（见「打断与 API 报错」） | 不写：`done` 之后闲置不算「等我」 |
 | `Notification` | 其他类型 | 不写 |
-| `PermissionRequest`（只在 Codex 侧注册） | 无 | `waiting_permission` |
+| `PermissionRequest`（Claude 与 Codex 均注册） | 无 | `waiting_permission` |
 | `PostToolUse` 带 `agent_id`（后台子 agent 的工具调用，用的是主会话的 session_id） | 现有是 `waiting_permission`，或文件不存在、坏文件 | `running`：审批过了，或 Tally 装上时正跑着。几个 agent 并行时这一行会把别人还没过的等审批冲回 running，app 靠「等你」那节的 status 兜底 |
 | `PostToolUse` 带 `agent_id` | 其他（`done`、`waiting_input`、`compacting`、`ended`、`running`） | 不写：主回合结束后子 agent 在后台干活，不等于会话又忙起来了。实测：主回合 Stop 写 done，1 秒后子 agent 的工具调用把它翻回 running，60 秒后 `idle_prompt` 再写成等输入、又弹一次；这期间 Claude Code 自己的 status 一直是 busy，app 的补判接不住。行上「后台 agent 在跑」的标注就是 app 从这个 busy 读出来的，见「后台还在跑」。`agent_id` 只在 hook 从子 agent 里触发时才带，主线程永远不带（`agent_type` 在 `--agent` 会话里主线程也有，不能用） |
 | `PostToolUse` 不带 `agent_id` | 现有 `state != running`（含文件不存在、坏文件） | `running`：工具跑完就是 agent 在干活。文件不存在是 Tally 装上时会话正跑在长回合中间；`done` 是后台命令或子 agent 回来之后主会话接着干的新回合（2.1.266 起这种回合都有 `UserPromptSubmit`，更早的版本实测有没有的）；等审批必然已过 |
-| `PostToolUse` | 现有 `state == running` | 不写：省得每次工具调用都改文件 |
+| `PostToolUse` | 现有 `state == running` | 主会话工具摘要有变化时仅更新详情，`updated_at` 不变；没有可用摘要或与上次相同则不写 |
 | `PreCompact`（只在 Claude 侧注册，Codex 没有这个事件） | 无 | `compacting`：长会话压缩上下文要几十秒，不标出来看着像卡住。压完 Claude Code 发 `SessionStart`（`start_reason` 是 compact）写回 `running`；手动 `/compact` 压完没有回合，靠 app 看 Claude Code 自己的 status 补判回 `done` |
 | `Stop` | 无 | `done` |
 | `SessionEnd` | 交互会话（见「已关闭的会话」） | `ended` |
-| `SessionEnd` | 其他（`claude -p`、`codex exec`） | 删文件 |
+| `SessionEnd` | 无可恢复 transcript 或脚本会话（`claude -p`、`codex exec`） | 若已有有效状态，原子移为带唯一标识的一次性 `.tally-end` 结束记录供工牌消费，不加入已关闭会话；没有有效状态则删除会话文件 |
 
-Claude 侧不用 `PermissionRequest`（返回值语义没文档，`Notification` 的 `permission_prompt` 时机相同且只读）；Codex 没有 `Notification`，只能挂 `PermissionRequest`，hook 不输出任何 stdout 所以不影响审批。Codex 没有 idle 类通知，它的会话只有三态。
+Claude 和 Codex 的 `PermissionRequest` 采集工具请求，hook 不输出任何 stdout、不改变审批结果；Claude 旧安装需要在设置点一次安装补注册。Codex 没有 `Notification`。Codex 没有 idle 类通知，它的会话只有三态。
 
 hook 的硬约束：永远 `exit 0`（`Stop` 上 exit 2 会阻止 agent 结束回合）；900 ms 自我退出；stdin 不是 JSON、缺 `session_id`、id 含非法字符、事件名不在表内一律不写；现有文件坏了，需要看现有状态的行按「不写」（`Notification` 的等输入三种），其余照写覆盖。实测 `claude -p` 与 `codex exec` 只触发 SessionStart / UserPromptSubmit / SessionEnd，不触发 Stop，`Stop → done` 只能在交互会话里验；Codex 只在启动时读 hooks.json，注册后已开着的 Codex 会话要重开。
 
@@ -102,6 +107,8 @@ hook 这一路看「等你」有三处接不住，Claude Code 自己的状态文
 
 这个文件是原地改写的（inode 不变），Tally 的目录没动、盯 Claude 的 sessions 目录也收不到内容变化，所以每条活着的 Claude 记录按 pid 给 `<pid>.json` 挂一个 vnode 监视器（`DispatchSource`，`.write` / `.extend` / `.delete` / `.rename`），改了就 reload：等你、审批过了、后台还在跑、回合结束都当场刷新，不用等 hook 或 60 秒一次的重算；Claude Code 退出时删这个文件，`.delete` 一来存活判断就把行收掉。监视器在读文件之前挂（挂在读之后，读完到挂上之间的那次改写会丢），文件还没建出来（SessionStart hook 比它早几毫秒）就下一轮再挂；删了、换了的丢掉监视器，下一轮文件还在再挂回去。
 
+**开始等的时刻**（`SessionRecord.waitingSince`，只在内存）：等你那一刻不是 hook 写文件的 `updated_at`——`permission_prompt` 通知晚 6 秒，几个 agent 并行时还会被冲掉。Claude 记录取状态文件里的 `statusUpdatedAt`（status 翻成 waiting 的那一毫秒）；文件里没有（老版本、桌面版）和 Codex 记录退回 `updated_at`。Claude 的 `statusUpdatedAt` 永远优先：批完马上又弹、两次刷新之间状态文件已经翻了一轮，它会变晚，那就是新的一次等；退回 `updated_at` 的记录一旦定下就跟着走，下一轮还在等就沿用上一轮的值，不随 hook 再写而往后挪。刘海小人按它换档（[crew.md](crew.md)「等久了换档」），等你组按它排序（「会话行」），等你账本按它算时长（「等你账本」）。
+
 ### 陈旧、存活、清理（`SessionRecord`，纯函数）
 
 | 条件 | 处理 |
@@ -117,9 +124,13 @@ hook 这一路看「等你」有三处接不住，Claude Code 自己的状态文
 
 `SessionStore.reload()` 每次把上一轮和这一轮的记录按 `session_id` 对比：上一轮见过、这一轮进入了 `done` / `waiting_permission` / `waiting_input` 且和上一轮状态不同的会话（进入压缩中、已关闭不算），逐个回调 `sessionAlert`，控制器在面板闭合时弹提示（外观、时长、点击跳回见 [panel.md](panel.md) 的「提示」）。第一次露面就已经在那个状态的不算（Tally 晚于会话启动，或刚装上 hook）；`done → running → done` 每个回合都算；审批过了回到 `running` 不弹；打断补判出来的 `done` 不弹（见「打断与 API 报错」）；Claude Code 的 status 标出来的等审批 / 等输入（见「等你」）和 hook 写的一样算进入了那个状态。
 
+### 等你账本（`WaitLedger`）
+
+Tally 存在的理由是「等审批的会话晚发现几分钟是常态」，这一节就是量它。`SessionStore.reload()` 把上一轮在等你（`waitingSince` 非空）、这一轮不等了或记录没了的会话各记一笔：时长 = 这一轮的时刻 − `waitingSince`；还在等但 `waitingSince` 变晚了的（批完马上又弹）也记一笔，时长是两个时刻之差。批了、答了、拒了、直接关了终端都算发现了它，不分，等到失联再关掉的也照实记几小时；Claude 原地改写状态文件时读到半截会让那一轮当它不在等，多记一笔短的，不去重；Tally 关着时结束的等待不进账本，开着时看到的哪怕开始于 Tally 启动之前，也按 `statusUpdatedAt` 记。按本地日期汇总成次数、总时长、最长一次，存 `~/Library/Application Support/Tally/waits.json`（`{"2026-10-30": {"count": 4, "total_ms": 720000, "max_ms": 360000}}`），只留最近 7 天（含今天，按日历日），有新笔才写盘；读不回来的文件挪成 `waits.json.bak` 再从空开始，不覆盖。会话卡片列表底部一行灰字「今天等你 4 次 · 共 12 分钟 · 最长 6 分钟」（`SessionStore.todayWaits`，每轮刷新按当天重算，跨了零点一分钟内换天），今天没等过就不画；已关闭那一页不画。这个数是翅膀和提示条有没有用的证据：装上之后「最长一次」该往下掉。演示模式不落盘，数字固定。
+
 ### 会话行
 
-分四组，组内按 `updated_at` 倒序（`SessionRecord.displayOrder`）：**等你**（等审批、等输入）、**在跑**（忙、压缩中、主回合已结束但后台仍有工作）、**完成**（没有后台工作的完成记录）、**失联**（未完成且两小时没有更新），空组不画，组头是一行灰色小字。已关闭的不在这一页：会话卡片标题行右边有「已关闭 N ›」（`ClosedPageToggle`，`Card` 的 `accessory`），点了卡片里换成已关闭列表，标题变「已关闭」、按钮变「‹ 会话」翻回来；不落盘，每次展开面板都回到会话。已关闭单独放一页，是因为它点下去会开一个新终端：混在主列表组末，离跑完的会话一行之隔，容易误触；折叠在列表底部也试过，要往下翻才找得到。一行是无方底的 bloub 动画（状态动作见下方显示规则；辅助功能读出状态）+ 标题（太长从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上）+ 标签 + 目录名（这一页里同一目录有不止一个会话时跟上 tty，如「note · ttys004」：同目录跑同一个 skill 的两条标题只差 URL 尾巴，一眼看是同一行，`SessionRecord.crowdedCWDs`）+ 距上次事件多久；压缩中后面跟「压缩上下文中」，完成但后台还有活用环绕旋转动画、标题旁绿色小标签「后台 agent 在跑」或「后台命令在跑」（见「后台还在跑」），已关闭的标题变灰、后面跟「已关闭」，点行没有动作，行尾「接着聊」按钮才在新终端里接着聊。标签是提供方标志（Claude 橙、OpenAI 白）加模型短名（`SessionRecord.modelLabel`：`claude-opus-5` →「Opus 5」、`claude-fable-5-1` →「Fable 5.1」、`claude-haiku-4-5-20251001` →「Haiku 4.5」，别家原样如「gpt-6-astra」）；还不知道模型时写「Claude」「Codex」。面板展开时 ⌘1–⌘9、⌘0 跳第 N 行（⌘0 是第 10 个，原来只到 ⌘5，第 6 个会话起就没有键）：按分组后的显示顺序数、不数已关闭的（`SessionRecord.shortcutOrder`），所以有人在等时 ⌘1 就是最急的那个；按住 ⌘ 时前十行行尾浮出 ⌘1…⌘9、⌘0（`PanelKey.sessionShortcutLabel`），松开就消失（默认开，设置里可关，见 [panel.md](panel.md)「键盘」）。列表空显示终端图标加「没有在跑的会话」。悬停行有底色。点行走 `TerminalLocator.focus`（经 `SessionJump`；已关闭的行尾按钮走 `SessionResume`，见「已关闭的会话」），失败在行内显示「找不到窗口」或「<app> 没在跑」；失败原因按会话记在 `SessionJump.failures`，⌘1–⌘5 跳失败时同一行一样显示。
+分四组（`SessionRecord.displayOrder`；等你组按开始等的时刻正序，等得最久的在最上面、就是 ⌘1，被忘掉的那条才该最显眼；其余组按 `updated_at` 倒序）：**等你**（等审批、等输入）、**在跑**（忙、压缩中、主回合已结束但后台仍有工作）、**完成**（没有后台工作的完成记录）、**失联**（未完成且两小时没有更新），空组不画，组头是一行灰色小字。已关闭的不在这一页：会话卡片标题行右边有「已关闭 N ›」（`ClosedPageToggle`，`Card` 的 `accessory`），点了卡片里换成已关闭列表，标题变「已关闭」、按钮变「‹ 会话」翻回来；不落盘，每次展开面板都回到会话。已关闭单独放一页，是因为它点下去会开一个新终端：混在主列表组末，离跑完的会话一行之隔，容易误触；折叠在列表底部也试过，要往下翻才找得到。一行是无方底的 bloub 动画（状态动作见下方显示规则；辅助功能读出状态）+ 标题（太长从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上）+ 标签 + 目录名（这一页里同一目录有不止一个会话时跟上 tty，如「note · ttys004」：同目录跑同一个 skill 的两条标题只差 URL 尾巴，一眼看是同一行，`SessionRecord.crowdedCWDs`）+ 距上次事件多久；压缩中后面跟「压缩上下文中」，完成但后台还有活用环绕旋转动画、标题旁绿色小标签「后台 agent 在跑」或「后台命令在跑」（见「后台还在跑」），已关闭的标题变灰、后面跟「已关闭」，点行没有动作，行尾「接着聊」按钮才在新终端里接着聊。标签是提供方标志（Claude 橙、OpenAI 白）加模型短名（`SessionRecord.modelLabel`：`claude-opus-5` →「Opus 5」、`claude-fable-5-1` →「Fable 5.1」、`claude-haiku-4-5-20251001` →「Haiku 4.5」，别家原样如「gpt-6-astra」）；还不知道模型时写「Claude」「Codex」。面板展开时 ⌘1–⌘9、⌘0 跳第 N 行（⌘0 是第 10 个，原来只到 ⌘5，第 6 个会话起就没有键）：按分组后的显示顺序数，不数已关闭和尚待关联的临时会话（`SessionRecord.shortcutOrder`），所以有人在等时 ⌘1 就是最急的那个；按住 ⌘ 时前十行行尾浮出 ⌘1…⌘9、⌘0（`PanelKey.sessionShortcutLabel`），松开就消失（默认开，设置里可关，见 [panel.md](panel.md)「键盘」）。列表空显示终端图标加「没有在跑的会话」。悬停行有底色。点行走 `TerminalLocator.focus`（经 `SessionJump`；已关闭的行尾按钮走 `SessionResume`，见「已关闭的会话」），失败在行内显示「找不到窗口」或「<app> 没在跑」；失败原因按会话记在 `SessionJump.failures`，⌘1–⌘5 跳失败时同一行一样显示。
 
 ### 跳回终端（`TerminalLocator`）
 
@@ -246,7 +257,7 @@ Claude 的路径都跟着 `ClaudeHome`（默认 `~/.claude`，`CLAUDE_CONFIG_DIR
 
 配速标记（`QuotaPace`）：在轨道时间已过去比例处画刻线，同样从左向右；用量领先时间 10 个百分点时变橙。窗口长度未知的不画。百分比、陈旧标记、重置时间与配速含义继续提供辅助功能文本。
 
-会话与弹窗共用 `SessionEyes`，各状态复用 bloub 原始动画，透明底配近黑的玻璃质感主体、白色眼睛；参考用户提供的视频，用灰色反光提亮主体上沿和下沿，青蓝、紫粉亮色集中在随轮廓变化的外圈及柔光，不加方形底板。忙用 `play → orbit → idle`（三角主体、六条前后环绕线、旋转和形变），等审批用 `notify → wide` 的视线、眨眼、睁眼和持续跳动的蓝点；等输入用已有 `egg → hexagon` 的蛋形与六边形变换。两个等待动作均为 4 秒循环，角色、光圈和运动全程连续；眼神完整保留，`!` / `?` 作为右上方独立的情绪符号持续显示，向外倾斜约 18° 并轻微摆动，跟随主体轻弹。两个符号字号为 148.4（相对于 316 单位画布），比原来放大 40%；两个符号沿字形纵向使用浅青 → 粉白 → 浅紫渐变，去掉容易融入背景的深蓝。等待角色整体缩至 90%，在 316 单位画布内左移 8、下移 8，符号保持原大小与位置，给符号圆点与主体光圈留出间隙。符号没有底板、不遮眼睛；审批提示点在左上沿持续跳动，半径为 14–17 单位，保留青蓝渐变，避免和右上符号挤在一起，输入没有蓝点。压缩用 `burst → thinking`（收缩、粒子聚合和三点），完成用 `wink → idle`（眨眼）；已关闭显示三个静态点，失联保留悲伤眼静态帧。bloub 原引擎负责轮廓插值、遮挡关系与视线透视，本地增加外置情绪符号及轻弹。减少动态效果时保留角色和右上符号的静态组合。回归检查角色与眼睛全程保留、循环边界连续、右上符号位置及蓝点覆盖；原生验收查看 34pt 会话和 28pt 提示的完整循环。外圈沿原主体轮廓描边，色相缓慢流转；环绕线与压缩粒子统一为青蓝、紫粉色系。主体中央保持近黑，边缘反光均剪裁在轮廓内；其余状态的轮廓、运动和前后遮挡沿用原版。来源版本、MIT 许可与重建命令见 `Resources/bloub/README.md`。
+会话与弹窗共用 `SessionEyes`，各状态复用 bloub 原始动画，透明底配近黑的玻璃质感主体、白色眼睛；参考用户提供的视频，用灰色反光提亮主体上沿和下沿，青蓝、紫粉亮色集中在随轮廓变化的外圈及柔光，不加方形底板。忙用 `play → orbit → idle`（三角主体、六条前后环绕线、旋转和形变），等审批用 `notify → wide` 的视线、眨眼、睁眼和持续跳动的蓝点；等输入用已有 `egg → hexagon` 的蛋形与六边形变换。两个等待动作均为 4 秒循环，角色、光圈和运动全程连续；眼神完整保留，`!` / `?` 作为右上方独立的情绪符号持续显示，向外倾斜约 18° 并轻微摆动，跟随主体轻弹。两个符号字号为 148.4（相对于 316 单位画布），比原来放大 40%；两个符号沿字形纵向使用浅青 → 粉白 → 浅紫渐变，去掉容易融入背景的深蓝。等待角色整体缩至 90%，在 316 单位画布内左移 8、下移 8，符号保持原大小与位置，给符号圆点与主体光圈留出间隙。符号没有底板、不遮眼睛；审批提示点在左上沿持续跳动，半径为 14–17 单位，保留青蓝渐变，避免和右上符号挤在一起，输入没有蓝点。压缩用 `burst → thinking`（收缩、粒子聚合和三点），完成用 `wink → idle`（眨眼）；已关闭显示三个静态点，失联保留悲伤眼静态帧。bloub 原引擎负责轮廓插值、遮挡关系与视线透视，本地增加外置情绪符号及轻弹。身体分出去的碎片（压缩中思考段的两个侧点）按身体材质画成带描边的小玻璃球，不是实心色点，和刘海小人共用这条绘制规则（见 [crew.md](crew.md)）。减少动态效果时保留角色和右上符号的静态组合。回归检查角色与眼睛全程保留、循环边界连续、右上符号位置及蓝点覆盖；原生验收查看 34pt 会话和 28pt 提示的完整循环。外圈沿原主体轮廓描边，色相缓慢流转；环绕线与压缩粒子统一为青蓝、紫粉色系。主体中央保持近黑，边缘反光均剪裁在轮廓内；其余状态的轮廓、运动和前后遮挡沿用原版。来源版本、MIT 许可与重建命令见 `Resources/bloub/README.md`。
 
 用量区各提供方的品牌标志统一静止，保留各自原色；Claude、Codex 和其他提供方遵循同一规则。配额轨道的前沿微光与会话状态动画继续播放。
 
@@ -261,11 +272,11 @@ Claude 的路径都跟着 `ClaudeHome`（默认 `~/.claude`，`CLAUDE_CONFIG_DIR
 `QuotaBarRenderingTests` 验证已用位置从左向右单调增长、0% / 100% 无流光、前沿流光不越过已用边界，以及 bloub 的轮廓旋转、前后彩色轨道、通知和粒子状态。原生视觉验收看完整动作与紧凑用量轨道。
 
 ```bash
-swift test --filter 'QuotaBarRenderingTests|HookDecisionTests|HookRunnerTests|SessionModelTests|TranscriptTitleTests|GhosttyMatchTests|TerminalLocatorTests|ClaudeQuotaReadOnlyTests|ClaudeTokenBoxTests|ClaudeLimitsCacheTests|UsageStoreTests|UsageScanCacheTests|JSONLUsageParserTests|JSONLUsageParserMemoryTests|CodexQuotaWindowTests|AntigravityParsingTests|KeychainReaderTests|TokenFormatTests|ProviderCredentialsTests|DeepSeekUsageProviderTests|KimiUsageProviderTests|GLMUsageProviderTests|NewAPIUsageProviderTests'
+swift test --filter 'QuotaBarRenderingTests|HookDecisionTests|HookRunnerTests|SessionModelTests|TranscriptTitleTests|GhosttyMatchTests|TerminalLocatorTests|ClaudeQuotaReadOnlyTests|ClaudeTokenBoxTests|ClaudeLimitsCacheTests|UsageStoreTests|UsageScanCacheTests|JSONLUsageParserTests|JSONLUsageParserMemoryTests|CodexQuotaWindowTests|AntigravityParsingTests|KeychainReaderTests|TokenFormatTests|ProviderCredentialsTests|DeepSeekUsageProviderTests|KimiUsageProviderTests|GLMUsageProviderTests|NewAPIUsageProviderTests|WaitLedgerTests'
 export TALLY_SESSIONS_DIR=$(mktemp -d)
 echo '{"session_id":"t1","hook_event_name":"SessionStart","cwd":"/tmp"}' | /Applications/Tally.app/Contents/MacOS/tally-hook && cat "$TALLY_SESSIONS_DIR/t1.json"
 echo '{"session_id":"t1","hook_event_name":"SessionEnd"}' | /Applications/Tally.app/Contents/MacOS/tally-hook && test ! -f "$TALLY_SESSIONS_DIR/t1.json" && echo GONE
 test $(grep -rcE 'SecItemUpdate|SecItemAdd|oauth/token' Sources/ | awk -F: '{s+=$2} END {print s}') -eq 0 && echo CLEAN
 ```
 
-用例：分派六条（含 vscode 按谁在跑挑 VS Code / Cursor）、-1743 翻成需要授权而不是找不到窗口；增量扫描（文件没变读 0 字节、追加只读新增那段、结果和全量一致、截断后重扫、半行不重复计、重开 app 走盘上缓存、坏缓存丢掉重扫、预筛保住 Codex 模型状态行、Codex 累计值跨增量扫描与重开 app 接得上、末尾半行不推进累计值）；定价（包内表盖住 Claude Code / Codex 当前写的模型 id、`[1m]` 后缀按同名模型计价、没有的模型仍是没定价）；记账口径（Claude 同键多行取最大输出、1 小时档写入按 2 倍 prompt 计价且没定价不凑数、Codex 重复上报不重复记、老格式退回 last_token_usage）；配额（已过重置时间的窗口在陈旧兜底与新鲜缓存里都丢；临时失败沿用 24 小时内的真实读数并标「~」、沿用超过 30 分钟补一句多久没更新、全都重置或太老照实报失败；一轮卡住 180 秒后放行、迟到结果不许覆盖；新开启的一家立刻单独刷）；Antigravity（两条各是一个池、没有认得的 bucket 不算读数、缺 quotaInfo 不当用光、没用过的池是 0%）；token 缩写舍入进位不出「1000k」；`weekly_scoped` 解析出模型名与百分比、顶层 null 字段不当数据；缓存新鲜且 scoped 没过节流窗时不碰接口；映射表每行一个；hook 守门四条；回合结束判定（打断两种写法与之后追加的快照记录、正文是字符串的写法、API 报错取正文、打断后又发了一句 / 报错后排队的输入接着跑不算、尾巴里没有对话记录不算、子 agent 与注入提示跳过）；打断与 API 报错（hook：之后的 idle_prompt 不写、Claude Code status 为 idle 时 idle_prompt 不写而 elicitation 照写、status 对不上会话时照写；app：打断补判成 done 不弹且下一句话回到 running、API 报错补判成 done 弹且带报错、status 为 idle 时没有打断标记也补判、status 是 waiting 或 sessionId 对不上或记录是等输入不算、Codex 不认 Claude 的打断标记、已是 done 的不动）；后台还在跑（done 且 status 是 busy 标后台 agent、shell 标后台命令、idle 不标、忙着的记录不标、sessionId 对不上不标、Codex 不标、不弹；刚写的 done 读到 busy 不标而 shell 当场标、补判那轮不标）；Codex rollout（turn_aborted 算打断且不弹、task_complete 带 error 算报错且弹、老版本单独的 error 事件也算、正常完成交给 Stop、打断后又开一轮不算、报错后还没完成不算、没有生命周期事件不算）；模型（入参带 `model` 就写、没有从 transcript 尾取、再没有沿用旧值；尾巴里跳过 `<synthetic>`、认 Codex 的 `turn_context`；短名换算）；陈旧 / 存活 / 清理三条；提示判定六条（进入 done 算、进入等审批 / 等输入算、首见即在该状态不算、同状态不重复、每回合都算、打断补判的 done 不算）；标题三种来源；Ghostty 匹配五条；`kind` 六条；只读配额（过期不发请求、200 解析、401 恰好一次请求、凭据文件哈希前后一致、残留的过期凭据文件让位给钥匙串）；切账号（凭据改写时刻变了才重读 token、读失败的冷却一起作废、接口用新 token 且上一个账号的周窗口不挂在新账号名下、手动刷新重读凭据且周窗口不等节流但值留着、只有放行了的手动那一轮重读、读到一半凭据换了的那份不存、没看到改写时刻不算变了）；解析器内存上限；分组顺序（等你 → 在跑 → 完成 → 失联 → 已关闭，后台 agent / 命令进在跑、后台结束回完成、失联不算完成、已关闭单独一组、⌘N 不数已关闭的）；同目录多条会话才标 tty（单条不算、两条同目录两条都算）；子 agent 的 PostToolUse（完成 / 等输入 / 已关闭不翻回、等审批和没有文件照写、空 agent_id 按主线程；重放 Stop → 子 agent 工具调用 → idle_prompt 最后仍是 done）；压缩中（PreCompact 写 compacting、不弹、status idle 补判回 done）；已关闭（交互会话 SessionEnd 写 ended、`claude -p` / `codex exec` 删文件、进程没了改 ended、超过设置的条数删最旧、开关关掉删、不失联不弹）；交互会话判定（entrypoint cli / sdk-cli、session_meta source cli / exec / 对象、判不出来按交互、文件不存在不算）；接着聊的命令（Claude / Codex、单引号转义）；tmux（list-panes 按 tty 找 pane、list-clients 优先同会话再按最近活动、kind 认 tmux）；配速（窗口已过比例、超出窗口或没有重置时间不画、领先 10 点变橙）；配额提醒（首读不报、跨 80 报一次、到 100 只报用完、重置只在用过 80 之后报、陈旧读数不喂）；到重置时刻补刷（取最近的重置时刻、含按模型分的周窗口、失败与没有重置时间的不算、刚过重置时刻而补刷还没到点的仍算）；国内几家与 New API（各自解析、错误包、凭据顺序与区、主机名精确匹配、429 退避，见各自的测试文件；手填凭据落盘权限 600、老文件缺键能读）；429 退避（60 秒起翻倍封顶 15 分钟、Retry-After 取大、成功清零、落盘读回）；睡醒 60 秒内刷新跳过。端到端：在交互会话里发一句话，回合结束后目录里该会话 `"state":"done"`；截图用量四行齐全、Claude 的百分比与缓存文件一致。
+用例：分派六条（含 vscode 按谁在跑挑 VS Code / Cursor）、-1743 翻成需要授权而不是找不到窗口；增量扫描（文件没变读 0 字节、追加只读新增那段、结果和全量一致、截断后重扫、半行不重复计、重开 app 走盘上缓存、坏缓存丢掉重扫、预筛保住 Codex 模型状态行、Codex 累计值跨增量扫描与重开 app 接得上、末尾半行不推进累计值）；定价（包内表盖住 Claude Code / Codex 当前写的模型 id、`[1m]` 后缀按同名模型计价、没有的模型仍是没定价）；记账口径（Claude 同键多行取最大输出、1 小时档写入按 2 倍 prompt 计价且没定价不凑数、Codex 重复上报不重复记、老格式退回 last_token_usage）；配额（已过重置时间的窗口在陈旧兜底与新鲜缓存里都丢；临时失败沿用 24 小时内的真实读数并标「~」、沿用超过 30 分钟补一句多久没更新、全都重置或太老照实报失败；一轮卡住 180 秒后放行、迟到结果不许覆盖；新开启的一家立刻单独刷）；Antigravity（两条各是一个池、没有认得的 bucket 不算读数、缺 quotaInfo 不当用光、没用过的池是 0%）；token 缩写舍入进位不出「1000k」；`weekly_scoped` 解析出模型名与百分比、顶层 null 字段不当数据；缓存新鲜且 scoped 没过节流窗时不碰接口；映射表每行一个；hook 守门四条；回合结束判定（打断两种写法与之后追加的快照记录、正文是字符串的写法、API 报错取正文、打断后又发了一句 / 报错后排队的输入接着跑不算、尾巴里没有对话记录不算、子 agent 与注入提示跳过）；打断与 API 报错（hook：之后的 idle_prompt 不写、Claude Code status 为 idle 时 idle_prompt 不写而 elicitation 照写、status 对不上会话时照写；app：打断补判成 done 不弹且下一句话回到 running、API 报错补判成 done 弹且带报错、status 为 idle 时没有打断标记也补判、status 是 waiting 或 sessionId 对不上或记录是等输入不算、Codex 不认 Claude 的打断标记、已是 done 的不动）；后台还在跑（done 且 status 是 busy 标后台 agent、shell 标后台命令、idle 不标、忙着的记录不标、sessionId 对不上不标、Codex 不标、不弹；刚写的 done 读到 busy 不标而 shell 当场标、补判那轮不标）；Codex rollout（turn_aborted 算打断且不弹、task_complete 带 error 算报错且弹、老版本单独的 error 事件也算、正常完成交给 Stop、打断后又开一轮不算、报错后还没完成不算、没有生命周期事件不算）；模型（入参带 `model` 就写、没有从 transcript 尾取、再没有沿用旧值；尾巴里跳过 `<synthetic>`、认 Codex 的 `turn_context`；短名换算）；陈旧 / 存活 / 清理三条；提示判定六条（进入 done 算、进入等审批 / 等输入算、首见即在该状态不算、同状态不重复、每回合都算、打断补判的 done 不算）；标题三种来源；Ghostty 匹配五条；`kind` 六条；只读配额（过期不发请求、200 解析、401 恰好一次请求、凭据文件哈希前后一致、残留的过期凭据文件让位给钥匙串）；切账号（凭据改写时刻变了才重读 token、读失败的冷却一起作废、接口用新 token 且上一个账号的周窗口不挂在新账号名下、手动刷新重读凭据且周窗口不等节流但值留着、只有放行了的手动那一轮重读、读到一半凭据换了的那份不存、没看到改写时刻不算变了）；解析器内存上限；分组顺序（等你 → 在跑 → 完成 → 失联 → 已关闭，后台 agent / 命令进在跑、后台结束回完成、失联不算完成、已关闭单独一组、⌘N 不数已关闭的）；同目录多条会话才标 tty（单条不算、两条同目录两条都算）；子 agent 的 PostToolUse（完成 / 等输入 / 已关闭不翻回、等审批和没有文件照写、空 agent_id 按主线程；重放 Stop → 子 agent 工具调用 → idle_prompt 最后仍是 done）；压缩中（PreCompact 写 compacting、不弹、status idle 补判回 done）；已关闭（交互会话 SessionEnd 写 ended、`claude -p` / `codex exec` 删文件、进程没了改 ended、超过设置的条数删最旧、开关关掉删、不失联不弹）；交互会话判定（entrypoint cli / sdk-cli、session_meta source cli / exec / 对象、判不出来按交互、文件不存在不算）；接着聊的命令（Claude / Codex、单引号转义）；tmux（list-panes 按 tty 找 pane、list-clients 优先同会话再按最近活动、kind 认 tmux）；配速（窗口已过比例、超出窗口或没有重置时间不画、领先 10 点变橙）；配额提醒（首读不报、跨 80 报一次、到 100 只报用完、重置只在用过 80 之后报、陈旧读数不喂）；到重置时刻补刷（取最近的重置时刻、含按模型分的周窗口、失败与没有重置时间的不算、刚过重置时刻而补刷还没到点的仍算）；国内几家与 New API（各自解析、错误包、凭据顺序与区、主机名精确匹配、429 退避，见各自的测试文件；手填凭据落盘权限 600、老文件缺键能读）；429 退避（60 秒起翻倍封顶 15 分钟、Retry-After 取大、成功清零、落盘读回）；睡醒 60 秒内刷新跳过；开始等的时刻（Claude 取 `statusUpdatedAt`、下一轮沿用、Codex 退回 `updated_at`、不等了就清掉）；等你账本（上一轮在等、这一轮不等或没了才记一笔，还在等的不记，没等过的不记；按本地日期汇总次数 / 总时长 / 最长，只留 7 天，写盘读回；标签秒 / 分钟 / 小时三种写法）；等你组按开始等的时刻正序。端到端：在交互会话里发一句话，回合结束后目录里该会话 `"state":"done"`；截图用量四行齐全、Claude 的百分比与缓存文件一致。

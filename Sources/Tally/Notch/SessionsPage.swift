@@ -12,7 +12,7 @@ struct SessionsPage: View {
         let now = Date()
         let rows = showingClosed
             ? SessionRecord.displayOrder(store.sessions, now: now).filter { $0.state == .ended }
-            : SessionRecord.shortcutOrder(store.sessions, now: now)
+            : SessionRecord.displayOrder(store.sessions, now: now).filter { $0.state != .ended }
         if rows.isEmpty {
             VStack(spacing: 6) {
                 Image(systemName: showingClosed ? "clock.arrow.circlepath" : "terminal")
@@ -21,24 +21,44 @@ struct SessionsPage: View {
                 Text(showingClosed ? "没有已关闭的会话" : "没有在跑的会话")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.5))
+                if !showingClosed, let waits = store.todayWaits {
+                    WaitSummaryLine(day: waits)
+                }
             }
             .frame(maxWidth: .infinity, minHeight: 72, maxHeight: .infinity)
         } else {
             let crowded = SessionRecord.crowdedCWDs(rows)
+            let shortcutIndices = Dictionary(uniqueKeysWithValues: SessionRecord.shortcutOrder(store.sessions, now: now).enumerated().map { ($0.element.id, $0.offset) })
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, session in
                         if !showingClosed, index == 0 || rows[index - 1].group(now: now) != session.group(now: now) {
                             GroupHeader(group: session.group(now: now), first: index == 0)
                         }
-                        // ⌘N 按没关闭的会话的显示顺序数，所以编号就是行号；已关闭那一页没有键
+                        // 临时会话不可跳转，不占快捷键序号。
                         SessionRow(session: session, now: now,
-                                   shortcut: !showingClosed && jump.shortcutHints ? PanelKey.sessionShortcutLabel(index) : nil,
+                                   shortcut: !showingClosed && jump.shortcutHints ? shortcutIndices[session.id].flatMap { PanelKey.sessionShortcutLabel($0) } : nil,
                                    tty: crowded.contains(session.cwd) ? session.tty : nil)
+                    }
+                    if !showingClosed, let waits = store.todayWaits {
+                        WaitSummaryLine(day: waits)
                     }
                 }
             }
         }
+    }
+}
+
+/// 等你账本的当天一行（docs/ai.md「等你账本」）：和组头同一色阶的灰字，在列表最底下；今天没等过就不画。
+private struct WaitSummaryLine: View {
+    let day: WaitLedger.Day
+
+    var body: some View {
+        Text(WaitLedger.label(day))
+            .font(.system(size: 10))
+            .foregroundStyle(.white.opacity(0.4))
+            .padding(.leading, 6)
+            .padding(.top, 6)
     }
 }
 
@@ -59,6 +79,7 @@ private struct GroupHeader: View {
         switch group {
         case .waiting: return "等你"
         case .working: return "在跑"
+        case .idle: return "待关联"
         case .recent: return "完成"
         case .stale: return "失联"
         case .closed: return "已关闭"
@@ -87,6 +108,9 @@ struct SessionRow: View {
         if session.state == .ended {
             // 已关闭的行本身不可点：点下去会开新终端，只认行尾那颗「接着聊」
             content(stale: false, ended: true)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(0.05)))
+        } else if session.isProvisional {
+            content(stale: false, ended: false)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white.opacity(0.05)))
         } else {
             Button(action: focus) {
@@ -117,6 +141,7 @@ struct SessionRow: View {
                             RowTag(text: "tmux", tint: .white.opacity(0.7))
                         }
                         // 主回合完了后台还有活：放标题旁、绿底绿字，灰字那栏太弱看不出来
+                        if session.isProvisional { RowTag(text: "未关联", tint: .white.opacity(0.7)) }
                         if let work = session.backgroundWork {
                             RowTag(text: work == .agents ? "后台 agent 在跑" : "后台命令在跑", tint: .green)
                         }
@@ -192,6 +217,7 @@ final class SessionJump {
     }
 
     private static func attempt(_ session: SessionRecord) async -> String? {
+        guard !session.isProvisional else { return "未关联真实会话" }
         // 演示模式的会话没有终端：跳过去会把别的真窗口叫到前台，接着聊会开新终端；当作跳成了，行里不出红字
         guard !DemoMode.isOn else { return nil }
         do {

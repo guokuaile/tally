@@ -56,6 +56,32 @@ public enum TranscriptTitle {
         return nil
     }
 
+    /// 仅认末尾主链尚未回答的问题；后面有新的 user 记录就不展示旧问题。
+    public static func pendingQuestion(in url: URL) -> String? {
+        guard let tail = tail(of: url) else { return nil }
+        var lines = tail.text.split(separator: "\n", omittingEmptySubsequences: false)
+        if tail.truncated, !lines.isEmpty { lines.removeFirst() }
+        for line in lines.reversed() {
+            guard let data = line.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["isSidechain"] as? Bool != true, object["isMeta"] as? Bool != true,
+                  let type = object["type"] as? String, type == "user" || type == "assistant"
+            else { continue }
+            guard type == "assistant",
+                  let content = (object["message"] as? [String: Any])?["content"] as? [[String: Any]]
+            else { return nil }
+            for block in content.reversed() where block["type"] as? String == "tool_use" && block["name"] as? String == "AskUserQuestion" {
+                guard let input = block["input"] as? [String: Any],
+                      let questions = input["questions"] as? [[String: Any]],
+                      let question = questions.first?["question"] as? String,
+                      !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return HookDecision.clip("问题：" + question.replacingOccurrences(of: "\n", with: " "))
+            }
+            return nil
+        }
+        return nil
+    }
+
     /// 回合是怎么结束的。打断和 API 报错都不发 Stop，只能看 transcript，规则见 docs/ai.md「打断与 API 报错」。
     public enum TurnEnd: Equatable {
         case interrupted

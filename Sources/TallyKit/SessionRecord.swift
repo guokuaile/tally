@@ -29,6 +29,8 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     public var title: String?
     public var transcriptPath: String
     public var message: String?
+    public var waitingDetail: String?
+    public var recentActivity: String?
     /// 毫秒时间戳。
     public var updatedAt: Double
     /// 会话在用的模型 id，如 `claude-opus-5`、`gpt-6-astra`；还不知道时为 nil。来源见 `HookRunner`。
@@ -36,6 +38,12 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     /// 主回合结束后还在后台干活的东西：agent 类任务（Claude Code 的 status 是 busy）或后台命令（shell）。
     /// app 每轮刷新从 Claude Code 自己的状态文件读出来放在内存里，不进 JSON，hook 不管它（docs/ai.md「后台还在跑」）。
     public var backgroundWork: BackgroundWork?
+    /// 开始等你的时刻：Claude 记录取状态文件里的 `statusUpdatedAt`（status 翻成 waiting 的那一毫秒，永远优先，变晚就是新的一次等）；
+    /// 没有就沿用上一轮的值、再没有才 `updated_at`，不随 hook 再写而往后挪。只在内存，不进 JSON，不在等时为 nil（docs/ai.md「等你」）。
+    public var waitingSince: Date?
+    /// A process-only placeholder; never serialized as a Codex session.
+    public var isProvisional = false
+    public var provisionalStart: UInt64?
 
     public enum BackgroundWork {
         case agents
@@ -53,6 +61,8 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         case title
         case transcriptPath = "transcript_path"
         case message
+        case waitingDetail = "waiting_detail"
+        case recentActivity = "recent_activity"
         case updatedAt = "updated_at"
         case model
     }
@@ -86,6 +96,8 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         title = try c.decodeIfPresent(String.self, forKey: .title)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath) ?? ""
         message = try c.decodeIfPresent(String.self, forKey: .message)
+        waitingDetail = try c.decodeIfPresent(String.self, forKey: .waitingDetail)
+        recentActivity = try c.decodeIfPresent(String.self, forKey: .recentActivity)
         updatedAt = try c.decode(Double.self, forKey: .updatedAt)
         model = try c.decodeIfPresent(String.self, forKey: .model)
     }
@@ -103,6 +115,8 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         try c.encode(title, forKey: .title)
         try c.encode(transcriptPath, forKey: .transcriptPath)
         try c.encode(message, forKey: .message)
+        try c.encode(waitingDetail, forKey: .waitingDetail)
+        try c.encode(recentActivity, forKey: .recentActivity)
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encode(model, forKey: .model)
     }
@@ -139,18 +153,20 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         state == .waitingPermission || state == .waitingInput
     }
 
+
     /// 非 done / ended 且两小时没动静。跑完了、关掉了的会话不算失联。
     public func isStale(now: Date) -> Bool {
-        state != .done && state != .ended && now.timeIntervalSince(updatedDate) > 2 * 3600
+        !isProvisional && state != .done && state != .ended && now.timeIntervalSince(updatedDate) > 2 * 3600
     }
 
     /// Group order keeps active work first, then completed and stale records; closed sessions are on their own page.
     public enum Group: Int, CaseIterable {
-        case waiting, working, recent, stale, closed
+        case waiting, working, idle, recent, stale, closed
     }
 
     public func group(now: Date) -> Group {
         if state == .ended { return .closed }
+        if isProvisional { return .idle }
         if isStale(now: now) { return .stale }
         switch state {
         case .waitingPermission, .waitingInput: return .waiting
@@ -160,19 +176,25 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         }
     }
 
-    /// 列表的显示顺序：等你 → 在跑 → 完成 → 失联 → 已关闭，组内按 updated_at 倒序。
+    /// 列表的显示顺序：等你 → 在跑 → 完成 → 失联 → 已关闭。等你组按开始等的时刻正序（等得最久的在最上面、就是 ⌘1：
+    /// 被忘掉的那条才该最显眼），其余组按 updated_at 倒序。
     public static func displayOrder(_ sessions: [SessionRecord], now: Date) -> [SessionRecord] {
         sessions.sorted { a, b in
             let ga = a.group(now: now), gb = b.group(now: now)
             if ga != gb { return ga.rawValue < gb.rawValue }
-            if a.updatedAt != b.updatedAt { return a.updatedAt > b.updatedAt }
+            if ga == .waiting {
+                let wa = a.waitingSince ?? a.updatedDate, wb = b.waitingSince ?? b.updatedDate
+                if wa != wb { return wa < wb }
+            } else if a.updatedAt != b.updatedAt {
+                return a.updatedAt > b.updatedAt
+            }
             return a.sessionId < b.sessionId
         }
     }
 
     /// ⌘1–⌘9 / ⌘0 按这个数：显示顺序里去掉已关闭的。已关闭的在会话卡片的另一页，只能点行尾「接着聊」，按键碰不到它。
     public static func shortcutOrder(_ sessions: [SessionRecord], now: Date) -> [SessionRecord] {
-        displayOrder(sessions, now: now).filter { $0.state != .ended }
+        displayOrder(sessions, now: now).filter { $0.state != .ended && !$0.isProvisional }
     }
 
     /// 这一页里同一目录下有不止一个会话时，行上要多标 tty 才分得清：同目录跑同一个 skill 的两条，标题只差 URL 尾巴。
@@ -239,8 +261,9 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         case unknown
         /// 文件里的 sessionId 不是这条记录的：pid 被别的 Claude 拿走了，或同一个进程 /clear、/resume 换了会话，这条记录的会话都已经不在了。
         case anotherSession
-        /// busy / shell / waiting / idle；waiting 时 `waitingFor` 说在等什么（「permission prompt」「input needed」「dialog open」…）。
-        case reported(status: String, waitingFor: String?)
+        /// busy / shell / waiting / idle；waiting 时 `waitingFor` 说在等什么（「permission prompt」「input needed」「dialog open」…）；
+        /// `since` 是 status 翻成现在这个值的那一毫秒（`statusUpdatedAt`），老版本没有。
+        case reported(status: String, waitingFor: String?, since: Date?)
     }
 
     public func claudeCodeStatus(in directory: URL) -> ClaudeCodeStatus {
@@ -252,12 +275,13 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         guard let owner = object["sessionId"] as? String else { return .unknown }
         guard owner == sessionId else { return .anotherSession }
         guard let status = object["status"] as? String else { return .unknown }
-        return .reported(status: status, waitingFor: object["waitingFor"] as? String)
+        let since = (object["statusUpdatedAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+        return .reported(status: status, waitingFor: object["waitingFor"] as? String, since: since)
     }
 
     /// 回合一结束就写 idle，打断和 API 报错（这两种不发 Stop）也写，等审批写 waiting。
     public func claudeCodeReportsIdle(in directory: URL) -> Bool {
-        if case .reported("idle", _) = claudeCodeStatus(in: directory) { return true }
+        if case .reported("idle", _, _) = claudeCodeStatus(in: directory) { return true }
         return false
     }
 

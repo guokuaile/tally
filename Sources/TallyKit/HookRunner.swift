@@ -65,6 +65,18 @@ public enum HookRunner {
                            claudeConfigDir: options.provider == "claude" ? options.environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 } : nil)
             .write(sessionsDirectory: options.directory, provider: options.provider)
 
+        // shortcut: 64 个锁分片限制文件数量；若并发 hook 导致 900 ms 内拿不到锁，改为可安全回收的逐会话锁。
+        let shard = sessionId.utf8.reduce(UInt64(14695981039346656037)) { ($0 ^ UInt64($1)) &* 1099511628211 } % 64
+        let lockDirectory = options.directory.deletingLastPathComponent().appendingPathComponent("session-locks")
+        do { try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true) }
+        catch { return .none }
+        let lockPath = lockDirectory.appendingPathComponent("\(shard).lock").path
+        let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        guard lockFD >= 0 else { return .none }
+        defer { close(lockFD) }
+        guard flock(lockFD, LOCK_EX) == 0 else { return .none }
+        defer { flock(lockFD, LOCK_UN) }
+
         let file = options.directory.appendingPathComponent("\(sessionId).json")
         let (existing, previous) = readExisting(file)
         let transcriptPath = input["transcript_path"] as? String ?? ""
@@ -80,9 +92,27 @@ public enum HookRunner {
         }
         switch HookDecision.decide(event: event, input: input, existing: existing, turnEnded: turnEnded, interactive: interactive) {
         case .none:
+            // 详情更新不改变状态时间，也不让后台子 agent 冒充主会话。
+            if event == "PostToolUse", input["agent_id"] == nil,
+               var record = previous, record.sessionId == sessionId, record.state == .running,
+               let detail = HookDecision.toolDetail(input, waiting: false), detail != record.recentActivity {
+                record.recentActivity = detail
+                do { try writeAtomic(record, to: file); return .written(file) }
+                catch { return .none }
+            }
             return .none
         case .delete:
-            try? FileManager.default.removeItem(at: file)
+            if let previous, previous.sessionId == sessionId {
+                // 原子移动避免结束标记与旧状态并存；唯一文件名避免消费旧事件时误删新事件。
+                let marker = options.directory.appendingPathComponent("\(sessionId).\(UUID().uuidString).tally-end")
+                do {
+                    try FileManager.default.moveItem(at: file, to: marker)
+                } catch {
+                    return .none
+                }
+            } else {
+                try? FileManager.default.removeItem(at: file)
+            }
             return .deleted(file)
         case .write(let state, let message):
             let agent = AgentLocator.find(startingAt: options.startPid, in: table)
@@ -98,7 +128,7 @@ public enum HookRunner {
             let model = (input["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 ?? (transcriptPath.isEmpty ? nil : TranscriptTitle.latestModel(in: URL(fileURLWithPath: transcriptPath)))
                 ?? previous?.model
-            let record = SessionRecord(
+            var record = SessionRecord(
                 sessionId: sessionId,
                 provider: options.provider,
                 pid: agent.map { Int($0.pid) },
@@ -112,6 +142,16 @@ public enum HookRunner {
                 updatedAt: (options.now().timeIntervalSince1970 * 1000).rounded(),
                 model: model
             )
+            if event == "PermissionRequest" {
+                record.waitingDetail = HookDecision.toolDetail(input, waiting: true)
+            } else if event == "Notification", state == .waitingPermission, previous?.state == .waitingPermission {
+                record.waitingDetail = previous?.waitingDetail
+            }
+            if event == "PostToolUse", input["agent_id"] == nil {
+                record.recentActivity = HookDecision.toolDetail(input, waiting: false)
+            } else if event != "SessionStart" && event != "UserPromptSubmit" {
+                record.recentActivity = previous?.recentActivity
+            }
             do {
                 try writeAtomic(record, to: file)
                 return .written(file)

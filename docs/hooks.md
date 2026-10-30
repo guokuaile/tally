@@ -1,10 +1,10 @@
 # hook 的注册、移除与分享
 
-> 会话数据靠 hook 注册（Claude Code 七条、Codex 六条）；设置窗口的「安装」「移除」按钮改的是用户自己的配置文件，改前留备份。
+> 会话数据靠 hook 注册（Claude Code 八条、Codex 六条）；设置窗口的「安装」「移除」按钮改的是用户自己的配置文件，改前留备份。
 
 ## 注册什么
 
-Claude 侧 Claude 的家（默认 `~/.claude`，见「安装」）里 `settings.json` 的七个事件 `SessionStart`、`UserPromptSubmit`、`Notification`、`PostToolUse`、`PreCompact`、`Stop`、`SessionEnd` 各一条（`PreCompact` 很早就有，碰不上「老版本 Claude Code 不认识事件名、整份 settings.json 失效」那个坑；装过旧版 Tally 的机器升级后，设置里会显示「PreCompact 未注册」，点一次「安装」即可）：
+Claude 侧 Claude 的家（默认 `~/.claude`，见「安装」）里 `settings.json` 的八个事件 `SessionStart`、`UserPromptSubmit`、`Notification`、`PermissionRequest`、`PostToolUse`、`PreCompact`、`Stop`、`SessionEnd` 各一条（`PreCompact` 很早就有，碰不上「老版本 Claude Code 不认识事件名、整份 settings.json 失效」那个坑；装过旧版 Tally 的机器升级后，设置里会显示「PreCompact 未注册」，点一次「安装」即可）：
 
 ```json
 { "hooks": [ { "type": "command", "command": "\"/Applications/Tally.app/Contents/MacOS/tally-hook\"", "timeout": 5 } ] }
@@ -93,4 +93,4 @@ jq --arg c "$H --provider codex" '[.hooks | to_entries[] | .value[] | .hooks[] |
 curl -sLo /tmp/Tally.dmg https://github.com/guokuaile/tally/releases/latest/download/Tally.dmg && hdiutil verify /tmp/Tally.dmg
 ```
 
-用例：文件不存在 / 0 字节 / 非法 JSON（抛错不覆盖）、别的 hook 保留且序号不变、安装两次相同、旧组原位替换、缺事件报 `pointsElsewhere`、Codex 哈希就地改写且等于 app-server 实报值（含 `SessionEnd` 超时压到 3）、备份存在、移除只删 Tally 组并删空键、移除后序号前移的块改名且没信任过的不加块、Tally 自己的块删掉、写 `config.toml` 失败回滚 JSON、`config.toml` 读不出来（非 UTF-8）报错且两个文件都不动；家目录（变量优先、挑最近有非桌面版会话的 `.codex*`、只有桌面版会话的家不选、都没有退回 `~/.codex`）；心跳（合法事件写、校验不过不写、写在会话目录上一层）、最近收到事件的文案（没收到过 / 刚刚 / 分钟 / 小时 / 天）、自检结果五种文案、没装好不跑、拿编出来的 hook 按配置里的命令格式真跑一次自检。Claude 那条 `jq` 打印 7，Codex 那条打印 6。新版本（补零比较、后缀去掉、认不出的版本号不提示、解析 Release、Homebrew 判定、提示条同一版本同一个 id）。真发一次版才算验过：Release 页有 `Tally.dmg`、`curl -sI https://github.com/guokuaile/tally/releases/latest/download/Tally.dmg` 是 302、tap 仓库里 cask 的 sha256 等于下载下来的 `shasum -a 256 /tmp/Tally.dmg`。
+用例：文件不存在 / 0 字节 / 非法 JSON（抛错不覆盖）、别的 hook 保留且序号不变、安装两次相同、旧组原位替换、缺事件报 `pointsElsewhere`、Codex 哈希就地改写且等于 app-server 实报值（含 `SessionEnd` 超时压到 3）、备份存在、移除只删 Tally 组并删空键、移除后序号前移的块改名且没信任过的不加块、Tally 自己的块删掉、写 `config.toml` 失败回滚 JSON、`config.toml` 读不出来（非 UTF-8）报错且两个文件都不动；家目录（变量优先、挑最近有非桌面版会话的 `.codex*`、只有桌面版会话的家不选、都没有退回 `~/.codex`）；心跳（合法事件写、校验不过不写、写在会话目录上一层）、最近收到事件的文案（没收到过 / 刚刚 / 分钟 / 小时 / 天）、自检结果五种文案、没装好不跑、拿编出来的 hook 按配置里的命令格式真跑一次自检。Claude 那条 `jq` 打印 8，Codex 那条打印 6。新版本（补零比较、后缀去掉、认不出的版本号不提示、解析 Release、Homebrew 判定、提示条同一版本同一个 id）。真发一次版才算验过：Release 页有 `Tally.dmg`、`curl -sI https://github.com/guokuaile/tally/releases/latest/download/Tally.dmg` 是 302、tap 仓库里 cask 的 sha256 等于下载下来的 `shasum -a 256 /tmp/Tally.dmg`。

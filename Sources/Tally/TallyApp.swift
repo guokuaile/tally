@@ -96,6 +96,8 @@ struct LaunchOptions: Equatable {
     var installHooks = false
     var demo = false
     var peekTest = false
+    /// 演示模式下多给两个在跑的项目，看左翼的「+N」胶囊；和 `--peek-test` 一样只在演示模式下认。
+    var crewOverflow = false
 
     static func parse(_ arguments: [String]) -> LaunchOptions {
         var options = LaunchOptions()
@@ -109,6 +111,8 @@ struct LaunchOptions: Equatable {
                 options.demo = true
             } else if argument == "--peek-test" {
                 options.peekTest = true
+            } else if argument == "--crew-overflow" {
+                options.crewOverflow = true
             }
         }
         return options
@@ -162,6 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if options.openPage == .settings {
             SettingsWindowController.shared.show()
+        }
+        GuideWindowController.shared.willShow = { [weak self] in self?.notch?.close() }
+        if GuidePolicy.shouldPresent(options: options, prefs: PreferencesStore.shared.prefs) {
+            // 弹出就算看过：关窗、「完成」、「去装 hook」都不再弹
+            PreferencesStore.shared.prefs.guideShown = true
+            GuideWindowController.shared.show()
         }
     }
 

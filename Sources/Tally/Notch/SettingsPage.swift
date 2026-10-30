@@ -71,6 +71,11 @@ struct GeneralSettings: View {
                 Text("每天问一次 GitHub 上的最新版本（api.github.com，不带任何账号信息），有新的就在这里和刘海里各说一声。只提示，不自动下载替换：用 Homebrew 装的执行 brew upgrade --cask tally，其余去下载新的 DMG。")
             }
             Section {
+                Button("打开指引") { GuideWindowController.shared.show() }
+            } footer: {
+                Text("第一次启动弹过的那页：刘海、提示条、小人各是什么。")
+            }
+            Section {
                 HStack {
                     Text("Tally \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
                         .foregroundStyle(.secondary)
@@ -136,31 +141,10 @@ struct PanelSettings: View {
             }
             Section {
                 Toggle("数字键 1–9 切到第 N 个页签", isOn: preferenceToggle(\.pageNumberKeys))
-                Toggle("⌘1–⌘9、⌘0 跳到第 N 个会话的终端", isOn: preferenceToggle(\.sessionCommandKeys))
             } header: {
                 Text("键盘")
             } footer: {
-                Text("只在面板展开时有效：展开时键盘归面板，收起后数字和 ⌘N 照常打进原来的 app。会话按 AI 页列表的显示顺序数（「等你」那组排最前，已关闭的不数），按住 ⌘ 时前十行行尾会显示编号（第 10 个是 ⌘0）；跳过去和点那一行一样，接着打字进的就是那个终端，面板等鼠标移出再收。")
-            }
-            Section {
-                Toggle("保留已关闭的会话", isOn: preferenceToggle(\.keepClosedSessions))
-                HStack {
-                    Text("最多留")
-                    Spacer()
-                    TextField("", value: Binding(
-                        get: { PreferencesStore.shared.prefs.closedSessionLimit },
-                        set: { PreferencesStore.shared.prefs.closedSessionLimit = Preferences.closedLimit($0) }
-                    ), format: .number)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 44)
-                    Text("条")
-                        .foregroundStyle(.secondary)
-                }
-                .disabled(!PreferencesStore.shared.prefs.keepClosedSessions)
-            } header: {
-                Text("会话列表")
-            } footer: {
-                Text("会话结束或终端关掉后，在 AI 页会话卡片的「已关闭」那一页留一行（卡片标题行右边点「已关闭 N ›」翻过去），点行尾「接着聊」在新终端里接着聊；点行本身没有动作，⌘N 也不数它，免得误触开出新终端（claude --resume / codex resume）。只留在终端里开的交互会话，claude -p、codex exec 这类脚本跑的不留；最多留上面设的条数（默认 10，1 到 50），多出来的删最旧的。关掉后已有的在下一次刷新列表时清掉。")
+                Text("只在面板展开时有效；收起后数字键照常交给当前应用。")
             }
             Section {
                 // 这一条才是真开关：原来这一节只有「屏幕也常亮」，它只挑模式不启动，勾了以为开了、屏幕照黑
@@ -232,15 +216,96 @@ struct PanelSettings: View {
     }
 }
 
-/// 提示：闭合态什么时候垂提示条、点了做什么；标题行画不画占用点。
-struct AlertSettings: View {
+/// AI 会话、角色、工牌与提示集中在同一页。
+struct AISettings: View {
     var body: some View {
         Form {
             Section {
-                Toggle("接电 / 拔电 / 低电 / 充满时提示", isOn: preferenceToggle(\.batteryPeek))
-                peekSeconds("电池提示停留", \.peekBatterySeconds)
+                Toggle("⌘1–⌘9、⌘0 跳到第 N 个会话的终端", isOn: preferenceToggle(\.sessionCommandKeys))
+            } header: {
+                Text("会话快捷键")
             } footer: {
-                Text("面板闭合时从刘海往下垂一条。低电在 20% 和 10% 各提示一次。事件驱动，不轮询。电池提示不可点，点它不会有任何动作。")
+                Text("只在面板展开时有效；会话按 AI 页顺序编号，已关闭的会话不参与。按住 ⌘ 时显示编号，点击和快捷键都会跳回对应终端。")
+            }
+            Section {
+                Toggle("保留已关闭的会话", isOn: preferenceToggle(\.keepClosedSessions))
+                HStack {
+                    Text("最多留")
+                    Spacer()
+                    TextField("", value: Binding(
+                        get: { PreferencesStore.shared.prefs.closedSessionLimit },
+                        set: { PreferencesStore.shared.prefs.closedSessionLimit = Preferences.closedLimit($0) }
+                    ), format: .number)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 44)
+                    Text("条")
+                        .foregroundStyle(.secondary)
+                }
+                .disabled(!PreferencesStore.shared.prefs.keepClosedSessions)
+            } header: {
+                Text("会话列表")
+            } footer: {
+                Text("会话结束或终端关掉后，在 AI 页会话卡片的「已关闭」那一页留一行（卡片标题行右边点「已关闭 N ›」翻过去），点行尾「接着聊」在新终端里接着聊；点行本身没有动作，⌘N 也不数它，免得误触开出新终端（claude --resume / codex resume）。只留在终端里开的交互会话，claude -p、codex exec 这类脚本跑的不留；最多留上面设的条数（默认 10，1 到 50），多出来的删最旧的。关掉后已有的在下一次刷新列表时清掉。")
+            }
+            Section {
+                Toggle("刘海两侧显示项目小人", isOn: preferenceToggle(\.crewEnabled))
+                Picker("每侧最多", selection: Binding(
+                    get: { PreferencesStore.shared.prefs.crewPerSide },
+                    set: { PreferencesStore.shared.prefs.crewPerSide = CrewRoster.perSide($0) }
+                )) {
+                    ForEach(1...4, id: \.self) { Text("\($0) 个").tag($0) }
+                }
+                .disabled(!PreferencesStore.shared.prefs.crewEnabled)
+                Picker("样式", selection: Binding(
+                    get: { PreferencesStore.shared.prefs.crewSkin },
+                    set: { PreferencesStore.shared.prefs.crewSkin = Preferences.crewSkin($0) }
+                )) {
+                    Text("黑玻璃").tag("glass")
+                    Text("渐变").tag("gradient")
+                }
+                .disabled(!PreferencesStore.shared.prefs.crewEnabled)
+            } header: {
+                Text("刘海小人")
+            } footer: {
+                Text("面板收起时，刘海两侧按工具和启动目录聚合会话。小人的动作与颜色跟随最需要关注的会话；悬停展开会话列表，点击会话跳回终端。关闭后停止小人动画。")
+            }
+            Section {
+                Toggle("显示会话工牌", isOn: preferenceToggle(\.badgeEnabled))
+                HStack {
+                    Text("停留时间")
+                    Spacer()
+                    TextField("", value: Binding(get: { PreferencesStore.shared.prefs.badgeSeconds }, set: { PreferencesStore.shared.prefs.badgeSeconds = Preferences.peekSeconds($0) }), format: .number)
+                        .multilineTextAlignment(.trailing).frame(width: 44)
+                    Text("秒").foregroundStyle(.secondary)
+                }.disabled(!PreferencesStore.shared.prefs.badgeEnabled)
+                Picker("挂点位置", selection: Binding(get: { PreferencesStore.shared.prefs.badgePosition }, set: { PreferencesStore.shared.prefs.badgePosition = Preferences.badgeSide($0) })) {
+                    Text("刘海右侧").tag("right")
+                    Text("刘海左侧").tag("left")
+                }.disabled(!PreferencesStore.shared.prefs.badgeEnabled)
+                HStack {
+                    Text("工牌名称")
+                    TextField("员工证", text: Binding(get: { PreferencesStore.shared.prefs.badgeTitle }, set: { PreferencesStore.shared.prefs.badgeTitle = String($0.prefix(20)) }))
+                        .multilineTextAlignment(.trailing)
+                }.disabled(!PreferencesStore.shared.prefs.badgeEnabled)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("额外文案主题")
+                    HStack {
+                        ForEach(BadgeTheme.allCases, id: \.rawValue) { theme in
+                            Toggle(theme.label, isOn: Binding(
+                                get: { PreferencesStore.shared.prefs.badgeThemes.contains(theme.rawValue) },
+                                set: { enabled in
+                                    var selected = Set(PreferencesStore.shared.prefs.badgeThemes)
+                                    if enabled { selected.insert(theme.rawValue) } else { selected.remove(theme.rawValue) }
+                                    PreferencesStore.shared.prefs.badgeThemes = BadgeTheme.allCases.map(\.rawValue).filter { selected.contains($0) }
+                                }
+                            ))
+                        }
+                    }
+                }.disabled(!PreferencesStore.shared.prefs.badgeEnabled)
+            } header: {
+                Text("会话工牌")
+            } footer: {
+                Text("新会话、会话关闭与恢复时显示；通用文案始终参与，可多选额外主题。修改主题可能改变已有会话的文案。名称留空时显示「员工证」。")
             }
             Section {
                 Picker("点提示条时", selection: Binding(
@@ -261,6 +326,20 @@ struct AlertSettings: View {
             } footer: {
                 Text("每个配额窗口从 80% 以下涨到 80% 以上、涨到用完各提醒一次，用过 80% 的窗口重置了再说一声；开 Tally 时已经很高的不补报。提示条不可点，停留时长和 AI 会话提示一样。")
             }
+        }
+    }
+}
+
+/// 提示：闭合态什么时候垂提示条、点了做什么；标题行画不画占用点。
+struct AlertSettings: View {
+    var body: some View {
+        Form {
+            Section {
+                Toggle("接电 / 拔电 / 低电 / 充满时提示", isOn: preferenceToggle(\.batteryPeek))
+                peekSeconds("电池提示停留", \.peekBatterySeconds)
+            } footer: {
+                Text("面板闭合时从刘海往下垂一条。低电在 20% 和 10% 各提示一次。事件驱动，不轮询。电池提示不可点，点它不会有任何动作。")
+            }
             Section {
                 Toggle("没有刘海屏时改发系统通知", isOn: preferenceToggle(\.notifyWithoutNotch))
                 if let problem = SystemNotifier.shared.problem {
@@ -274,29 +353,25 @@ struct AlertSettings: View {
             } footer: {
                 Text("只读设备的占用状态，不开流、不要权限。画在展开态标题行：摄像头绿、麦克风橙。")
             }
-            Section {
-                Text("AI 会话提示跟着 hook 走，没有单独开关（提示音可以关）：任一 Claude Code / Codex 会话跑完一个回合或在等你，面板闭合时弹一下。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .onAppear { SystemNotifier.shared.refreshStatus() }
     }
+}
 
-    /// 秒数直接输，2 到 30（超出范围提交时夹回来）。步进点半天不如敲两下键盘。
-    private func peekSeconds(_ title: String, _ key: WritableKeyPath<Preferences, Int>) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            TextField("", value: Binding(
-                get: { PreferencesStore.shared.prefs[keyPath: key] },
-                set: { PreferencesStore.shared.prefs[keyPath: key] = Preferences.peekSeconds($0) }
-            ), format: .number)
-            .multilineTextAlignment(.trailing)
-            .frame(width: 44)
-            Text("秒")
-                .foregroundStyle(.secondary)
-        }
+/// 秒数直接输，2 到 30（超出范围提交时夹回来）。步进点半天不如敲两下键盘。
+@MainActor
+func peekSeconds(_ title: String, _ key: WritableKeyPath<Preferences, Int>) -> some View {
+    HStack {
+        Text(title)
+        Spacer()
+        TextField("", value: Binding(
+            get: { PreferencesStore.shared.prefs[keyPath: key] },
+            set: { PreferencesStore.shared.prefs[keyPath: key] = Preferences.peekSeconds($0) }
+        ), format: .number)
+        .multilineTextAlignment(.trailing)
+        .frame(width: 44)
+        Text("秒")
+            .foregroundStyle(.secondary)
     }
 }
 

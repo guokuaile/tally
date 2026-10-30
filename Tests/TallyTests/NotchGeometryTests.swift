@@ -32,6 +32,41 @@ final class NotchGeometryTests: XCTestCase {
         let narrow = PillNotificationPanel.placementFrame(in: CGRect(x: 0, y: 0, width: 250, height: 600), safeAreaTop: 32, index: 0)
         XCTAssertEqual(narrow.width, 218)
         XCTAssertEqual(narrow.minX, 16)
+        let badge = PillNotificationPanel.placementFrame(in: builtIn14.frame, safeAreaTop: 32, offset: -6, width: 300, height: 370, rightAligned: true)
+        let afterBadge = PillNotificationPanel.placementFrame(in: builtIn14.frame, safeAreaTop: 32, offset: 370, width: 320, height: 44)
+        XCTAssertEqual(badge.height, 370)
+        XCTAssertEqual(badge.maxX, builtIn14.frame.maxX - 16)
+        let x = PillNotificationPanel.badgeX(in: builtIn14.frame, width: 300, leftWidth: 663, rightWidth: 664, right: true)
+        XCTAssertEqual(x + 150, 888, "挂点在刘海右边缘外侧 40pt")
+        let leftX = PillNotificationPanel.badgeX(in: builtIn14.frame, width: 300, leftWidth: 663, rightWidth: 664, right: false)
+        XCTAssertEqual(leftX + 150, 623)
+        XCTAssertEqual(badge.maxY, builtIn14.frame.maxY - 32, "第一张工牌的挂带贴着刘海")
+        XCTAssertEqual(badge.minY - afterBadge.maxY, 6, "不同高度的提示不重叠")
+    }
+
+    func testCrewDropdownStaysOnScreenAndCapsHeight() {
+        let screen = builtIn14.frame
+        let frame = CrewDropdownPanel.frame(anchorX: 2, top: 950, screen: screen, count: 20)
+        XCTAssertEqual(frame.minX, 8)
+        XCTAssertEqual(frame.maxY, 950)
+        XCTAssertEqual(frame.height, 240)
+        let right = CrewDropdownPanel.frame(anchorX: 1511, top: 950, screen: screen, count: 1)
+        XCTAssertEqual(right.maxX, screen.maxX - 8)
+        let anchoredRight = CrewDropdownPanel.frame(anchorX: 850, top: 950, screen: screen, count: 2, side: .right)
+        let anchoredLeft = CrewDropdownPanel.frame(anchorX: 650, top: 950, screen: screen, count: 2, side: .left)
+        XCTAssertEqual(anchoredRight.minX + 29, 850)
+        XCTAssertEqual(anchoredLeft.maxX - 29, 650)
+    }
+
+    func testBadgeHitRegionExcludesTransparentMargins() {
+        let size = CGSize(width: 300, height: 370)
+        XCTAssertTrue(PillNotificationPanel.badgeContains(CGPoint(x: 150, y: 100), in: size))
+        XCTAssertTrue(PillNotificationPanel.badgeContains(CGPoint(x: 150, y: 350), in: size))
+        XCTAssertFalse(PillNotificationPanel.badgeContains(CGPoint(x: 5, y: 100), in: size))
+        XCTAssertFalse(PillNotificationPanel.badgeContains(CGPoint(x: 20, y: 100), in: size))
+        XCTAssertTrue(PillNotificationPanel.badgeContains(CGPoint(x: 20, y: 100), in: size, entering: true), "摆动期间给卡片暂留运动余量")
+        XCTAssertFalse(PillNotificationPanel.badgeContains(CGPoint(x: 150, y: 5), in: size))
+        XCTAssertFalse(PillNotificationPanel.badgeContains(CGPoint(x: 30, y: 360), in: size))
     }
 
     func testHeaderGapCoversNotchWithMargin() {

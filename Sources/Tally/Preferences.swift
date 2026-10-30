@@ -81,10 +81,21 @@ struct Preferences: Codable, Equatable {
     /// 收进截图时垂提示条。一天截几十张的人嫌吵，关掉照收不弹；拖进来的、open -a 放进来的不归它管。
     var screenshotPeek = true
     var screenshotFolder: String?
+    /// 刘海两侧的项目小人（docs/crew.md）：默认开；每侧最多几个（1–4）；套系 `glass` 黑玻璃 / `gradient` 渐变。
+    var crewEnabled = true
+    var crewPerSide = 3
+    var crewSkin = "glass"
+    var badgeEnabled = true
+    var badgeSeconds = 8
+    var badgePosition = "right"
+    var badgeTitle = "员工证"
+    var badgeThemes: [String] = []
     /// 每天问一次 GitHub 有没有新版本；只提示不替换。
     var checkUpdates = true
     /// 已经提示过的新版本号：同一个版本只在刘海里说一次。
     var updateNotifiedVersion: String?
+    /// 首次启动指引看过没有。新建默认假；老文件缺这个键按真解码——有 preferences.json 就说明用过，升级不弹。
+    var guideShown = false
 
     init() {}
 
@@ -96,6 +107,10 @@ struct Preferences: Codable, Equatable {
 
     /// 提示条秒数夹在 2 到 30 之间。
     static func peekSeconds(_ value: Int) -> Int { min(max(value, 2), 30) }
+
+    /// 套系只认两个值，别的回落黑玻璃。
+    static func crewSkin(_ raw: String) -> String { raw == "gradient" ? raw : "glass" }
+    static func badgeSide(_ raw: String) -> String { raw == "left" ? "left" : "right" }
 
     /// 只认面板页；老文件或手改成别的都回到 ai。
     static func panelPage(_ raw: String) -> String {
@@ -148,8 +163,19 @@ struct Preferences: Codable, Equatable {
         musicEnabled = try c.decodeIfPresent(Bool.self, forKey: .musicEnabled) ?? d.musicEnabled
         musicResident = try c.decodeIfPresent(Bool.self, forKey: .musicResident) ?? d.musicResident
         screenshotFolder = try c.decodeIfPresent(String.self, forKey: .screenshotFolder)
+        crewEnabled = try c.decodeIfPresent(Bool.self, forKey: .crewEnabled) ?? d.crewEnabled
+        crewPerSide = CrewRoster.perSide(try c.decodeIfPresent(Int.self, forKey: .crewPerSide) ?? d.crewPerSide)
+        crewSkin = Self.crewSkin(try c.decodeIfPresent(String.self, forKey: .crewSkin) ?? d.crewSkin)
+        badgeEnabled = try c.decodeIfPresent(Bool.self, forKey: .badgeEnabled) ?? d.badgeEnabled
+        badgeSeconds = Self.peekSeconds(try c.decodeIfPresent(Int.self, forKey: .badgeSeconds) ?? d.badgeSeconds)
+        badgePosition = Self.badgeSide(try c.decodeIfPresent(String.self, forKey: .badgePosition) ?? d.badgePosition)
+        badgeTitle = try c.decodeIfPresent(String.self, forKey: .badgeTitle) ?? d.badgeTitle
+        let rawThemes = try c.decodeIfPresent([String].self, forKey: .badgeThemes) ?? d.badgeThemes
+        badgeThemes = BadgeTheme.allCases.map(\.rawValue).filter { rawThemes.contains($0) }
         checkUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkUpdates) ?? d.checkUpdates
         updateNotifiedVersion = try c.decodeIfPresent(String.self, forKey: .updateNotifiedVersion)
+        // 唯一一个缺键不取新建默认的字段：能走到这里就有文件，用过的机器不弹指引
+        guideShown = try c.decodeIfPresent(Bool.self, forKey: .guideShown) ?? true
     }
 }
 

@@ -68,6 +68,27 @@ public enum HookDecision {
         }
     }
 
+    /// 只提取有明确语义的字段，不把任意工具参数或响应当作摘要。
+    public static func toolDetail(_ input: [String: Any], waiting: Bool) -> String? {
+        guard let tool = input["tool_name"] as? String, !tool.isEmpty else { return nil }
+        let args = input["tool_input"] as? [String: Any] ?? [:]
+        let prefix = waiting ? "请求" : "最近"
+        let raw: String
+        switch tool {
+        case "Bash":
+            raw = "\(prefix)：执行命令"
+        case "Edit", "Write", "Read":
+            guard let path = args["file_path"] as? String, !path.isEmpty else { return "\(prefix)：\(tool)" }
+            let action = tool == "Read" ? "读取" : "修改"
+            raw = "\(prefix)：\(action) \((path as NSString).lastPathComponent)"
+        case "apply_patch":
+            raw = "\(prefix)：修改文件"
+        default:
+            return nil
+        }
+        return clip(raw.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " "))
+    }
+
     /// Stop 的 last_assistant_message 取前 120 个 Unicode 码点。
     public static func clip(_ text: String?) -> String? {
         guard let text, !text.isEmpty else { return nil }

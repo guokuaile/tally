@@ -10,7 +10,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     static let shared = SettingsWindowController()
 
+    /// 选中项活在控制器里而不是 View 里：窗口已经开着时，指引的「去装 hook」才跳得过去。
+    private let selection: SettingsSelection
+
     private init() {
+        let selection = SettingsSelection()
+        self.selection = selection
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 700, height: 540),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -20,7 +25,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.title = "Tally 设置"
         window.toolbarStyle = .unified
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: SettingsWindowView())
+        window.contentView = NSHostingView(rootView: SettingsWindowView(selection: selection))
         window.center()
         super.init(window: window)
         window.delegate = self
@@ -33,9 +38,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// 原来只有面板入口先收面板，那条路上面板就一直挡在设置窗口前面。
     var willShow: (() -> Void)?
 
-    func show() {
+    /// 给了 `section` 就跳那一页；不给就停在上次那一页。
+    func show(section: SettingsSection? = nil) {
         // 演示模式不开：里面是真的 hook 心跳、凭据状态和路径
         guard !DemoMode.isOn else { return }
+        if let section { selection.section = section }
         willShow?()
         NSApp.setActivationPolicy(.regular)
         window?.makeKeyAndOrderFront(nil)
@@ -43,13 +50,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        // 指引还开着就不切回附件，否则它失去键盘
+        if !GuideWindowController.shared.isOpen {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
+}
+
+/// 侧栏选中项。活在控制器里而不是视图的 `@State` 里，关窗重开回到上次那一页。
+@MainActor
+@Observable
+final class SettingsSelection {
+    var section: SettingsSection = .general
 }
 
 /// 侧栏的七项：前两项和最后一项不带组标题（系统设置的做法），中间按「功能」「数据」分组。
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, panel, alerts, shelf, music, hooks, usage, about
+    case general, panel, ai, alerts, shelf, music, hooks, usage, about
 
     var id: String { rawValue }
 
@@ -57,6 +74,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "通用"
         case .panel: return "面板"
+        case .ai: return "AI 会话"
         case .alerts: return "提示"
         case .shelf: return "文件架"
         case .music: return "音乐"
@@ -70,6 +88,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape.fill"
         case .panel: return "rectangle.topthird.inset.filled"
+        case .ai: return "sparkles"
         case .alerts: return "bell.badge.fill"
         case .shelf: return "tray.full.fill"
         case .music: return "music.note"
@@ -83,6 +102,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return .gray
         case .panel: return .blue
+        case .ai: return .indigo
         case .alerts: return .orange
         case .shelf: return .teal
         case .music: return .pink
@@ -96,18 +116,18 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     static let groups: [(title: String?, sections: [SettingsSection])] = [
         (nil, [.general, .panel]),
         ("功能", [.alerts, .shelf, .music]),
-        ("数据", [.hooks, .usage]),
+        ("AI", [.ai, .hooks, .usage]),
         (nil, [.about]),
     ]
 }
 
 /// 窗口内容：侧栏 + 当前项的表单。
 struct SettingsWindowView: View {
-    @State private var selection: SettingsSection = .general
+    @Bindable var selection: SettingsSelection
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $selection) {
+            List(selection: $selection.section) {
                 ForEach(Array(SettingsSection.groups.enumerated()), id: \.offset) { _, group in
                     Section {
                         ForEach(group.sections) { section in
@@ -123,7 +143,7 @@ struct SettingsWindowView: View {
             .navigationSplitViewColumnWidth(min: 180, ideal: 190, max: 220)
         } detail: {
             detail
-                .navigationTitle(selection.title)
+                .navigationTitle(selection.section.title)
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar(removing: .sidebarToggle)
@@ -133,9 +153,10 @@ struct SettingsWindowView: View {
 
     @ViewBuilder
     private var detail: some View {
-        switch selection {
+        switch selection.section {
         case .general: GeneralSettings()
         case .panel: PanelSettings()
+        case .ai: AISettings()
         case .alerts: AlertSettings()
         case .shelf: ShelfSettings()
         case .music: MusicSettings()

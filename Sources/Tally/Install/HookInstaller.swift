@@ -21,7 +21,7 @@ enum HookSide: CaseIterable {
 
     var events: [String] {
         switch self {
-        case .claude: return ["SessionStart", "UserPromptSubmit", "Notification", "PostToolUse", "PreCompact", "Stop", "SessionEnd"]
+        case .claude: return ["SessionStart", "UserPromptSubmit", "Notification", "PermissionRequest", "PostToolUse", "PreCompact", "Stop", "SessionEnd"]
         case .codex: return ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop", "SessionEnd"]
         }
     }

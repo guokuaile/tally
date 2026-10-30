@@ -24,6 +24,16 @@ final class TranscriptTitleTests: XCTestCase {
         return url
     }
 
+    func testPendingQuestionDisappearsAfterAnswerAndIgnoresSidechains() throws {
+        let question = #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","id":"u1","input":{"questions":[{"question":"保留多久？"}]}}]}}"#
+        let answer = #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":"一天"}]}}"#
+        let side = #"{"type":"user","isSidechain":true,"message":{"content":"background"}}"#
+        let url = try tempFile(question + "\n" + side + "\n")
+        XCTAssertEqual(TranscriptTitle.pendingQuestion(in: url), "问题：保留多久？")
+        try (question + "\n" + answer + "\n").write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertNil(TranscriptTitle.pendingQuestion(in: url))
+    }
+
     func testTakesLastTitleInTail() throws {
         let url = try tempFile([titleLine("旧"), "{\"type\":\"user\"}", titleLine("新"), "{\"type\":\"assistant\"}"].joined(separator: "\n") + "\n")
         XCTAssertEqual(TranscriptTitle.read(from: url, sessionId: "s"), "新")

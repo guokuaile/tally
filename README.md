@@ -169,7 +169,23 @@ brew install --cask guokuaile/tally/tally
 
 **不会申请**：屏幕录制、摄像头、麦克风（占用提示只读设备状态）、辅助功能、定位、完全磁盘访问。
 
-**数据**：会话、日志统计、设置都留在本机，没有统计上报，也没有自动更新。对外联网只有两件事：向各家官方接口查配额和余额（Anthropic、OpenAI（ChatGPT）、Cursor、Google（Antigravity），以及打开了才连的 DeepSeek、Kimi / Moonshot、智谱 / Z.ai 和你填的 New API 站点；不想连哪家就在设置「用量」里关掉）；手填的 key 只存在本机 `~/Library/Application Support/Tally/providers.json`（权限 600）；每天问一次 GitHub 有没有新版本（设置「通用」里可关，只提示，不自动下载替换）。
+**数据**：会话、日志统计、设置都留在本机，没有统计上报，也没有自动更新。主动联网的行为只有下面这些，每一行都能关。各家配额每 5 分钟查一次（展开面板、手动刷新也查，60 秒内不重复；接口回 429 就按接口退避），token 和 key 只随请求发给它自己那一家，不经过别的服务器。
+
+| 联网 | 发给谁 | 带什么 | 在哪关 |
+|---|---|---|---|
+| Claude 配额 | api.anthropic.com | Claude Code 登录留下的 access token，只读不刷新 | 设置「用量」关掉 Claude |
+| Codex 配额 | chatgpt.com | Codex `auth.json` 里的 access token，只读不刷新 | 设置「用量」关掉 Codex |
+| Cursor 配额 | cursor.com、api2.cursor.sh | Cursor 登录留下的 access token | 设置「用量」关掉 Cursor |
+| Antigravity 配额 | 先问本机 Antigravity 的语言服务器（127.0.0.1，不出本机）；它没开才问 cloudcode-pa.googleapis.com | 云端那一步带钥匙串里 Antigravity 的登录 token | 设置「用量」关掉 Antigravity |
+| DeepSeek 余额（默认关） | api.deepseek.com | 你填的 key，或 Claude Code 设置里指向它的那个 | 设置「用量」 |
+| Kimi 配额与余额（默认关） | api.kimi.com；api.moonshot.cn 或 api.moonshot.ai | 你填的 key、Claude Code 设置里指向它的，或 Kimi Code 登录留下的 token | 设置「用量」 |
+| GLM 配额（默认关） | open.bigmodel.cn 或 api.z.ai，跟 key 的区走，不会发给另一个区 | 你填的 key，或 Claude Code / zcode / opencode 里配好的 | 设置「用量」 |
+| New API 余额（默认关） | 你填的站点 | 访问令牌和用户 ID | 设置「用量」 |
+| 新版本检查 | api.github.com，启动时和之后每 24 小时一次 | 不带任何账号信息，GitHub 只看到 IP 和「Tally」这个 User-Agent | 设置「通用」关掉「检查新版本」 |
+
+手填的 key 只存在本机 `~/Library/Application Support/Tally/providers.json`（权限 600）。网络页读网卡计数和系统代理设置、代理卡片读本机的 mihomo 控制接口，都不出本机；定价表随 app 打包，不远程拉。
+
+**占用**：面板收起时 CPU 0.8%（一个核的，60 秒中位数）、内存 145 MB（活动监视器「内存」列）。本机 14 寸 MacBook Pro（M3 Max）实测，配额开关按默认、刘海小人开着、一周 Claude 日志 480 MB。
 
 ## 常见问题
 

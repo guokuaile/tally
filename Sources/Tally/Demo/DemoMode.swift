@@ -5,4 +5,6 @@ import Foundation
 enum DemoMode {
     /// 和其他启动参数同一套解析，只算一次；测试进程拿到的是 xctest 的参数，恒为假。
     static let isOn = LaunchOptions.parse(CommandLine.arguments).demo
+    /// `--demo --crew-overflow`：会话多到放不下，看「+N」胶囊。
+    static let crewOverflow = isOn && LaunchOptions.parse(CommandLine.arguments).crewOverflow
 }

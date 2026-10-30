@@ -86,6 +86,7 @@ struct PillQueue {
     private var showing: [Queued] = []
     private var waiting: [Queued] = []
     private var nextSequence: UInt64 = 0
+    private var heightLimit: CGFloat = .greatestFiniteMagnitude
 
     var visible: [Item] { showing.map(\.item) }
     var pending: [Item] { waiting.map(\.item) }
@@ -96,6 +97,23 @@ struct PillQueue {
             queued.isWaiting || queued.item.summary != nil ? nil : queued.item.enqueuedAt.addingTimeInterval(Self.pendingLifetime)
         }
         return (shownDeadlines + pendingDeadlines).min()
+    }
+
+    mutating func setHeightLimit(_ height: CGFloat, at now: Date) {
+        let limit = max(0, height)
+        guard limit != heightLimit else { return }
+        heightLimit = limit
+        while !showing.isEmpty && occupiedHeight(showing) > heightLimit {
+            waiting.append(showing.removeLast())
+        }
+        advance(to: now)
+    }
+
+    private func occupiedHeight(_ entries: [Queued]) -> CGFloat {
+        let heights = entries.map { entry in
+            entry.item.peek.map { PillNotificationPanel.height(for: $0.style) } ?? PillNotificationPanel.height
+        }
+        return heights.reduce(0, +) + CGFloat(max(0, entries.count - 1)) * PillNotificationPanel.gap
     }
 
     @discardableResult
@@ -189,10 +207,14 @@ struct PillQueue {
 
     private mutating func refill(at now: Date) {
         while showing.count < Self.visibleLimit, !waiting.isEmpty {
-            let index = waiting.indices.max { left, right in
+            let hasBadge = showing.contains { $0.item.peek?.style == .badge }
+            let fitting = waiting.indices.filter { index in
+                (!hasBadge || waiting[index].item.peek?.style != .badge) && occupiedHeight(showing + [waiting[index]]) <= heightLimit
+            }
+            guard let index = fitting.max(by: { left, right in
                 let a = waiting[left], b = waiting[right]
                 return a.priority == b.priority ? a.sequence > b.sequence : a.priority < b.priority
-            }!
+            }) else { break }
             showing.append(displayed(waiting.remove(at: index), at: now))
         }
     }
@@ -218,7 +240,8 @@ struct PillQueue {
         case .pluggedIn, .unplugged, .low, .full: category = .battery
         case .shelf: category = .shelf
         case .update: category = .update
-        case .ask: return
+        // 等你的要等到不等了才走；工牌排队超过 60 秒或被挤掉就丢，过期的「新项目」没有汇总的价值
+        case .ask, .badge: return
         }
         let id = "summary-\(category.rawValue)"
         if let index = showing.firstIndex(where: { $0.item.id == id }) {
@@ -239,6 +262,8 @@ struct PillQueue {
     }
 
     private func deduplicationKey(for peek: Peek) -> String? {
+        // 工牌按项目去重（id 就是项目键），不和同一会话的状态提示互相替换
+        if peek.style == .badge { return "badge:\(peek.id)" }
         if let sessionID = peek.sessionId { return "session:\(sessionID)" }
         guard peek.style == .quotaHigh || peek.style == .quotaExhausted || peek.style == .quotaReset else { return nil }
         // The trailing component is the timestamp from Peek.quota; the prefix identifies its provider/window.
