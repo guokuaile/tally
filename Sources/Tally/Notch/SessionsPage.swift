@@ -8,11 +8,24 @@ struct SessionsPage: View {
     /// 翻到「已关闭」那一页：由 AI 页会话卡片标题行的切换按钮决定。
     var showingClosed = false
 
+    static func visibleSessions(_ sessions: [SessionRecord], now: Date) -> [SessionRecord] {
+        func path(_ cwd: String) -> String {
+            (cwd as NSString).standardizingPath
+        }
+        let realDirectories = Set(sessions.filter {
+            $0.provider == "codex" && !$0.isProvisional && $0.state != .ended && !$0.isStale(now: now) && !$0.cwd.isEmpty
+        }.map { path($0.cwd) })
+        return sessions.filter {
+            !($0.provider == "codex" && $0.isProvisional && !$0.cwd.isEmpty && realDirectories.contains(path($0.cwd)))
+        }
+    }
+
     var body: some View {
         let now = Date()
+        let ordered = SessionRecord.displayOrder(store.sessions, now: now)
         let rows = showingClosed
-            ? SessionRecord.displayOrder(store.sessions, now: now).filter { $0.state == .ended }
-            : SessionRecord.displayOrder(store.sessions, now: now).filter { $0.state != .ended }
+            ? ordered.filter { $0.state == .ended }
+            : Self.visibleSessions(ordered.filter { $0.state != .ended }, now: now)
         if rows.isEmpty {
             VStack(spacing: 6) {
                 Image(systemName: showingClosed ? "clock.arrow.circlepath" : "terminal")
@@ -21,9 +34,6 @@ struct SessionsPage: View {
                 Text(showingClosed ? "没有已关闭的会话" : "没有在跑的会话")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.5))
-                if !showingClosed, let waits = store.todayWaits {
-                    WaitSummaryLine(day: waits)
-                }
             }
             .frame(maxWidth: .infinity, minHeight: 72, maxHeight: .infinity)
         } else {
@@ -40,25 +50,9 @@ struct SessionsPage: View {
                                    shortcut: !showingClosed && jump.shortcutHints ? shortcutIndices[session.id].flatMap { PanelKey.sessionShortcutLabel($0) } : nil,
                                    tty: crowded.contains(session.cwd) ? session.tty : nil)
                     }
-                    if !showingClosed, let waits = store.todayWaits {
-                        WaitSummaryLine(day: waits)
-                    }
                 }
             }
         }
-    }
-}
-
-/// 等你账本的当天一行（docs/ai.md「等你账本」）：和组头同一色阶的灰字，在列表最底下；今天没等过就不画。
-private struct WaitSummaryLine: View {
-    let day: WaitLedger.Day
-
-    var body: some View {
-        Text(WaitLedger.label(day))
-            .font(.system(size: 10))
-            .foregroundStyle(.white.opacity(0.4))
-            .padding(.leading, 6)
-            .padding(.top, 6)
     }
 }
 
@@ -148,7 +142,7 @@ struct SessionRow: View {
                     }
                     HStack(spacing: 6) {
                         Text(tty.map { "\(session.cwdLabel) · \($0)" } ?? session.cwdLabel)
-                        Text(Self.relative.localizedString(for: session.updatedDate, relativeTo: now))
+                        Text(Self.relative.localizedString(for: session.updatedDate, relativeTo: now) + (session.isProvisional ? "启动" : ""))
                         if stale { Text("失联") }
                         if session.state == .compacting { Text("压缩上下文中") }
                         if ended { Text("已关闭") }

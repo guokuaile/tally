@@ -124,7 +124,7 @@ struct PageTitle: View {
         switch page {
         case .ai, .settings:
             // 已关闭的只是留着接着聊，不算「会话」
-            return PageSummary.ai(sessions: sessions.sessions.filter { $0.state != .ended }.count, waiting: sessions.waitingCount())
+            return PageSummary.ai(sessions: SessionsPage.visibleSessions(sessions.sessions.filter { $0.state != .ended }, now: Date()).count, waiting: sessions.waitingCount())
         case .network:
             return PageSummary.network(interface: network.primary.map { $0.wifi == nil ? "有线 \($0.name)" : "Wi-Fi \($0.name)" },
                                        down: network.down.map(ByteFormat.rate), up: network.up.map(ByteFormat.rate))

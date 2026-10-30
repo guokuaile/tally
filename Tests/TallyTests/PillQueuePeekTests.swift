@@ -95,10 +95,10 @@ final class PillQueuePeekTests: XCTestCase {
     func testBadgeThemesAddOnlyEnabledSubjectsAndIgnoreOrder() {
         let samples = (0..<1000).map { "theme-session-\($0)" }
         let candidates: [(String, String)] = [
-            ("development", "测试全绿，群里报喜"),
-            ("writing", "一稿通过，原地过年"),
-            ("design", "一稿定案甲方满意"),
-            ("data", "报表对上提前下班")
+            ("development", "全绿通关。"),
+            ("writing", "截稿续命。"),
+            ("design", "像素对齐，强迫症舒坦。"),
+            ("data", "口径大一统，普天同庆。")
         ]
         let defaults = Set(samples.map { BadgeIdentity.forSession($0).likes })
         for (theme, phrase) in candidates {

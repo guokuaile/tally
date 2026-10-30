@@ -48,6 +48,30 @@ final class SessionOrderTests: XCTestCase {
         XCTAssertEqual(SessionRecord.shortcutOrder([provisional, real], now: now).map(\.sessionId), ["real"])
     }
 
+    func testSameDirectoryProvisionalSessionIsHiddenOnlyInAIList() {
+        let now = Date()
+        var pending = record("pending", .running, age: 2, now: now)
+        pending.provider = "codex"
+        pending.isProvisional = true
+        pending.cwd = "/tmp/project/./"
+        var real = record("real", .running, age: 1, now: now)
+        real.provider = "codex"
+        real.cwd = "/tmp/project"
+        XCTAssertEqual(SessionsPage.visibleSessions([pending, real], now: now).map(\.id), [real.id])
+        XCTAssertEqual(SessionRecord.displayOrder([pending, real], now: now).count, 2)
+        real.provider = "claude"
+        XCTAssertEqual(SessionsPage.visibleSessions([pending, real], now: now).count, 2)
+        real.provider = "codex"
+        real.state = .ended
+        XCTAssertEqual(SessionsPage.visibleSessions([pending, real], now: now).count, 2)
+        real.state = .running
+        real.cwd = "/tmp/other"
+        XCTAssertEqual(SessionsPage.visibleSessions([pending, real], now: now).count, 2)
+        real.cwd = "/tmp/project"
+        real.updatedAt = now.addingTimeInterval(-3 * 3600).timeIntervalSince1970 * 1000
+        XCTAssertEqual(SessionsPage.visibleSessions([pending, real], now: now).count, 2)
+    }
+
     func testBackgroundWorkStaysWorkingUntilItFinishes() {
         let now = Date()
         for work in [SessionRecord.BackgroundWork.agents, .shells] {
