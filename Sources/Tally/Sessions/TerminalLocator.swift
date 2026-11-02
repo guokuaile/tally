@@ -27,6 +27,8 @@ enum TerminalLocator {
         case scriptFailed(String)
         /// 接着聊时会话目录已经不存在：不开终端，行里直说，别混进「定位失败」。
         case directoryMissing
+        case backgroundUnavailable
+        case backgroundQueryFailed
     }
 
     static let vscode = "com.microsoft.VSCode"
@@ -35,7 +37,7 @@ enum TerminalLocator {
     /// 纯分派，可测。`running` 的参数是 bundle id。
     static func kind(for term: String?, running: (_ bundleId: String) -> Bool) -> BackendKind {
         switch term {
-        case nil, "", "ghostty": return .ghostty
+        case "ghostty": return .ghostty
         case "Apple_Terminal": return .terminalApp
         case "iTerm.app": return .iterm
         case "tmux": return .tmux
@@ -57,6 +59,16 @@ enum TerminalLocator {
 
     @MainActor
     static func focus(session: SessionRecord) async throws {
+        if session.isClaudeSpare { throw Failure.backgroundUnavailable }
+        if session.isBackgroundClaude || session.isClaudeBackground(in: ClaudeHome.url.appendingPathComponent("sessions")) {
+            try await ClaudeBackground.attach(session)
+            return
+        }
+        // 后台身份读不到时，Ghostty 的标题和目录回退可能命中别人的窗口。
+        if session.isClaude, session.term == "ghostty", session.pid != nil,
+           session.claudeCodeStatus(in: ClaudeHome.url.appendingPathComponent("sessions")) == .unknown {
+            throw Failure.notFound
+        }
         switch kind(for: session.term, running: isRunning) {
         case .ghostty:
             do {
@@ -141,5 +153,53 @@ enum TerminalLocator {
     static func openAutomationSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else { return }
         NSWorkspace.shared.open(url)
+    }
+}
+
+/// Claude 后台伪终端不属于任何终端标签，用官方 CLI 的完整会话身份找短 ID 再接入。
+enum ClaudeBackground {
+    static func shortID(in data: Data, sessionID: String, pid: Int) -> String? {
+        guard let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
+        let matches = rows.filter { $0["kind"] as? String == "background" && $0["sessionId"] as? String == sessionID }
+        guard matches.count == 1, matches[0]["pid"] as? Int == pid, let id = matches[0]["id"] as? String, !id.isEmpty,
+              id.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }) else { return nil }
+        return id
+    }
+
+    @MainActor
+    static func attach(_ session: SessionRecord) async throws {
+        guard let pid = session.pid else { throw TerminalLocator.Failure.notFound }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: session.cwd, isDirectory: &isDirectory), isDirectory.boolValue else { throw TerminalLocator.Failure.directoryMissing }
+        let config = ClaudeHome.rawValue
+        let target = try await Task.detached(priority: .userInitiated) { () throws -> (URL, String) in
+            let local = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/claude")
+            let paths = [local.path, "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+            let executable: ([String]) -> String? = { $0.first { FileManager.default.isExecutableFile(atPath: $0) } }
+            guard let path = executable(paths)
+                    ?? executable(LoginShell.lines("-lc", "command -v claude"))
+                    ?? executable(LoginShell.lines("-ilc", "command -v claude")) else { throw TerminalLocator.Failure.notRunning("Claude Code") }
+            var environment = ProcessInfo.processInfo.environment
+            environment.removeValue(forKey: "CLAUDECODE")
+            if let config { environment["CLAUDE_CONFIG_DIR"] = config } else { environment.removeValue(forKey: "CLAUDE_CONFIG_DIR") }
+            let binary = URL(fileURLWithPath: path)
+            let result: Subprocess.Result
+            do {
+                result = try Subprocess.run(binary, ["agents", "--json"], environment: environment, deadline: 10)
+            } catch {
+                Log.error("读取 Claude 后台会话失败：无法启动客户端")
+                throw TerminalLocator.Failure.backgroundQueryFailed
+            }
+            guard !result.timedOut, result.status == 0,
+                  (try? JSONSerialization.jsonObject(with: result.stdout)) is [[String: Any]] else {
+                Log.error("读取 Claude 后台会话失败：超时=\(result.timedOut)，退出码=\(result.status.map(String.init) ?? "无")")
+                throw TerminalLocator.Failure.backgroundQueryFailed
+            }
+            guard let id = shortID(in: result.stdout, sessionID: session.sessionId, pid: pid) else { throw TerminalLocator.Failure.backgroundUnavailable }
+            return (binary, id)
+        }.value
+        let configArgument = config.map { " CLAUDE_CONFIG_DIR=\(SessionResume.shellQuote($0))" } ?? " -u CLAUDE_CONFIG_DIR"
+        let command = "cd \(SessionResume.shellQuote(session.cwd)) && env -u CLAUDECODE\(configArgument) \(SessionResume.shellQuote(target.0.path)) attach \(SessionResume.shellQuote(target.1))"
+        _ = try await TerminalLocator.runAppleScript(SessionResume.terminalScript(command), target: "Terminal")
     }
 }

@@ -208,6 +208,14 @@ final class SessionStore {
             var claudeWaitingFor: String?
             var claudeSince: Date?
             let claude = record.isClaude && record.state != .ended ? record.claudeCodeStatus(in: claudeSessions) : .unknown
+            let kind = record.claudeSessionKind(in: claudeSessions)
+            record.isBackgroundClaude = kind == "bg" || (kind == nil && previousBySession[record.sessionId]?.pid == record.pid && previousBySession[record.sessionId]?.isBackgroundClaude == true)
+            // 备用进程可能短暂转换；保留原状态和文件，避免误发离职或触发关闭数量清理。
+            if claude == .spare && now.timeIntervalSince(record.updatedDate) >= Self.backgroundGrace {
+                record.isClaudeSpare = true
+                loaded.append(record)
+                continue
+            }
             if case .reported(let status, let waitingFor, let since) = claude {
                 claudeStatus = status
                 claudeWaitingFor = waitingFor

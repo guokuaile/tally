@@ -136,6 +136,7 @@ struct SessionRow: View {
                         }
                         // 主回合完了后台还有活：放标题旁、绿底绿字，灰字那栏太弱看不出来
                         if session.isProvisional { RowTag(text: "未关联", tint: .white.opacity(0.7)) }
+                        if session.isClaudeSpare { RowTag(text: "后台会话暂不可接入", tint: .white.opacity(0.7)) }
                         if let work = session.backgroundWork {
                             RowTag(text: work == .agents ? "后台 agent 在跑" : "后台命令在跑", tint: .green)
                         }
@@ -229,6 +230,10 @@ final class SessionJump {
             return "\(app) 没在跑"
         } catch TerminalLocator.Failure.directoryMissing {
             return "会话目录不在了"
+        } catch TerminalLocator.Failure.backgroundUnavailable {
+            return "找不到对应的后台会话"
+        } catch TerminalLocator.Failure.backgroundQueryFailed {
+            return "无法读取后台会话"
         } catch TerminalLocator.Failure.needsAutomationPermission(let app) {
             // 拒过之后系统不再弹框，只能自己把设置面板指出来
             TerminalLocator.openAutomationSettings()

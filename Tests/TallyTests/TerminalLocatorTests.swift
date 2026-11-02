@@ -7,10 +7,20 @@ final class TerminalLocatorTests: XCTestCase {
         TerminalLocator.kind(for: term) { running.contains($0) }
     }
 
-    func testGhosttyAndMissingTermGoToGhostty() {
-        XCTAssertEqual(kind(nil), .ghostty)
-        XCTAssertEqual(kind(""), .ghostty)
+    func testGhosttyAndMissingTerm() {
+        XCTAssertEqual(kind(nil), .unknown)
+        XCTAssertEqual(kind(""), .unknown)
         XCTAssertEqual(kind("ghostty"), .ghostty)
+    }
+
+
+    func testBackgroundSessionRequiresUniqueExactIdentity() throws {
+        let data = Data(#"[{"kind":"background","sessionId":"full-id","id":"abc123","pid":42},{"kind":"interactive","sessionId":"other","id":"other","pid":99}]"#.utf8)
+        XCTAssertEqual(ClaudeBackground.shortID(in: data, sessionID: "full-id", pid: 42), "abc123")
+        XCTAssertNil(ClaudeBackground.shortID(in: data, sessionID: "full-id", pid: 43))
+        XCTAssertNil(ClaudeBackground.shortID(in: data, sessionID: "other", pid: 99))
+        XCTAssertNil(ClaudeBackground.shortID(in: Data(#"[{"kind":"background","sessionId":"full-id","id":"bad;id","pid":42}]"#.utf8), sessionID: "full-id", pid: 42))
+        XCTAssertNil(ClaudeBackground.shortID(in: Data(#"[{"kind":"background","sessionId":"full-id","id":"a","pid":42},{"kind":"background","sessionId":"full-id","id":"b","pid":42}]"#.utf8), sessionID: "full-id", pid: 42))
     }
 
     func testTerminalAppAndITerm() {

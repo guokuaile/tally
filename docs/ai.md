@@ -135,17 +135,19 @@ Tally 存在的理由是「等审批的会话晚发现几分钟是常态」，�
 
 ### 跳回终端（`TerminalLocator`）
 
+Claude Code 状态文件标记 `kind: bg` 的会话先走后台接入：用 `claude agents --json` 按完整 session ID 与 PID 唯一匹配活动后台会话，校验短 ID 后在新终端执行 `claude attach`。查询失败、无唯一匹配或目录不存在时提示失败，不猜别的会话；打开新窗口需要终端自动化授权。状态文件属于同一 session、标记 `kind: bg` 且 `spare: true` 时，超过 10 秒的记录保留原状态与文件，并标「后台会话暂不可接入」；状态恢复时撤销标记，避免误报离职和误删。状态文件瞬时读不到时保留此前的后台身份，不猜普通终端；冷启动时 Claude 状态未知的 Ghostty 会话不按标题和目录猜窗口。终端接受开窗命令不代表 attach 已成功，后续错误由终端显示。
+
 按 `term` 分派（`kind(for:running:)` 纯函数）：
 
 | `term` | 做法 |
 |---|---|
-| nil / `ghostty` | AppleScript 枚举 `window → tab → terminal`（id / name / working directory；支持时也读 tty），`focus terminal id`。分隔符在 tell 块外取 `character id 9`：块内写 `tab` 会被 Ghostty 的 `tab` 类遮蔽 |
+| `ghostty` | AppleScript 枚举 `window → tab → terminal`（id / name / working directory；支持时也读 tty），`focus terminal id`。分隔符在 tell 块外取 `character id 9`：块内写 `tab` 会被 Ghostty 的 `tab` 类遮蔽 |
 | `Apple_Terminal` | AppleScript 找 `tty` 相等的 tab，`set selected tab`，窗口置前，块内 `activate` |
 | `iTerm.app` | 同上，遍历 `windows → tabs → sessions` 比 `tty`，`select` 会话与窗口，块内 `activate` |
 | `vscode` | VS Code 与 Cursor 都报 vscode，哪个在跑用哪个（`com.microsoft.VSCode` / `com.todesktop.230313mzl4w4u92`）。它们没有能定位到某个终端标签的脚本接口，所以用它打开会话的 `cwd`：编辑器会把那个工程的窗口带到前台，比单纯 `activate()` 接近「跳回这个会话」——而且后台 app 调 `activate()` 常被系统的协作激活规则挡掉，点了没反应 |
 | `WarpTerminal` / `kitty` / `WezTerm` | 只激活对应 app |
 | `tmux`（tmux 3.2 起在 pane 里设 `TERM_PROGRAM=tmux`，实测 3.7b） | `TmuxLocator`：`tmux list-panes -a` 按记录里的 tty（就是 pane 的 tty）找到 pane；`list-clients` 挑挂在这个 tmux 会话上的客户端，没有就取最近活动的；`switch-client -c <客户端 tty> -t <pane>` 再 `select-window`、`select-pane`。然后顺着客户端进程的父进程找到它所在的终端 app：Terminal / iTerm 按客户端 tty 选中标签，其他（Ghostty 等）只激活 app。一个客户端都没挂（detach 在后台的会话）报「tmux 客户端 没在跑」。tmux 先找 `/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`，都没有再问登录 shell |
-| 其他 | 「找不到窗口」 |
+| nil / 其他 | 「找不到窗口」 |
 
 三段脚本都写 `tell application id "<bundle id>"` 而不是按名字：iTerm2 的文件叫 `iTerm.app`、`CFBundleName` 却是 `iTerm2`，按名字找碰上改过名的安装会解析不到，AppleScript 会弹「选择应用程序」或直接报错。`activate` 不在这几个 app 的字典里，但它是 AppleScript 内置词汇，照样能用（实测）。
 
@@ -182,11 +184,11 @@ Ghostty 提供 tty 但 Codex 记录没有 tty 时，只把控制终端上有 Cod
 
 | `term` | 做法 |
 |---|---|
-| nil / `ghostty` | AppleScript：`new surface configuration`，设 `initial working directory`（会话目录）与 `initial input`（纯 ASCII 的接续命令加换行，理由见上），`new window with configuration`，`activate` |
+| `ghostty` | AppleScript：`new surface configuration`，设 `initial working directory`（会话目录）与 `initial input`（纯 ASCII 的接续命令加换行，理由见上），`new window with configuration`，`activate` |
 | `Apple_Terminal` | `do script "<命令>"`（开新窗口），`activate` |
 | `iTerm.app` | `create window with default profile`，在它的 `current session` 里 `write text`，`activate` |
 | `tmux` | `tmux new-window -c <目录> <命令>`，开在最近活动的客户端所在的 tmux 会话里，再按上面 tmux 的路子带到前台；没有 tmux 服务或客户端就按下一行 |
-| 其他 | 装了 Ghostty 用 Ghostty，否则 Terminal.app |
+| nil / 其他 | 装了 Ghostty 用 Ghostty，否则 Terminal.app |
 
 设置「面板 → 会话列表 → 保留已关闭的会话」可关，默认开；关掉之后已有的 `ended` 文件在下一次读目录时删掉。hook 不读设置，照写 `ended`，由 app 删。
 

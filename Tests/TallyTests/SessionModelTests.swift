@@ -138,6 +138,8 @@ final class SessionModelTests: XCTestCase {
         XCTAssertEqual(record.claudeCodeStatus(in: dir), .unknown, "没有 sessionId 的文件说不清是谁的，不能当成别的会话把活会话收掉")
         try Data(#"{"pid":4242,"sessionId":"someone-else","status":"busy"}"#.utf8).write(to: file)
         XCTAssertEqual(record.claudeCodeStatus(in: dir), .anotherSession)
+        try Data(#"{"pid":4242,"sessionId":"s1","kind":"bg","spare":true,"status":"idle"}"#.utf8).write(to: file)
+        XCTAssertEqual(record.claudeCodeStatus(in: dir), .spare)
         try Data(#"{"pid":4242,"sessionId":"s1","status":"waiting","waitingFor":"input needed"}"#.utf8).write(to: file)
         XCTAssertEqual(record.claudeCodeStatus(in: dir), .reported(status: "waiting", waitingFor: "input needed", since: nil))
         try Data(#"{"pid":4242,"sessionId":"s1","status":"waiting","statusUpdatedAt":1700000000500}"#.utf8).write(to: file)
@@ -399,6 +401,30 @@ final class SessionTurnEndTests: XCTestCase {
         store.reload()
         XCTAssertEqual(store.sessions.first?.state, .done)
         XCTAssertTrue(alerts.isEmpty, "打断不弹")
+    }
+
+    @MainActor
+    func testSpareBackgroundRemainsVisibleWithoutModifyingRecordAndCanReturn() throws {
+        let store = SessionStore(directory: directory, claudeSessions: claudeSessions, keepClosed: { true }, processTable: AgentProcessTable())
+        try write(state: .running, transcript: [prompt])
+        let file = directory.appendingPathComponent("s1.json")
+        let original = try Data(contentsOf: file)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let statusFile = claudeSessions.appendingPathComponent("\(pid).json")
+        try Data(#"{"sessionId":"s1","kind":"bg","spare":true,"status":"idle"}"#.utf8).write(to: statusFile)
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.state, .running)
+        XCTAssertEqual(store.sessions.first?.isClaudeSpare, true)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        try Data(#"{"sessionId":"s1","kind":"bg","status":"busy"}"#.utf8).write(to: statusFile)
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.sessionId, "s1")
+        XCTAssertEqual(store.sessions.first?.state, .running)
+        XCTAssertEqual(store.sessions.first?.isClaudeSpare, false)
+        XCTAssertEqual(store.sessions.first?.isBackgroundClaude, true)
+        try Data("{".utf8).write(to: statusFile)
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.isBackgroundClaude, true, "状态文件暂时不完整时不能退回普通终端")
     }
 
     @MainActor

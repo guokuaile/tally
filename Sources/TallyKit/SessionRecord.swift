@@ -47,6 +47,9 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     /// A process-only placeholder; never serialized as a Codex session.
     public var isProvisional = false
     public var provisionalStart: UInt64?
+    /// 只在内存保留后台身份，状态文件瞬时读不到时不退回普通终端定位。
+    public var isBackgroundClaude = false
+    public var isClaudeSpare = false
 
     public enum BackgroundWork {
         case agents
@@ -267,6 +270,8 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         case unknown
         /// 文件里的 sessionId 不是这条记录的：pid 被别的 Claude 拿走了，或同一个进程 /clear、/resume 换了会话，这条记录的会话都已经不在了。
         case anotherSession
+        /// Claude 把后台进程回收到备用池，原 sessionId 可能还留在状态文件里。
+        case spare
         /// busy / shell / waiting / idle；waiting 时 `waitingFor` 说在等什么（「permission prompt」「input needed」「dialog open」…）；
         /// `since` 是 status 翻成现在这个值的那一毫秒（`statusUpdatedAt`），老版本没有。
         case reported(status: String, waitingFor: String?, since: Date?)
@@ -280,9 +285,22 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         // 没有 sessionId 的文件说不清是谁的（老版本、半截文件），不能当成别的会话把活会话收掉
         guard let owner = object["sessionId"] as? String else { return .unknown }
         guard owner == sessionId else { return .anotherSession }
+        if object["kind"] as? String == "bg", object["spare"] as? Bool == true { return .spare }
         guard let status = object["status"] as? String else { return .unknown }
         let since = (object["statusUpdatedAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
         return .reported(status: status, waitingFor: object["waitingFor"] as? String, since: since)
+    }
+
+    public func isClaudeBackground(in directory: URL) -> Bool {
+        claudeSessionKind(in: directory) == "bg"
+    }
+
+    public func claudeSessionKind(in directory: URL) -> String? {
+        guard isClaude, let pid,
+              let data = try? Data(contentsOf: directory.appendingPathComponent("\(pid).json")),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["sessionId"] as? String == sessionId else { return nil }
+        return object["kind"] as? String
     }
 
     /// 回合一结束就写 idle，打断和 API 报错（这两种不发 Stop）也写，等审批写 waiting。
