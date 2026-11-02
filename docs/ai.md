@@ -135,7 +135,7 @@ Tally 存在的理由是「等审批的会话晚发现几分钟是常态」，�
 
 ### 跳回终端（`TerminalLocator`）
 
-Claude Code 状态文件标记 `kind: bg` 的会话先走后台接入：用 `claude agents --json` 按完整 session ID 与 PID 唯一匹配活动后台会话，校验短 ID 后在新终端执行 `claude attach`。查询失败、无唯一匹配或目录不存在时提示失败，不猜别的会话；打开新窗口需要终端自动化授权。状态文件属于同一 session、标记 `kind: bg` 且 `spare: true` 时，超过 10 秒的记录保留原状态与文件，并标「后台会话暂不可接入」；状态恢复时撤销标记，避免误报离职和误删。状态文件瞬时读不到时保留此前的后台身份，不猜普通终端；冷启动时 Claude 状态未知的 Ghostty 会话不按标题和目录猜窗口。终端接受开窗命令不代表 attach 已成功，后续错误由终端显示。
+Claude Code 状态文件标记 `kind: bg` 的会话先走后台接入：用 `claude agents --json` 按完整 session ID 与 PID 唯一匹配活动后台会话，校验短 ID 后在新终端执行 `claude attach`。查询失败、无唯一匹配或目录不存在时提示失败，不猜别的会话；打开新窗口需要终端自动化授权。状态文件属于同一 session、标记 `kind: bg` 且 `spare: true` 时，超过 10 秒且 transcript 不存在的备用记录不显示、不改写或删除；以后文件或状态恢复就重新显示。有 transcript 的记录保留原状态与文件，并标「后台会话暂不可接入」，避免误报离职和误删。状态文件瞬时读不到时保留此前的后台身份，不猜普通终端；冷启动时 Claude 状态未知的 Ghostty 会话不按标题和目录猜窗口。终端接受开窗命令不代表 attach 已成功，后续错误由终端显示。
 
 按 `term` 分派（`kind(for:running:)` 纯函数）：
 

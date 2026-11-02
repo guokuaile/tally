@@ -180,6 +180,43 @@ final class PillQueuePeekTests: XCTestCase {
         XCTAssertEqual(tracker.update([real], emit: true).map(\.0), [.departed])
     }
 
+    func testExplicitCodexResumePlaceholderEmitsReturnedOnlyOnce() {
+        let process = CodexPendingProcess(pid: 42, started: 1_000_000, tty: "ttys010", cwd: "/repo", isResume: true)
+        let placeholder = process.record()
+        XCTAssertTrue(placeholder.resumed)
+        var real = record("real", provider: "codex")
+        real.pid = 42
+        real.tty = "ttys010"
+        real.resumed = true
+        var tracker = BadgeLifecycle()
+        XCTAssertTrue(tracker.update([], emit: true).isEmpty)
+        XCTAssertEqual(tracker.update([placeholder], emit: true).map(\.0), [.returned])
+        XCTAssertTrue(tracker.update([real], emit: true).isEmpty)
+    }
+
+    func testResumePlaceholderSeenSilentlyDoesNotSwallowReturnedBadge() {
+        let process = CodexPendingProcess(pid: 42, started: 1_000_000, tty: "ttys010", cwd: "/repo", isResume: true)
+        var real = record("real", provider: "codex")
+        real.pid = 42
+        real.tty = "ttys010"
+        real.resumed = true
+        var tracker = BadgeLifecycle()
+        XCTAssertTrue(tracker.update([], emit: false).isEmpty)
+        XCTAssertTrue(tracker.update([process.record()], emit: false).isEmpty)
+        XCTAssertEqual(tracker.update([real], emit: true).map(\.0), [.returned])
+    }
+
+    func testResumedPlaceholderDoesNotHideARealNewSessionBadge() {
+        let process = CodexPendingProcess(pid: 42, started: 1_000_000, tty: "ttys010", cwd: "/repo", isResume: true)
+        var real = record("new", provider: "codex")
+        real.pid = 42
+        real.tty = "ttys010"
+        var tracker = BadgeLifecycle()
+        XCTAssertTrue(tracker.update([], emit: true).isEmpty)
+        XCTAssertEqual(tracker.update([process.record()], emit: true).map(\.0), [.returned])
+        XCTAssertEqual(tracker.update([real], emit: true).map(\.0), [.joined])
+    }
+
     func testProvisionalHandoffRequiresUniquePIDAndTTY() {
         let process = CodexPendingProcess(pid: 42, started: 1_000_000, tty: "ttys010", cwd: "/repo")
         let placeholder = process.record()

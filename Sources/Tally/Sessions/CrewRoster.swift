@@ -35,20 +35,22 @@ struct CrewLayout: Equatable {
 struct BadgeLifecycle {
     enum Kind: Equatable { case joined, departed, returned }
     private var previous: [String: SessionRecord]?
+    private var emittedProvisional: Set<String> = []
 
-    mutating func reset() { previous = nil }
+    mutating func reset() { previous = nil; emittedProvisional.removeAll() }
 
     mutating func update(_ records: [SessionRecord], emit: Bool) -> [(Kind, SessionRecord)] {
         let current = Dictionary(records.map { ("\(CrewRoster.tool(of: $0)):\($0.sessionId)", $0) }, uniquingKeysWith: { _, last in last })
         guard var known = previous else { previous = current; return [] }
         var events: [(Kind, SessionRecord)] = []
-        // 待关联条目接管真记录是为了不发第二张入职牌；接着聊的真记录不接管，让它自己发返聘牌（待关联那张入职牌已经出了，收不回）
-        for (key, record) in current where record.provider == "codex" && !record.isProvisional && !record.resumed && record.state != .ended && known[key] == nil {
-            let candidates = known.filter { $0.value.isProvisional && $0.value.state != .ended && $0.value.pid != nil && $0.value.pid == record.pid && $0.value.tty != nil && $0.value.tty == record.tty }
+        // 只有临时条目已发出同一种工牌时才接管，避免吞掉尚未发出的返聘。
+        for (key, record) in current where record.provider == "codex" && !record.isProvisional && record.state != .ended && known[key] == nil {
+            let candidates = known.filter { $0.value.isProvisional && $0.value.resumed == record.resumed && emittedProvisional.contains($0.key) && $0.value.state != .ended && $0.value.pid != nil && $0.value.pid == record.pid && $0.value.tty != nil && $0.value.tty == record.tty }
             let competing = current.values.filter { !$0.isProvisional && $0.state != .ended && $0.provider == "codex" && $0.pid == record.pid && $0.tty == record.tty }
             if candidates.count == 1, competing.count == 1, let match = candidates.first, current[match.key] == nil {
                 known[key] = match.value
                 known[match.key] = nil
+                emittedProvisional.remove(match.key)
             }
         }
         for (key, record) in current {
@@ -59,6 +61,7 @@ struct BadgeLifecycle {
                 } else if record.state != .ended {
                     // 接着聊的老会话多半查不到 key（原记录早被 24 小时清理删了、或 Tally 重启过），靠记录里的 resumed 认返聘
                     events.append((record.resumed ? .returned : .joined, record))
+                    if record.isProvisional { emittedProvisional.insert(key) }
                 }
             }
             known[key] = record
@@ -67,6 +70,7 @@ struct BadgeLifecycle {
         let absent = known.filter { current[$0.key] == nil }.sorted { $0.value.updatedAt > $1.value.updatedAt }
         for entry in absent.dropFirst(500) {
             known[entry.key] = nil
+            emittedProvisional.remove(entry.key)
         }
         previous = known
         return events.sorted { $0.1.sessionId < $1.1.sessionId }

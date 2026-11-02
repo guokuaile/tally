@@ -428,6 +428,24 @@ final class SessionTurnEndTests: XCTestCase {
     }
 
     @MainActor
+    func testSpareWithoutTranscriptIsHiddenButNotDeletedAndCanReturn() throws {
+        let store = SessionStore(directory: directory, claudeSessions: claudeSessions, keepClosed: { true }, processTable: AgentProcessTable())
+        try write(state: .running, transcript: [prompt])
+        let file = directory.appendingPathComponent("s1.json")
+        let original = try Data(contentsOf: file)
+        let statusFile = claudeSessions.appendingPathComponent("\(ProcessInfo.processInfo.processIdentifier).json")
+        try Data(#"{"sessionId":"s1","kind":"bg","spare":true,"status":"idle"}"#.utf8).write(to: statusFile)
+        try FileManager.default.removeItem(at: transcript)
+        store.reload()
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        try Data("{}".utf8).write(to: transcript)
+        store.reload()
+        XCTAssertEqual(store.sessions.first?.isClaudeSpare, true)
+        XCTAssertEqual(try Data(contentsOf: file), original)
+    }
+
+    @MainActor
     func testDoneRecordShowsBackgroundWorkFromClaudeCodeStatus() throws {
         // 主回合 Stop 写了 done，后台 agent 还在跑：Claude Code 的 status 留在 busy；只剩后台命令是 shell（docs/ai.md「后台还在跑」）
         var alerts: [SessionRecord] = []

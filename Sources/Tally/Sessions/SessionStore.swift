@@ -212,6 +212,8 @@ final class SessionStore {
             record.isBackgroundClaude = kind == "bg" || (kind == nil && previousBySession[record.sessionId]?.pid == record.pid && previousBySession[record.sessionId]?.isBackgroundClaude == true)
             // 备用进程可能短暂转换；保留原状态和文件，避免误发离职或触发关闭数量清理。
             if claude == .spare && now.timeIntervalSince(record.updatedDate) >= Self.backgroundGrace {
+                // 备用池可能残留从未生成 transcript 的临时身份；不删文件，状态或 transcript 恢复时重新显示。
+                if record.transcriptPath.isEmpty || !FileManager.default.fileExists(atPath: record.transcriptPath) { continue }
                 record.isClaudeSpare = true
                 loaded.append(record)
                 continue

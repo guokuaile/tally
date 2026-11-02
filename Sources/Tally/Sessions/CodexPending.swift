@@ -7,6 +7,7 @@ struct CodexPendingProcess: Equatable {
     let started: UInt64
     let tty: String
     let cwd: String
+    var isResume = false
 
     var id: String { "pending-codex-\(pid)-\(started)" }
 
@@ -15,6 +16,7 @@ struct CodexPendingProcess: Equatable {
                                    state: .running, cwd: cwd, title: "Codex 终端",
                                    transcriptPath: "", message: nil, updatedAt: Double(started / 1000))
         result.isProvisional = true
+        result.resumed = isResume
         result.provisionalStart = started
         return result
     }
@@ -44,7 +46,8 @@ enum CodexPending {
             var info = proc_bsdinfo()
             guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size else { continue }
             let started = UInt64(info.pbi_start_tvsec) * 1_000_000 + UInt64(info.pbi_start_tvusec)
-            result.append(CodexPendingProcess(pid: pid, started: started, tty: tty, cwd: cwd))
+            result.append(CodexPendingProcess(pid: pid, started: started, tty: tty, cwd: cwd,
+                                              isResume: args.dropFirst().first == "resume"))
         }
         return result.sorted { $0.id < $1.id }
     }
