@@ -70,6 +70,10 @@ struct Preferences: Codable, Equatable {
     var strideEnabled = false
     /// 恐龙旁边显示内存百分比。
     var strideShowsValue = false
+    /// 「应用」页：列表里的 app 没有窗口、不在前台时替它退出（docs/monitors.md「关窗自动退出」）。默认关：要辅助功能权限。
+    var autoQuitEnabled = false
+    /// 要盯的 app 的 bundle id；默认只有预览——关完窗口赖在 Dock 里的头号选手。
+    var autoQuitApps = ["com.apple.Preview"]
     /// 没有刘海屏（合盖接外接屏）时，会话、配额、文件架提示改发系统通知。
     var notifyWithoutNotch = true
     /// 新截图自动放进文件架；文件夹是用户在选择面板里点过的那个（点过才有读它的授权）。
@@ -107,6 +111,12 @@ struct Preferences: Codable, Equatable {
 
     /// 提示条秒数夹在 2 到 30 之间。
     static func peekSeconds(_ value: Int) -> Int { min(max(value, 2), 30) }
+
+    /// 监控列表去空白、去重、保持顺序：手改文件写进空串或重复项不至于列表里出现空行、同一个 app 两行。
+    static func autoQuitList(_ raw: [String]) -> [String] {
+        var seen: Set<String> = []
+        return raw.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
 
     /// 套系只认两个值，别的回落黑玻璃。
     static func crewSkin(_ raw: String) -> String { raw == "gradient" ? raw : "glass" }
@@ -157,6 +167,8 @@ struct Preferences: Codable, Equatable {
         hideInFullScreen = try c.decodeIfPresent(Bool.self, forKey: .hideInFullScreen) ?? d.hideInFullScreen
         strideEnabled = try c.decodeIfPresent(Bool.self, forKey: .strideEnabled) ?? d.strideEnabled
         strideShowsValue = try c.decodeIfPresent(Bool.self, forKey: .strideShowsValue) ?? d.strideShowsValue
+        autoQuitEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoQuitEnabled) ?? d.autoQuitEnabled
+        autoQuitApps = Self.autoQuitList(try c.decodeIfPresent([String].self, forKey: .autoQuitApps) ?? d.autoQuitApps)
         notifyWithoutNotch = try c.decodeIfPresent(Bool.self, forKey: .notifyWithoutNotch) ?? d.notifyWithoutNotch
         screenshotsToShelf = try c.decodeIfPresent(Bool.self, forKey: .screenshotsToShelf) ?? d.screenshotsToShelf
         screenshotPeek = try c.decodeIfPresent(Bool.self, forKey: .screenshotPeek) ?? d.screenshotPeek

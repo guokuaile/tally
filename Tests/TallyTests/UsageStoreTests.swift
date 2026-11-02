@@ -37,18 +37,36 @@ private final class PendingUsageProvider: UsageProvider, @unchecked Sendable {
 private final class Harness {
     var now = Date(timeIntervalSince1970: 1_000_000)
     var prefs = Preferences()
+    /// 有没有还没结束的会话；默认有，只有验 5 分钟那一轮跳不跳的用例拨成没有。
+    var liveSession = true
     let store: UsageStore
 
     init(providers: [UsageProvider]) {
         var clockBox: (() -> Date)!
         var prefsBox: (() -> Preferences)!
-        store = UsageStore(providers: providers, clock: { clockBox() }, preferences: { prefsBox() })
+        var liveBox: (() -> Bool)!
+        store = UsageStore(providers: providers, clock: { clockBox() }, preferences: { prefsBox() }, hasLiveSession: { liveBox() })
         clockBox = { [unowned self] in self.now }
         prefsBox = { [unowned self] in self.prefs }
+        liveBox = { [unowned self] in self.liveSession }
     }
 }
 
 final class UsageStoreTests: XCTestCase {
+
+    @MainActor
+    func testPeriodicTickSkipsWithoutLiveSession() async {
+        let h = Harness(providers: [FakeProvider(id: .claude, error: nil)])
+        h.liveSession = false
+        XCTAssertFalse(h.store.periodicTick(), "没有存活的会话，5 分钟那一轮不刷")
+        let opened = await h.store.refreshAndWait(reason: .panelOpened)
+        XCTAssertTrue(opened, "被跳过的那轮不占 60 秒节流，展开面板立刻刷")
+        h.now = h.now.addingTimeInterval(UsageStore.timerInterval)
+        h.liveSession = true
+        XCTAssertTrue(h.store.periodicTick(), "有会话照常刷")
+        // 这一轮是放手跑的：等它结束再返回，否则 Harness 先死、那轮末尾再读时钟就撞 unowned
+        while h.store.isRefreshing { await Task.yield() }
+    }
 
     @MainActor
     func testClaudeRefetchInvalidatesScopedRequestBeforeSlowScanStarts() async throws {

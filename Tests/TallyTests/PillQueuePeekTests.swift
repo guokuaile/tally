@@ -165,6 +165,21 @@ final class PillQueuePeekTests: XCTestCase {
         XCTAssertTrue(lifecycle.update([record("a"), resumed, endedResumed], emit: true).isEmpty)
     }
 
+    func testBadgeLifecycleIgnoresScriptedSessionsEntirely() {
+        var lifecycle = BadgeLifecycle()
+        XCTAssertTrue(lifecycle.update([record("a")], emit: true).isEmpty)
+        var exec = record("eval-1", provider: "codex")
+        exec.scripted = true
+        XCTAssertTrue(lifecycle.update([record("a"), exec], emit: true).isEmpty, "脚本会话出现不发入职")
+        exec.state = .ended
+        XCTAssertTrue(lifecycle.update([record("a"), exec], emit: true).isEmpty, "结束也不发离职")
+        exec.state = .running
+        exec.resumed = true
+        XCTAssertTrue(lifecycle.update([record("a"), exec], emit: true).isEmpty, "接着跑也不发返聘")
+        XCTAssertTrue(lifecycle.update([record("a")], emit: true).isEmpty)
+        XCTAssertEqual(lifecycle.update([record("a"), record("b")], emit: true).map(\.0), [.joined], "普通会话照发")
+    }
+
     func testProvisionalHandoffDoesNotSwallowResumedCodexSession() {
         let process = CodexPendingProcess(pid: 42, started: 1_000_000, tty: "ttys010", cwd: "/repo")
         var real = record("real", provider: "codex")

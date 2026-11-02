@@ -205,6 +205,33 @@ final class SessionLifecycleTests: XCTestCase {
     }
 
     @MainActor
+    func testSevenScriptedCodexExecRunsEmitNoBadges() throws {
+        let rollout = FileManager.default.temporaryDirectory.appendingPathComponent("tally-rollout-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: rollout) }
+        try (#"{"timestamp":"t","type":"session_meta","payload":{"id":"x","source":"exec","originator":"codex_exec"}}"# + "\n").write(to: rollout, atomically: true, encoding: .utf8)
+        let store = makeStore()
+        var lifecycle = BadgeLifecycle()
+        var events: [BadgeLifecycle.Kind] = []
+        store.badgeSessionsChanged = { records in events += lifecycle.update(records, emit: true).map(\.0) }
+        store.reload()
+        let options = HookOptions(provider: "codex", directory: directory, environment: [:])
+        // Codex 开子 agent 评测：一分钟里七个 codex exec 起落，每个都是新 session_id、新临时目录
+        for round in 1...7 {
+            let start: [String: Any] = ["session_id": "eval-\(round)", "hook_event_name": "SessionStart", "cwd": "/tmp/platform-read-\(round)", "transcript_path": rollout.path]
+            guard case .written = HookRunner.run(input: start, options: options, table: AgentProcessTable()) else { return XCTFail() }
+            store.reload()
+            XCTAssertEqual(store.sessions.map(\.sessionId), ["eval-\(round)"], "跑着的时候照样在列表里，只是不发牌")
+            var end = start
+            end["hook_event_name"] = "SessionEnd"
+            guard case .deleted = HookRunner.run(input: end, options: options, table: AgentProcessTable()) else { return XCTFail() }
+            store.reload()
+        }
+        XCTAssertTrue(events.isEmpty, "七轮起落工牌一张不发，不是七对入职离职")
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.hasSuffix(".tally-end") })
+    }
+
+    @MainActor
     func testStaleEndMarkerDoesNotCloseNewerSession() throws {
         let pid = Int(ProcessInfo.processInfo.processIdentifier)
         try write("quick", state: .running, updatedAt: 2000, pid: pid)

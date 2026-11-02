@@ -124,6 +124,42 @@ final class HookRunnerTests: XCTestCase {
         XCTAssertFalse(try JSONDecoder().decode(SessionRecord.self, from: old).resumed)
     }
 
+    func testScriptedCodexRolloutMarksRecordAndLaterEventsKeepIt() throws {
+        let rollout = FileManager.default.temporaryDirectory.appendingPathComponent("tally-rollout-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: rollout) }
+        try (#"{"timestamp":"t","type":"session_meta","payload":{"id":"x","source":"exec","originator":"codex_exec"}}"# + "\n").write(to: rollout, atomically: true, encoding: .utf8)
+        let opts = options(provider: "codex")
+        guard case .written = run(event("SessionStart", ["transcript_path": rollout.path]), options: opts) else { return XCTFail() }
+        XCTAssertTrue(try read().scripted, "codex exec 的 rollout 头 source 是 exec")
+        guard case .written = run(event("UserPromptSubmit"), options: opts) else { return XCTFail() }
+        XCTAssertTrue(try read().scripted, "之后的事件没带 transcript 也不翻回")
+        guard case .deleted = run(event("SessionEnd", ["transcript_path": rollout.path]), options: opts) else { return XCTFail("codex exec 不留") }
+        let marker = try XCTUnwrap(FileManager.default.contentsOfDirectory(atPath: directory.path).first { $0.hasSuffix(".tally-end") })
+        XCTAssertTrue(try JSONDecoder().decode(SessionRecord.self, from: Data(contentsOf: directory.appendingPathComponent(marker))).scripted, "结束记录带着 scripted")
+
+        try (#"{"timestamp":"t","type":"session_meta","payload":{"id":"y","source":"cli","originator":"codex-tui"}}"# + "\n").write(to: rollout, atomically: true, encoding: .utf8)
+        guard case .written = run(event("SessionStart", ["transcript_path": rollout.path]), options: opts) else { return XCTFail() }
+        XCTAssertFalse(try read().scripted, "终端里开的 Codex 不算")
+    }
+
+    func testClaudePrintModeEntrypointMarksRecordScripted() throws {
+        var environment = ["TERM_PROGRAM": "ghostty", "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"]
+        let scripted = HookOptions(directory: directory, now: { Date(timeIntervalSince1970: 42) }, environment: environment, startPid: 100)
+        guard case .written = run(event("SessionStart"), options: scripted) else { return XCTFail() }
+        XCTAssertTrue(try read().scripted, "claude -p 把 CLAUDE_CODE_ENTRYPOINT 设成 sdk-cli")
+        environment["CLAUDE_CODE_ENTRYPOINT"] = "cli"
+        let interactive = HookOptions(directory: directory, now: { Date(timeIntervalSince1970: 43) }, environment: environment, startPid: 100)
+        guard case .written = run(event("UserPromptSubmit"), options: interactive) else { return XCTFail() }
+        XCTAssertTrue(try read().scripted, "认出一次就沿用")
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("abc-123.json"))
+        guard case .written = run(event("SessionStart"), options: interactive) else { return XCTFail() }
+        XCTAssertFalse(try read().scripted, "终端里的 cli 不算")
+        guard case .written = run(event("UserPromptSubmit")) else { return XCTFail() }
+        XCTAssertFalse(try read().scripted, "没设这个变量也不算")
+        let old = Data(#"{"session_id":"old-1","state":"running","cwd":"/tmp","transcript_path":"","updated_at":1}"#.utf8)
+        XCTAssertFalse(try JSONDecoder().decode(SessionRecord.self, from: old).scripted, "老文件缺键按 false")
+    }
+
     func testSessionStartWritesFullRecordWithPidTtyTerm() throws {
         guard case .written = run(event("SessionStart", ["source": "compact"])) else { return XCTFail() }
         let r = try read()

@@ -64,9 +64,9 @@ final class SettingsSelection {
     var section: SettingsSection = .general
 }
 
-/// 侧栏的七项：前两项和最后一项不带组标题（系统设置的做法），中间按「功能」「数据」分组。
+/// 侧栏的十项：前两项和最后一项不带组标题（系统设置的做法），中间按「功能」「AI」分组。
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, panel, ai, alerts, shelf, music, hooks, usage, about
+    case general, panel, ai, alerts, shelf, music, apps, hooks, usage, about
 
     var id: String { rawValue }
 
@@ -78,6 +78,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .alerts: return "提示"
         case .shelf: return "文件架"
         case .music: return "音乐"
+        case .apps: return "应用"
         case .hooks: return "hook"
         case .usage: return "用量"
         case .about: return "关于"
@@ -92,6 +93,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .alerts: return "bell.badge.fill"
         case .shelf: return "tray.full.fill"
         case .music: return "music.note"
+        case .apps: return "xmark.app.fill"
         case .hooks: return "link"
         case .usage: return "chart.bar.fill"
         case .about: return "info"
@@ -106,6 +108,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .alerts: return .orange
         case .shelf: return .teal
         case .music: return .pink
+        case .apps: return .cyan
         case .hooks: return .purple
         case .usage: return .green
         case .about: return .secondary
@@ -115,7 +118,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     /// 侧栏分组：标题为 nil 的组不画组头。
     static let groups: [(title: String?, sections: [SettingsSection])] = [
         (nil, [.general, .panel]),
-        ("功能", [.alerts, .shelf, .music]),
+        ("功能", [.alerts, .shelf, .music, .apps]),
         ("AI", [.ai, .hooks, .usage]),
         (nil, [.about]),
     ]
@@ -160,6 +163,7 @@ struct SettingsWindowView: View {
         case .alerts: AlertSettings()
         case .shelf: ShelfSettings()
         case .music: MusicSettings()
+        case .apps: AppsSettings()
         case .hooks: HookSettings()
         case .usage: UsageSettings()
         case .about: HelpPage()

@@ -459,6 +459,7 @@ final class NotchController {
         if !prefs.keepAwakeButton { KeepAwake.shared.stop() }
         UpdateChecker.shared.setEnabled(prefs.checkUpdates)
         StrideMonitor.shared.apply(enabled: prefs.strideEnabled, showsValue: prefs.strideShowsValue)
+        AutoQuitWatcher.shared.apply(enabled: prefs.autoQuitEnabled, bundleIdentifiers: prefs.autoQuitApps)
         if prefs.shelfEnabled, prefs.screenshotsToShelf, let folder = prefs.screenshotFolder {
             ScreenshotWatcher.shared.start(folder: URL(fileURLWithPath: folder, isDirectory: true))
         } else {

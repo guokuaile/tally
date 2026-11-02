@@ -12,7 +12,7 @@
 | [shelf.md](shelf.md) | 「文件架」页：拖到刘海暂存、`open -a Tally` 与新截图自动放进来、拖出、AirDrop、文件与截图分别到点清理 |
 | [music.md](music.md) | 「音乐」页：系统「正在播放」怎么读到（借 /usr/bin/perl 加载自带的小 dylib）、助手的约定、页签常驻与否、失效怎么藏 |
 | [hooks.md](hooks.md) | hook 的注册与移除、Codex 信任哈希、自检、发版（Release + Homebrew）与新版本提示、卸载 |
-| [monitors.md](monitors.md) | 跟着设置开关起停的常驻监听与小工具：保持唤醒、电池事件、摄像头 / 麦克风占用、截屏隐藏 |
+| [monitors.md](monitors.md) | 跟着设置开关起停的常驻监听与小工具：保持唤醒、电池事件、摄像头 / 麦克风占用、截屏隐藏、关窗自动退出 |
 | [crew.md](crew.md) | 刘海两侧的项目小人（小刻）：一个项目一个角色，状态表与片段、翅膀窗口与几何、悬停气泡与点击、新项目工牌、设置、验证 |
 
 ## 全局边界

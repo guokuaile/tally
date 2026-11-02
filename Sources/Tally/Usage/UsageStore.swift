@@ -40,6 +40,8 @@ final class UsageStore {
     private let allProviders: [UsageProvider]
     private let clock: () -> Date
     private let preferences: () -> Preferences
+    /// 有没有还没结束的 agent 会话：5 分钟那一轮只在有会话时刷。
+    private let hasLiveSession: () -> Bool
     private var lastRefreshStart: Date?
     private var timer: Timer?
     private var liveLimits: [ProviderID: LiveLimits] = [:]
@@ -63,7 +65,8 @@ final class UsageStore {
     init(
         providers: [UsageProvider]? = nil,
         clock: @escaping () -> Date = Date.init,
-        preferences: (() -> Preferences)? = nil
+        preferences: (() -> Preferences)? = nil,
+        hasLiveSession: (() -> Bool)? = nil
     ) {
         let scopedBox = ClaudeUsageProvider.ScopedLimitsBox()
         self.allProviders = providers ?? [
@@ -82,6 +85,7 @@ final class UsageStore {
         }
         self.clock = clock
         self.preferences = preferences ?? { PreferencesStore.shared.prefs }
+        self.hasLiveSession = hasLiveSession ?? { SessionStore.shared.sessions.contains { $0.state != .ended } }
     }
 
     /// 后台取到按模型分的周窗口时补进 Claude 那条快照，不重新解析日志。
@@ -110,9 +114,17 @@ final class UsageStore {
         }
         providersChanged()
         timer = Timer.scheduledTimer(withTimeInterval: Self.timerInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh(reason: .timer) }
+            Task { @MainActor in self?.periodicTick() }
         }
         refresh(reason: .timer)
+    }
+
+    /// 5 分钟那一轮：没有存活的会话就跳过。没人在用 agent 就没有新日志可扫，别处消耗的配额等展开面板再查；
+    /// 每轮要 stat 几千个日志文件、调一次 Codex 配额接口，闲置一小时白跑 12 次。启动那一轮、睡醒补刷、配额重置补刷不走这里。
+    @discardableResult
+    func periodicTick() -> Bool {
+        guard hasLiveSession() else { return false }
+        return refresh(reason: .timer)
     }
 
     private var enabledProviders: [UsageProvider] {

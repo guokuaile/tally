@@ -144,6 +144,12 @@ public enum HookRunner {
             )
             // 接着聊的会话：两家的 SessionStart 都带 source == "resume"。之后的事件沿用，不然第一次 UserPromptSubmit 就把它抹了
             record.resumed = previous?.resumed == true || (event == "SessionStart" && input["source"] as? String == "resume")
+            // 脚本会话（claude -p / SDK、codex exec、Codex 子 agent）不发工牌（docs/crew.md「工牌」）。Claude 认 hook 继承的环境变量：SessionStart 时
+            // transcript 还没有；Codex 认 rollout 第一行，它在 SessionStart 前就写好了。认出一次就沿用，之后的事件读不到也不翻回
+            record.scripted = previous?.scripted == true
+                || (options.provider == "codex"
+                    ? !transcriptPath.isEmpty && TranscriptTitle.isScriptedCodex(rollout: URL(fileURLWithPath: transcriptPath))
+                    : options.environment["CLAUDE_CODE_ENTRYPOINT"]?.hasPrefix("sdk-") == true)
             if event == "PermissionRequest" {
                 record.waitingDetail = HookDecision.toolDetail(input, waiting: true)
             } else if event == "Notification", state == .waitingPermission, previous?.state == .waitingPermission {

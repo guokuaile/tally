@@ -40,7 +40,9 @@ struct BadgeLifecycle {
     mutating func reset() { previous = nil; emittedProvisional.removeAll() }
 
     mutating func update(_ records: [SessionRecord], emit: Bool) -> [(Kind, SessionRecord)] {
-        let current = Dictionary(records.map { ("\(CrewRoster.tool(of: $0)):\($0.sessionId)", $0) }, uniquingKeysWith: { _, last in last })
+        // 脚本会话（scripted）不是来上班的：Codex 开子 agent 评测一分钟起落七回，发了就是七对入职离职。在这儿滤而不是在 SessionStore：
+        // 它们的 .tally-end 结束记录也带着 scripted，一起不发
+        let current = Dictionary(records.filter { !$0.scripted }.map { ("\(CrewRoster.tool(of: $0)):\($0.sessionId)", $0) }, uniquingKeysWith: { _, last in last })
         guard var known = previous else { previous = current; return [] }
         var events: [(Kind, SessionRecord)] = []
         // 只有临时条目已发出同一种工牌时才接管，避免吞掉尚未发出的返聘。

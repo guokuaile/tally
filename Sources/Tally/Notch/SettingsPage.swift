@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 设置窗口各项的表单。开关一律写进 `Preferences` 落盘，控制器收到 `onChange` 起停对应功能。
 /// 一个开关一句解释，放在表单节脚注里；一个开关只管一件事。
@@ -596,6 +597,101 @@ struct RetentionRow: View {
         let minutes = Preferences.retentionMinutes(min(max(amount, 1), 30 * 1440) * unit.rawValue)
         guard minutes != PreferencesStore.shared.prefs[keyPath: key] else { return }
         PreferencesStore.shared.prefs[keyPath: key] = minutes
+    }
+}
+
+/// 「应用」：哪些 app 关掉最后一个窗口、切走之后替它退出（docs/monitors.md「关窗自动退出」）。存 bundle id 不存路径，app 搬家、改名不受影响。
+struct AppsSettings: View {
+    var watcher = AutoQuitWatcher.shared
+    var preferences = PreferencesStore.shared
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("没有窗口时自动退出", isOn: preferenceToggle(\.autoQuitEnabled))
+                if preferences.prefs.autoQuitEnabled, !watcher.trusted {
+                    HStack {
+                        Text("要辅助功能权限才能数窗口：系统设置 → 隐私与安全性 → 辅助功能，勾上 Tally")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("去授权") { watcher.requestTrust() }
+                    }
+                }
+            } footer: {
+                Text("macOS 关掉 app 的最后一个窗口不会退出它，预览、文本编辑这类看完就关的会一直留在 Dock 里。开着时，下面列表里的 app 没有窗口、也不在前台，连续两次 3 秒采样都这样就替它 ⌘Q：有没保存的内容对方照常弹保存，不强杀。最小化的窗口算有窗口；关完最后一个窗口还停在它上面不退，切走才退。数窗口要辅助功能权限，只在列表里有 app 在跑时每 3 秒问一次窗口个数，不读标题与内容、不监听键盘；列表里的 app 都没在跑时没有任何定时器。")
+            }
+            Section {
+                if preferences.prefs.autoQuitApps.isEmpty {
+                    Text("还没有要盯的 app").foregroundStyle(.secondary)
+                }
+                ForEach(preferences.prefs.autoQuitApps, id: \.self) { id in
+                    let installed = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+                    HStack(spacing: 8) {
+                        Image(nsImage: installed.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSWorkspace.shared.icon(for: .application))
+                            .resizable()
+                            .frame(width: 18, height: 18)
+                        Text(installed.map { FileManager.default.displayName(atPath: $0.path) } ?? id)
+                        if installed != nil {
+                            Text(id).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button { preferences.prefs.autoQuitApps.removeAll { $0 == id } } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("移除")
+                    }
+                }
+                Menu("添加…") {
+                    ForEach(addable, id: \.processIdentifier) { app in
+                        Button { add(app.bundleIdentifier) } label: {
+                            Label {
+                                Text(app.localizedName ?? app.bundleIdentifier ?? "")
+                            } icon: {
+                                Image(nsImage: app.icon ?? NSWorkspace.shared.icon(for: .application))
+                            }
+                        }
+                    }
+                    if !addable.isEmpty { Divider() }
+                    Button("选择 .app 文件…") { chooseApp() }
+                }
+            } header: {
+                Text("盯这些 app")
+            } footer: {
+                Text("「添加」里列的是现在在跑、Dock 里看得见的 app；没在跑的用「选择 .app 文件…」。")
+            }
+        }
+        .onAppear { watcher.refreshTrust() }
+    }
+
+    /// 在跑、Dock 里看得见、还没在列表里的；排掉 Tally 自己（开着设置窗口时它也是 regular）。
+    private var addable: [NSRunningApplication] {
+        let listed = Set(preferences.prefs.autoQuitApps)
+        return NSWorkspace.shared.runningApplications
+            .filter { app in
+                guard app.activationPolicy == .regular, let id = app.bundleIdentifier else { return false }
+                return id != Bundle.main.bundleIdentifier && !listed.contains(id)
+            }
+            .sorted { ($0.localizedName ?? "").localizedStandardCompare($1.localizedName ?? "") == .orderedAscending }
+    }
+
+    private func add(_ id: String?) {
+        guard let id, !preferences.prefs.autoQuitApps.contains(id) else { return }
+        preferences.prefs.autoQuitApps.append(id)
+    }
+
+    /// 选一个 .app，拿它的 bundle id；选的不是 app 包（没有 bundle id）就什么都不加。
+    private func chooseApp() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.prompt = "盯这个"
+        panel.message = "选一个 app：它关掉最后一个窗口、切走之后自动退出"
+        guard NotchPanel.steppingAside({ panel.runModal() }) == .OK, let url = panel.url else { return }
+        add(Bundle(url: url)?.bundleIdentifier)
     }
 }
 

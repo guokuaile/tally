@@ -15,7 +15,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
-// Tally 改动：去掉 Defaults 与远程拉取（含 merge），只读 bundle 里的 pricing.json；日志走 Log；模型 id 尾部的 [1m] 去掉再查表。
+// Tally 改动：去掉 Defaults 与远程拉取（含 merge），只读 bundle 里的 pricing.json；日志走 Log；模型 id 尾部的 [1m] 去掉再查表；
+// 表按小写 id 建索引，解析结果按模型 id 记住（含没定价的），两家 provider 并发调所以加锁。
 
 import Foundation
 
@@ -91,26 +92,40 @@ final class ModelPricingManager {
     static let shared = ModelPricingManager()
 
     private(set) var pricingData: ModelPricingData?
+    /// 表按小写 id 建一次索引：原来每个候选键都把 99 行 id 各 lowercased 一遍再线性找。重复 id 取第一行，和原来 `first(where:)` 一致。
+    private let byLowercasedID: [String: ModelPriceEntry]
+    /// 同一个模型 id 解析过一次就记住，没定价的也记（值为 nil）：一轮刷新给三万条记录算费用，不同的 id 不到十个，
+    /// 不记的话每条记录都要跑三次正则生成候选键再查表，实测两家各 0.7 秒、峰值内存多两三百 MB。两家 provider 在不同线程调，所以加锁。
+    private var resolved: [String: ResolvedModelRates?] = [:]
+    private let resolvedLock = NSLock()
 
-    private init() {
-        loadInitialPricing()
+    private convenience init() {
+        self.init(pricingData: Self.loadBundledPricing())
     }
 
     /// 测试可以塞一张表进来。
     init(pricingData: ModelPricingData?) {
         self.pricingData = pricingData
+        var index: [String: ModelPriceEntry] = [:]
+        for model in pricingData?.models ?? [] where index[model.id.lowercased()] == nil {
+            index[model.id.lowercased()] = model
+        }
+        byLowercasedID = index
     }
 
-    private func loadInitialPricing() {
+    /// 测试用：记住了几个 id。
+    var resolvedCount: Int { resolvedLock.withLock { resolved.count } }
+
+    private static func loadBundledPricing() -> ModelPricingData? {
         guard let localURL = Bundle.main.url(forResource: "pricing", withExtension: "json") else {
             Log.error("ModelPricingManager: bundle 里没有 pricing.json")
-            return
+            return nil
         }
         do {
-            let data = try Data(contentsOf: localURL)
-            self.pricingData = try JSONDecoder().decode(ModelPricingData.self, from: data)
+            return try JSONDecoder().decode(ModelPricingData.self, from: Data(contentsOf: localURL))
         } catch {
             Log.error("ModelPricingManager: pricing.json 解析失败: \(error)")
+            return nil
         }
     }
 
@@ -128,9 +143,17 @@ final class ModelPricingManager {
     /// table has no entry for; those stay unpriced and are surfaced explicitly in the
     /// UI rather than shown as a misleading "$0.00".
     func getPricing(for modelId: String) -> ResolvedModelRates? {
-        guard let models = pricingData?.models else { return nil }
+        resolvedLock.withLock {
+            if let cached = resolved[modelId] { return cached }
+            let rates = resolve(modelId)
+            resolved[modelId] = .some(rates)
+            return rates
+        }
+    }
+
+    private func resolve(_ modelId: String) -> ResolvedModelRates? {
         for key in Self.pricingKeyCandidates(for: modelId) {
-            guard let model = models.first(where: { $0.id.lowercased() == key }) else { continue }
+            guard let model = byLowercasedID[key] else { continue }
             let prompt = model.pricing.promptPrice
             let completion = model.pricing.completionPrice
             // Skip placeholder/incomplete rows (present in the sparse bundled fallback):

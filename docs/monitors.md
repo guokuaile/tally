@@ -1,6 +1,6 @@
 # 常驻监听与小工具
 
-> 面板之外、跟着设置开关起停的几样：保持唤醒、电池事件、摄像头 / 麦克风占用、截屏隐藏、文件架、菜单栏小恐龙。关掉的一样不起监听、不占内存；开关在设置窗口的「面板」「提示」「文件架」三项里（悬停展开见 [panel.md](panel.md)）。
+> 面板之外、跟着设置开关起停的几样：保持唤醒、电池事件、摄像头 / 麦克风占用、截屏隐藏、文件架、菜单栏小恐龙、关窗自动退出。关掉的一样不起监听、不占内存；开关在设置窗口的「面板」「提示」「文件架」「应用」四项里（悬停展开见 [panel.md](panel.md)）。
 
 ## 起停
 
@@ -16,6 +16,7 @@
 | 「文件架」页 | 多一颗页签，面板根视图注册文件拖放 | 页签没了、拖放不注册、索引与缩略图放掉；磁盘上的副本不动（[shelf.md](shelf.md)） |
 | 刘海小人 | `CrewController` 订阅会话变化、建两翼窗口、起 20 fps 时钟（减少动态效果 / 屏幕熄灭 / 会话不活跃时停，低电量 10 fps），见 [crew.md](crew.md) | 两翼 `orderOut`、时钟停、不发工牌；名册不再算 |
 | 「合盖也不休眠」胶囊 | `sudo -n pmset -a disablesleep 1`（第一次要先装免密规则，输一次密码） | 立刻抹回 0，不弹框；退出 app、保持唤醒到期同样抹回 |
+| 没有窗口时自动退出 | `AutoQuitWatcher` 挂 app 启停通知；列表里有 app 在跑时起 3 秒采样定时器 | 摘掉通知、停定时器、采样状态清零 |
 
 ## 保持唤醒（`KeepAwake`）
 
@@ -91,12 +92,23 @@
 - **采样**：每 2 秒只读 CPU tick、`host_statistics64`、内存压力（`SystemSampler.sampleLoad`），不读电池、磁盘、进程排行；和系统页的采样各跑各的。CPU 第一次采样没有差分，等下一轮，这 2 秒里只有恐龙没有蛋；之前有过读数、后来 CPU 或内存读不到了，旁边的数字和悬停提示换成「—」、蛋拿掉、恐龙睡下并记日志，不让旧读数和冲刺的样子一直挂着——空蛋看着像内存很闲，没有蛋才是「不知道」（点它照常展开面板；全屏隐藏期间和 ⌥⇧T 一样不展开）。两个定时器都挂 `.common`，拖东西、开菜单时照走。
 - **停表**：屏幕睡眠、切走用户会话时停换帧、采样推到很远；回来立刻采一次再起。关掉开关撤掉图标、停掉定时器、帧图放掉。
 
+## 关窗自动退出（`AutoQuitWatcher` + `AutoQuitRule`）
+
+设置「应用 → 没有窗口时自动退出」，默认关；列表默认只有预览（`com.apple.Preview`）。macOS 关掉 app 的最后一个窗口不退出它，预览、文本编辑这类看完就关的 app 一直留在 Dock 里；早年它们声明 `NSSupportsAutomaticTermination` 由系统悄悄回收，macOS 26 / 27 的预览已经不带这个键，只能自己退。
+
+- **起停**：开着且列表非空才挂 `NSWorkspace` 的 `didLaunchApplication` / `didTerminateApplication`；列表里有 app 在跑才起 3 秒定时器（`tolerance` 0.5），全退了就停。列表里的 app 没在跑时零开销：没有定时器、没有轮询。`apply` 幂等，设置每次变化都调。
+- **数窗口走辅助功能 API**（`AXUIElementCopyAttributeValue` 取 `kAXWindows`），每次采样问一次个数，不挂 `AXObserver`、不读窗口标题与内容、不监听键盘。CGWindowList 不要权限但分不出「最小化的真窗口」和「从未显示过的隐藏窗」：两者属性完全一样（都没有 `kCGWindowIsOnscreen`，层级、透明度、内存占用一致），预览没内容时它仍报 5 个 layer 0 窗口（4 条 1512 × 33 的菜单栏条、1 个 500 × 500 的隐藏窗）。实测 AX 的口径：已显示 1、最小化 1、⌘H 隐藏 1、从未 `orderFront` 过的 0、`orderOut` 后 0，正是要的语义；Finder 的桌面也算一个窗口，把 Finder 加进列表也永远不会退。给元素设 1 秒 `AXUIElementSetMessagingTimeout`：对方卡死时别把 Tally 主线程一起拖住；拿不到（没权限、没响应）这一轮不算。
+- **判定**（`AutoQuitRule.shouldQuit`，纯函数）：窗口数为 0、不在前台（`NSRunningApplication.isActive` 假）、且上一次采样也为 0，三者同时成立才 `terminate()`——等于 ⌘Q，对方可以弹保存、可以拒绝，不强杀。「不在前台」防关完最后一张图正要 ⌘O 时被抢；「连续两次」滤掉关窗动画期间的瞬时零，也给刚启动、窗口还没出来的 app 留 3 到 6 秒。还没 `isFinishedLaunching` 的跳过。「打开」对话框本身是个窗口，开着时不退。
+- **权限**：每次采样先问 `AXIsProcessTrusted()`，没勾就什么都不做；设置页开关开着而没勾时出一行橙字加「去授权」（`AXIsProcessTrustedWithOptions` 带提示：系统弹框并把 Tally 加进「辅助功能」列表，人勾一下）。勾完不用重启，下一次采样就生效。Tally 用固定的「Tally Dev」自签证书，重编译不换代码身份，勾一次长期有效。这是 Tally 唯一一处辅助功能用法，README「权限与隐私」照实写。
+- **设置页**：侧栏「功能」组的「应用」。开关一节；列表一节：每行图标 + 名字（`NSWorkspace.urlForApplication(withBundleIdentifier:)` 找到的那份的 Finder 显示名，没装的只显示 bundle id）+ 「移除」；「添加」菜单列当前在跑的 regular app（Dock 里看得见的，排掉 Tally 自己和已在列表里的），底下一条「选择 .app 文件…」开 `NSOpenPanel`（只认 `.application`，默认指到 `/Applications`，包在 `NotchPanel.steppingAside` 里）。开关关着列表照样能编辑。存的是 bundle id 不存路径：app 搬家、改名不受影响；解码时去空白、去重、保持顺序（`Preferences.autoQuitList`）。
+
 ## 验证
 
 ```bash
-swift test --filter 'BatteryRuleTests|KeepAwakeTests|LidSleepBlockerTests|PrivacyWatcherTests|PreferencesTests|SwipeTests'
+swift test --filter 'BatteryRuleTests|KeepAwakeTests|LidSleepBlockerTests|PrivacyWatcherTests|PreferencesTests|SwipeTests|AutoQuitRuleTests'
 pmset -g assertions | grep -i tally     # 点了杯子之后应有一行 Tally：保持唤醒，勾了屏幕常亮是 PreventUserIdleDisplaySleep
 pmset -g | grep -i sleepdisabled        # 开了「合盖也不休眠」是 1；关掉后 5 秒内这一行消失
+open -a Preview <任意图片>; sleep 2; pgrep -x Preview   # 之后 ⌘W 关掉、切到别的 app，3 到 6 秒内再 pgrep 应为空（开关开着、辅助功能勾了）
 ```
 
-用例：电池规则五条（首读不报、接拔电、阈值每次放电只报一次且一次跨两个只报最低、充满只在充电之后）、断言起停（定时有到期时刻、不限时没有、重复 stop 无害）、自定义档能落盘且右键菜单的勾落在它上面、步进夹在 15 分钟到 24 小时之间、免密规则文本（三条命令逐字、先 `visudo -c`、验不过连临时文件一起收）与 `pmset -g` 的 `SleepDisabled` 解析、真机挂上内建麦克风与摄像头各 ≥ 1 且关掉清零（没设备跳过）、六个开关缺键取默认且截屏隐藏默认关、提示映射。手动：合盖前点杯子看 `pmset`；第一次开「合盖也不休眠」输一次密码，之后 `sudo -n -l /usr/bin/pmset -a disablesleep 1` 退出码是 0、`pmset -g | grep -i sleepdisabled` 是 1，合盖十分钟再打开机器没睡（`pmset -g log | grep -i sleep` 里没有 clamshell 休眠）；关掉立刻回 0 且**不再弹框**，再开也不弹；`pkill -x Tally` 之后回 0；`pkill -9 -x Tally` 会留下 1，下次启动 Tally 自动抹掉；设置里取消「免密规则」后那条 `sudo -n -l` 又变成非 0；拔电源看提示条；开 FaceTime 展开面板看标题行的绿点；设置里关「截屏隐藏」再截图能拍到面板、开了拍不到。
+用例：退出判定（有窗口不退、在前台不退、首次为零不退、连续两次为零且不在前台才退）、监控列表清洗（去空白、去重、保序）与默认值（关、只有预览）、watcher 起停（开着挂通知、列表里没在跑的不起定时器、关掉或列表为空全摘）、辅助功能数窗口在自己进程上的口径（显示 +1、最小化不变、关掉回原值；xctest 要先 `finishLaunching` 自己进程的辅助功能服务才应答；跑测试的进程没权限则跳过）、电池规则五条（首读不报、接拔电、阈值每次放电只报一次且一次跨两个只报最低、充满只在充电之后）、断言起停（定时有到期时刻、不限时没有、重复 stop 无害）、自定义档能落盘且右键菜单的勾落在它上面、步进夹在 15 分钟到 24 小时之间、免密规则文本（三条命令逐字、先 `visudo -c`、验不过连临时文件一起收）与 `pmset -g` 的 `SleepDisabled` 解析、真机挂上内建麦克风与摄像头各 ≥ 1 且关掉清零（没设备跳过）、六个开关缺键取默认且截屏隐藏默认关、提示映射。手动：合盖前点杯子看 `pmset`；第一次开「合盖也不休眠」输一次密码，之后 `sudo -n -l /usr/bin/pmset -a disablesleep 1` 退出码是 0、`pmset -g | grep -i sleepdisabled` 是 1，合盖十分钟再打开机器没睡（`pmset -g log | grep -i sleep` 里没有 clamshell 休眠）；关掉立刻回 0 且**不再弹框**，再开也不弹；`pkill -x Tally` 之后回 0；`pkill -9 -x Tally` 会留下 1，下次启动 Tally 自动抹掉；设置里取消「免密规则」后那条 `sudo -n -l` 又变成非 0；拔电源看提示条；开 FaceTime 展开面板看标题行的绿点；设置里关「截屏隐藏」再截图能拍到面板、开了拍不到；「应用」页开开关、勾辅助功能后，预览开一张图再 ⌘W、切走，3 到 6 秒内 Dock 小圆点消失，最小化、开着「打开」对话框、停在预览前台时都不退，关掉开关后 `pgrep` 预览照常留着。

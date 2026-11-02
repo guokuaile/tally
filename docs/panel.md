@@ -109,7 +109,7 @@ open -a Tally --args --demo --open network    # 静态截图：钉住展开到�
 
 `SettingsWindowController`：700 × 540、可竖向拉伸的普通窗口，打开时 app 切成常规激活策略（Toggle 才能接键盘和点击），关窗切回附件型；打开前先收起面板，否则被面板盖住——收起放在 `SettingsWindowController.show()` 里（`willShow`），不放在某个入口上：⌘, 在设置窗口已经是 key 时走的是主菜单的「设置…」，不经过面板的键盘监视器，原来只有面板入口收起面板，这条路上面板就一直盖在设置窗口前面（钉住面板 + 设置窗口开着时合成一次 ⌘, 复现过）。入口：面板齿轮、右键菜单、主菜单 / ⌘,、`--open settings`、首次启动指引的「去装 hook」（`show(section: .hooks)`）。选中项放在控制器持有的 `SettingsSelection`（`@Observable`）里而不是视图的 `@State`，窗口已经开着时 `show(section:)` 也跳得过去；不带参数的 `show()` 停在上次那一页。
 
-版式照 Atoll / 系统设置（`SettingsWindowView`）：`NavigationSplitView`，左边侧栏 `List(.sidebar)`，每行是带渐变底的 24pt 圆角方块图标 + 名字，七项分四组——「通用」「面板」不带组头，「功能」下「提示」「文件架」，「数据」下「hook」「用量」，「关于」单独在底部不带组头；右边是当前项的 `Form`（`.formStyle(.grouped)` 在根上设一次），每个开关一节、解释放节脚注。各项内容：
+版式照 Atoll / 系统设置（`SettingsWindowView`）：`NavigationSplitView`，左边侧栏 `List(.sidebar)`，每行是带渐变底的 24pt 圆角方块图标 + 名字，十项分四组——「通用」「面板」不带组头，「功能」下「提示」「文件架」「音乐」「应用」，「AI」下「AI 会话」「hook」「用量」，「关于」单独在底部不带组头；右边是当前项的 `Form`（`.formStyle(.grouped)` 在根上设一次），每个开关一节、解释放节脚注。各项内容：
 
 | 项 | 内容 |
 |---|---|
@@ -118,6 +118,7 @@ open -a Tally --args --demo --open network    # 静态截图：钉住展开到�
 | AI 会话 | 会话快捷键、已关闭会话、刘海小人、工牌与可选文案主题、会话提示及配额提醒，见 [crew.md](crew.md) |
 | 提示 | 电池提示、没有刘海屏时改发系统通知、摄像头 / 麦克风占用点 |
 | 文件架 | 开关、新截图自动放进来（开的时候选截图文件夹）、保留多久（文件默认 1 天、截图默认 30 分钟，到点清）、存放位置（在访达中显示）、已暂存几项、清空（[shelf.md](shelf.md)） |
+| 应用 | 「没有窗口时自动退出」开关（开着而没勾辅助功能时橙字加「去授权」）、监控列表（图标 + 名字 + 移除）、「添加」菜单（在跑的 app / 选 .app 文件），见 [monitors.md](monitors.md)「关窗自动退出」 |
 | hook | 两侧 hook 行（状态 + 安装 / 移除，见 [hooks.md](hooks.md)） |
 | 用量 | 各家提供方开关；DeepSeek、Kimi、GLM、New API 每家一节：开关、现在用的是哪份凭据（手填 / Claude Code 设置 / Kimi Code / zcode / opencode）、手填的 key 与区（New API 是站点地址、访问令牌、用户 ID）、「现在查一次」（只重查这一家，不占 60 秒节流），见 [ai.md](ai.md)「国内几家与 New API」 |
 | 关于 | 原「帮助」页：48pt 图标、「Tally」24pt、版本行读 `CFBundleShortVersionString`、「本应用由「Guokuaile」个人开发并所有」、个人开发者及隐私声明（不列移植模块）；版本与作者之间显示喜狮图案（160pt）及「喜狮护航 · 用量有数」：原图是白底黑线稿，缩到 480px、按亮度转成透明底（亮度 235 以上当白底），产物 `Resources/about/mascot.png` 进仓库、打包时拷进 app；界面按模板图着色，深浅色模式都跟着文字色——直接放白底原图，深色模式下是一整块白方块。辅助功能读「喜狮图案」；下面两段短说明：装 hook、卸载（面板怎么用、数据从哪来在界面上一看就知道，不写） |

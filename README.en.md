@@ -32,7 +32,7 @@ With several Claude Code / Codex sessions open you keep switching windows to see
 - **Every provider side by side**: Claude, Codex, Cursor and Antigravity, plus DeepSeek, Kimi, Zhipu GLM and New API relays; Claude and Codex also show today / this week's spend and a pace line that tells you whether you'll run out before the reset, with alerts at 80% and when a quota is exhausted.
 - **Local, native, dependency-free**: SwiftUI + AppKit; reads the tokens each tool already stored, read-only (never refreshes them, never writes to the Keychain); no telemetry.
 
-Also on board: network throughput and proxy status, memory and battery, running apps, a file shelf, keep-awake (including with the lid closed), and an optional menu bar dinosaur.
+Also on board: network throughput and proxy status, memory and battery, running apps, a file shelf, keep-awake (including with the lid closed), auto-quit for apps that linger in the Dock after their last window closes (Preview and the like), and an optional menu bar dinosaur.
 
 ## How Tally compares
 
@@ -168,8 +168,9 @@ Other terminals show a "window not found" message. Resume opens a new window in 
 - **Keychain**: login credentials are read-only, fetched with the system `security` tool, normally without a prompt. Codex, Cursor and Antigravity normally read local files or a local service; the Keychain is only their fallback.
 - **Notifications**: asked only when there is no notch display (lid closed with external displays) and the first alert needs to go out.
 - **Folder access**: turning on "add new screenshots to the shelf" asks you to pick the screenshot folder once; the Desktop is privacy-protected and that pick is the grant, with no further prompt.
+- **Accessibility**: only for "quit when no windows are left". Counting a target app's remaining windows needs the Accessibility API (CGWindowList can't tell a minimized window from an app's own hidden windows); once the switch is on, the settings page offers a "去授权" (Grant) button that takes you to System Settings → Privacy & Security → Accessibility. Tally only counts windows; it never reads titles or contents and never listens to the keyboard.
 
-**Never requested**: screen recording, camera, microphone (the in-use dots only read device state), Accessibility, location, Full Disk Access.
+**Never requested**: screen recording, camera, microphone (the in-use dots only read device state), location, Full Disk Access.
 
 **Data**: sessions, usage statistics and settings stay on your Mac. No telemetry, no auto-update. Every outbound connection is in the table below, and each row can be switched off. Quota lookups run every 5 minutes (also when the panel opens or you refresh by hand, never twice within 60 s; a 429 backs off per endpoint). Tokens and keys travel only to the provider they belong to, never through any other server.
 

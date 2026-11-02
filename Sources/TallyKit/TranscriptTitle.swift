@@ -162,10 +162,16 @@ public enum TranscriptTitle {
     public static func isInteractive(transcript url: URL, provider: String) -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         if provider == "codex" {
-            return !(head(of: url).map(isScriptedCodexHead) ?? false)
+            return !isScriptedCodex(rollout: url)
         }
         guard let tail = tail(of: url) else { return true }
         return tail.text.contains("\"entrypoint\":\"cli\"") || !tail.text.contains("\"entrypoint\":\"sdk-cli\"")
+    }
+
+    /// rollout 是不是脚本跑的（`codex exec`、子 agent）：hook 每个事件都判一次给 `SessionRecord.scripted`，第一行 `session_meta`
+    /// 在 SessionStart 前就写好了。读不到按不是算。
+    public static func isScriptedCodex(rollout url: URL) -> Bool {
+        head(of: url).map(isScriptedCodexHead) ?? false
     }
 
     /// rollout 第一行带着整段系统提示（实测两万字节上下），`source` 在前几百字节；只找子串不整行解析，第一行被 64 KB 截断也认得出。

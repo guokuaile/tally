@@ -47,7 +47,7 @@ mood 变了该槽的片段从头播。六个状态都循环自己的片段，完
 - 排序：mood 升序；等审批、等输入的项目按开始等的时刻正序（等得最久的最靠刘海，和 AI 页等你组、⌘1 一致：被忘掉的那条才该最显眼），其余 mood 按最近 `updatedAt` 倒序。
 - 槽位（浮动交界）：两家都在用时 Claude 一块在左、Codex 一块在右，两块相邻；各家都不超过 `perSide` 时交界就是刘海（3 + 3 就是左三个 Claude、右三个 Codex），一家超过就把交界往对面推，多出来的占对面翼贴刘海的格（5 Claude + 1 Codex：左翼三个 Claude，右翼贴刘海两格也是 Claude，Codex 在右翼最外）。每块里按离刘海由近到远放最急到最闲，同距先放自己那边。只用一家时不分边，按急缓围着刘海左右交替（最急的在右翼贴刘海那格，第二急的在左翼贴刘海那格，之后右、左、右、左）。
 - 溢出：项目数超过 `2 × perSide` 时按急缓砍最闲的（不分工具），只显示前 `2 × perSide − 1` 个，空出的那一翼最外格换成「+N」胶囊（`CrewLayout.overflowSide`；只用一家时固定在左翼），N = 项目数 − (2 × perSide − 1)，连被胶囊顶掉的那一个一起数。翼宽按实际占用算，不按 `perSide`。
-- 新会话（工牌用）：按提供方和会话 id 判断，只有启动 10 秒之后首次出现的会话进工牌；同项目的新会话也发，刷新同一会话不重复。启动和工牌开关重开时的首份快照只记不发。
+- 新会话（工牌用）：按提供方和会话 id 判断，只有启动 10 秒之后首次出现的会话进工牌；同项目的新会话也发，刷新同一会话不重复。脚本会话（记录里 `scripted` 为 true：`claude -p` / SDK、`codex exec`、Codex 子 agent，ai.md 字段表）不进工牌，入职、返聘、离职都不发。启动和工牌开关重开时的首份快照只记不发。
 
 ## 翅膀（`CrewGeometry` + `CrewPanel`）
 
@@ -74,11 +74,11 @@ mood 变了该槽的片段从头播。六个状态都循环自己的片段，完
 
 ## 工牌（`Peek.style = .badge`）
 
-工牌和小人分别开关；工牌设置可控制停留秒数、刘海左侧或右侧挂点及卡片左上角的自定义名称（默认「员工证」）。挂点贴近刘海边缘，卡片略倾斜并摆入。会话首次出现显示「已入职」，接着聊的会话（记录里 `resumed` 为 true，见 ai.md 字段表）和从已关闭恢复的显示「已返聘」（`codex resume` 的临时条目先显示返聘，同进程、同 tty 的真实会话到达后不重复发牌；选择器等无法确认恢复意图时，仍可能先出入职再出返聘），从活跃变为已关闭显示「已离职」；普通回合完成后继续运行不算返聘。工牌关闭时清除已排队和显示中的工牌，重新开启时先记录当前会话，不补发。关闭小人不影响工牌。
+工牌和小人分别开关；工牌设置可控制停留秒数、刘海左侧或右侧挂点及卡片左上角的自定义名称（默认「员工证」）。挂点贴近刘海边缘，卡片略倾斜并摆入。会话首次出现显示「已入职」，接着聊的会话（记录里 `resumed` 为 true，见 ai.md 字段表）和从已关闭恢复的显示「已返聘」（`codex resume` 的临时条目先显示返聘，同进程、同 tty 的真实会话到达后不重复发牌；选择器等无法确认恢复意图时，仍可能先出入职再出返聘），从活跃变为已关闭显示「已离职」；普通回合完成后继续运行不算返聘。脚本会话（`scripted`，ai.md 字段表）一张都不发：Codex 开子 agent 评测时一分钟起落七回，发了就是七对入职离职在刘海上来回跳。工牌关闭时清除已排队和显示中的工牌，重新开启时先记录当前会话，不补发。关闭小人不影响工牌。
 
 刘海边缘垂出浅色工牌：两条印有 Tally 的挂带连接卡片，整张工牌从挂点摆入并回到微斜的位置。卡片显示动态小刻肖像、按会话稳定选出的花名和头像配色，以及部门（目录名加「项目组」）、岗位（应用及模型）；喜欢、不喜欢、口头禅、小秘密用语意完整、标点自然的幽默短句，结合网络梗与典故，默认从通用文案中选；设置可额外多选开发、写作、设计、数据主题，通用池始终参与且每项至少占一半选择权，不猜会话职业。花名和四类文案按会话 ID 加字段标识稳定选择（不调用模型、不额外存盘）；主题组合不变时入职、返聘和离职保持一致，修改主题后可能重新分配，随后大号印章以放大回弹的方式倾斜盖在肖像右下偏中位置，透明底配彩色文字与方角双层边框，空白处透出肖像与工牌，入职和返聘为朱红、离职为灰蓝；底部装饰条码加高，线条与间隔粗细不等。肖像复用在跑片段，仅在工牌可见期间播放；离职肖像及其底色去饱和。六项资料的字段名始终显示，字段值依次从左向右逐字出现，约 1.6 秒内全部显示；完整文字预留排版空间，避免工牌抖动；减少动态效果时直接显示静态文字和肖像。工牌只在可见卡片和挂带内接收点击，入场约 1.5 秒为摆动留额外命中范围，结束后收紧；鼠标位置的监视仅在交互式工牌可见期间存在。工牌使用独立高度，队列根据内建屏可用高度限制同时展示的提示，放不下的排队；屏幕变小时尾部放不下的提示回队列。入职和返聘点击按「点提示条时」设置处理并指向会话；离职不可点击。过期与去重规则不变。
 
-发牌的是 `NotchController` 观察会话快照：第一份快照整个记住不发（启动、工牌开关关掉再打开都算第一份），启动前 10 秒的变化只记不发。`SessionStore` 把确认关闭但不保留的记录也交给工牌判断；会话未生成 transcript 就结束时，hook 将状态文件原子移为带唯一标识的一次性 `.tally-end` 文件，读取后删除；同一会话已重新出现时忽略旧结束记录，不加入已关闭列表；短暂读不到记录不算离职。进程内保留最多 500 条已消失的会话身份；接着聊的老会话靠记录里的 `resumed` 认返聘，不依赖这份记忆，记录早被清理、Tally 重启过都认得出。面板展开或全屏隐藏期间出现的会话不补发；工牌依次显示，普通提示不挤走挂点。
+发牌的是 `NotchController` 观察会话快照：第一份快照整个记住不发（启动、工牌开关关掉再打开都算第一份），启动前 10 秒的变化只记不发。`SessionStore` 把确认关闭但不保留的记录也交给工牌判断；会话未生成 transcript 就结束时，hook 将状态文件原子移为带唯一标识的一次性 `.tally-end` 文件，读取后删除（它就是原状态文件，`scripted` 跟着过去，脚本会话的离职同样不发）；同一会话已重新出现时忽略旧结束记录，不加入已关闭列表；短暂读不到记录不算离职。进程内保留最多 500 条已消失的会话身份；接着聊的老会话靠记录里的 `resumed` 认返聘，不依赖这份记忆，记录早被清理、Tally 重启过都认得出。面板展开或全屏隐藏期间出现的会话不补发；工牌依次显示，普通提示不挤走挂点。
 
 ## 设置
 
@@ -107,10 +107,12 @@ open -a Tally --args --demo && sleep 12 && screencapture -R500,0,520,32 -x /tmp/
 P=$(pgrep -n -x Tally); top -l 31 -s 1 -pid $P -stats pid,cpu | awk -v pid=$P '$1 == pid {print $2}' | tail -n 30 | awk '{s+=$1} END {print s/NR}'   # 六个角色 ≤ 3（$1 == pid 只留进程行：top 每轮前有一行日期，按 /^[0-9]/ 过滤会把「14:29:07」当 14 算进平均）
 open -a Tally --args --demo --crew-overflow   # 右翼最外「+3」，角色 5 个
 open -a Tally --args --demo --peek-test       # 首批三条里有一张工牌
-# 返聘工牌真机验：claude -p 也触发 SessionStart / SessionEnd hook，不用起交互会话。继承的 CLAUDE* 变量要清掉并设 CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1，否则第一轮不存 transcript、第二轮接不上；面板展开着不发牌，拍之前别悬停
-SID=$(uuidgen | tr A-Z a-z); CLEAN=(env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1)
-"${CLEAN[@]}" claude -p --session-id $SID --model haiku 'Reply with the single word ok' < /dev/null; sleep 9   # 入职、离职各一张（-p 是脚本会话，结束走 .tally-end）
-"${CLEAN[@]}" claude -p --resume $SID --model haiku 'Reply with the single word ok' < /dev/null & sleep 2; screencapture -R560,0,760,430 -x /tmp/tally-badge.png; wait   # 「返聘工牌 · 已返聘」
+# 脚本会话不发牌的真机验：claude -p 也触发 SessionStart / SessionEnd hook，但 Claude Code 把 CLAUDE_CODE_ENTRYPOINT 设成 sdk-cli，codex exec 的 rollout 头是 source exec，hook 写出的记录 scripted 为 true。
+# 继承的 CLAUDE* 变量要清掉；会话目录指到临时目录，不惊动正在跑的 Tally（它只读真目录，所以这两轮刘海上什么都不该出现）
+D=$(mktemp -d); env $(env | sed -n 's/^\(CLAUDE[A-Z_]*\)=.*/-u \1/p') TALLY_SESSIONS_DIR=$D claude -p --model haiku 'Reply with the single word ok' < /dev/null; grep -l '"scripted":true' $D/*.tally-end
+D=$(mktemp -d); TALLY_SESSIONS_DIR=$D codex exec 'Reply with the single word ok' < /dev/null; grep -l '"scripted":true' $D/*.tally-end
+# 返聘工牌要交互会话才验得到：终端里 claude，/exit 后 claude --resume <session_id>（id 是 ~/.claude/projects 下那个 jsonl 的文件名），开起来 2 秒内拍；面板展开着不发牌，拍之前别悬停
+screencapture -R560,0,760,430 -x /tmp/tally-badge.png   # 「返聘工牌 · 已返聘」
 ```
 
 - 截图里两翼与刘海无缝、六个状态肉眼可分（「!」、歪头「?」、三小球、合眼、灰）；等久了两档也要看得出：infra 橙光晕，shop-web 灰身红光晕（和 docs-site 的失联灰比，多一圈红）。
