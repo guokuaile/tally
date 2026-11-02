@@ -9,7 +9,7 @@ final class HookDecisionTests: XCTestCase {
     }
 
     func testSessionStartAndUserPromptSubmitWriteRunning() {
-        XCTAssertEqual(decide("SessionStart", ["start_reason": "compact"]), .write(state: .running, message: nil))
+        XCTAssertEqual(decide("SessionStart", ["source": "compact"]), .write(state: .running, message: nil))
         XCTAssertEqual(decide("UserPromptSubmit", existing: .state("done")), .write(state: .running, message: nil))
     }
 

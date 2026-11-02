@@ -148,6 +148,38 @@ final class PillQueuePeekTests: XCTestCase {
         XCTAssertEqual(lifecycle.update([first], emit: true).map(\.0), [.returned])
     }
 
+    func testBadgeLifecycleTreatsResumedUnknownSessionAsReturned() {
+        var lifecycle = BadgeLifecycle()
+        XCTAssertTrue(lifecycle.update([record("a")], emit: true).isEmpty)
+        var resumed = record("old")
+        resumed.resumed = true
+        XCTAssertEqual(lifecycle.update([record("a"), resumed], emit: true).map(\.0), [.returned])
+        XCTAssertTrue(lifecycle.update([record("a"), resumed], emit: true).isEmpty)
+        resumed.state = .ended
+        XCTAssertEqual(lifecycle.update([record("a"), resumed], emit: true).map(\.0), [.departed])
+        resumed.state = .running
+        XCTAssertEqual(lifecycle.update([record("a"), resumed], emit: true).map(\.0), [.returned])
+        var endedResumed = record("gone")
+        endedResumed.resumed = true
+        endedResumed.state = .ended
+        XCTAssertTrue(lifecycle.update([record("a"), resumed, endedResumed], emit: true).isEmpty)
+    }
+
+    func testProvisionalHandoffDoesNotSwallowResumedCodexSession() {
+        let process = CodexPendingProcess(pid: 42, started: 1_000_000, tty: "ttys010", cwd: "/repo")
+        var real = record("real", provider: "codex")
+        real.pid = 42
+        real.tty = "ttys010"
+        real.resumed = true
+        var tracker = BadgeLifecycle()
+        XCTAssertTrue(tracker.update([], emit: true).isEmpty)
+        XCTAssertEqual(tracker.update([process.record()], emit: true).map(\.0), [.joined])
+        XCTAssertEqual(tracker.update([real], emit: true).map(\.0), [.returned])
+        XCTAssertTrue(tracker.update([real], emit: true).isEmpty)
+        real.state = .ended
+        XCTAssertEqual(tracker.update([real], emit: true).map(\.0), [.departed])
+    }
+
     func testProvisionalHandoffRequiresUniquePIDAndTTY() {
         let process = CodexPendingProcess(pid: 42, started: 1_000_000, tty: "ttys010", cwd: "/repo")
         let placeholder = process.record()

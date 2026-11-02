@@ -35,6 +35,9 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
     public var updatedAt: Double
     /// 会话在用的模型 id，如 `claude-opus-5`、`gpt-6-astra`；还不知道时为 nil。来源见 `HookRunner`。
     public var model: String?
+    /// 接着聊的会话（`claude --resume` / `codex resume`，SessionStart 的 `source == "resume"`）。工牌靠它印「返聘」：
+    /// 原记录多半早被 24 小时清理删了，只看 app 自己的记忆会把接上的老会话当新会话。老文件缺键按 false。
+    public var resumed = false
     /// 主回合结束后还在后台干活的东西：agent 类任务（Claude Code 的 status 是 busy）或后台命令（shell）。
     /// app 每轮刷新从 Claude Code 自己的状态文件读出来放在内存里，不进 JSON，hook 不管它（docs/ai.md「后台还在跑」）。
     public var backgroundWork: BackgroundWork?
@@ -65,6 +68,7 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         case recentActivity = "recent_activity"
         case updatedAt = "updated_at"
         case model
+        case resumed
     }
 
     public init(sessionId: String, provider: String = "claude", pid: Int? = nil, term: String? = nil, tty: String? = nil,
@@ -100,6 +104,7 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         recentActivity = try c.decodeIfPresent(String.self, forKey: .recentActivity)
         updatedAt = try c.decode(Double.self, forKey: .updatedAt)
         model = try c.decodeIfPresent(String.self, forKey: .model)
+        resumed = try c.decodeIfPresent(Bool.self, forKey: .resumed) ?? false
     }
 
     /// 可空字段一律写成显式 null，不省键：契约里说每个键都在，读的一方靠键存在判格式版本。
@@ -119,6 +124,7 @@ public struct SessionRecord: Codable, Equatable, Identifiable {
         try c.encode(recentActivity, forKey: .recentActivity)
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encode(model, forKey: .model)
+        try c.encode(resumed, forKey: .resumed)
     }
 
     public var id: String { sessionId }

@@ -27,6 +27,7 @@ Claude Code 与 Codex 的 hook 调 `Tally.app/Contents/MacOS/tally-hook`（Codex
 | `waiting_detail` / `recent_activity` | string | 是 | 本会话等待请求与本回合最近工具动作；无可信输入时为空，旧文件缺键按空值读 |
 | `updated_at` | number | 否 | 毫秒时间戳；仅详情改变时沿用原值 |
 | `model` | string | 是 | 会话在用的模型 id（如 `claude-opus-5`、`gpt-6-astra`）：hook 入参带 `model` 就用它（Codex 带），没有就取 transcript 尾 64 KB 里最后一条带模型名的记录（Claude 回复的 `message.model`，跳过它报错时写的 `<synthetic>`；Codex 的 `turn_context`），再没有沿用旧值；null 是还不知道。Codex 的 rollout 动辄几百 MB、一轮很长时尾巴里没有 `turn_context`，所以它得靠入参 |
+| `resumed` | bool | 否 | 接着聊的会话：`SessionStart` 的 `source` 是 `resume`（`claude --resume` / `/resume`、`codex resume`）时为 true，之后的事件沿用；`fork` 是新 id，算新会话；老文件缺键按 false。工牌靠它印「返聘」（crew.md「工牌」）：原记录多半早被 24 小时清理删了，只认 Tally 自己的记忆会把接上的老会话当新会话 |
 
 可空键永远写出、没有值写 JSON `null`（自定义 `encode(to:)`），读的一方靠键存在判格式版本。
 
@@ -38,7 +39,7 @@ Codex 空开未输入时可能没有启动 hook；Tally 另以终端进程识别
 
 | 事件 | 条件 | 写入 |
 |---|---|---|
-| `SessionStart`、`UserPromptSubmit` | 无（Claude 的 `start_reason` 五种都算） | `running` |
+| `SessionStart`、`UserPromptSubmit` | 无（`source` 五种 `startup` / `resume` / `clear` / `compact` / `fork` 都算，Claude 与 Codex 同一套字段；`resume` 另置 `resumed`） | `running` |
 | `Notification` | `notification_type == permission_prompt` | `waiting_permission` |
 | `Notification` | `idle_prompt` / `elicitation_dialog` / `elicitation_url_dialog` 且现有 `state == running`，且 transcript 尾巴不显示回合已经结束 | `waiting_input` |
 | `Notification` | 同上三种但现有状态不是 `running`（含文件不存在），或回合已经结束（见「打断与 API 报错」） | 不写：`done` 之后闲置不算「等我」 |
@@ -48,7 +49,7 @@ Codex 空开未输入时可能没有启动 hook；Tally 另以终端进程识别
 | `PostToolUse` 带 `agent_id` | 其他（`done`、`waiting_input`、`compacting`、`ended`、`running`） | 不写：主回合结束后子 agent 在后台干活，不等于会话又忙起来了。实测：主回合 Stop 写 done，1 秒后子 agent 的工具调用把它翻回 running，60 秒后 `idle_prompt` 再写成等输入、又弹一次；这期间 Claude Code 自己的 status 一直是 busy，app 的补判接不住。行上「后台 agent 在跑」的标注就是 app 从这个 busy 读出来的，见「后台还在跑」。`agent_id` 只在 hook 从子 agent 里触发时才带，主线程永远不带（`agent_type` 在 `--agent` 会话里主线程也有，不能用） |
 | `PostToolUse` 不带 `agent_id` | 现有 `state != running`（含文件不存在、坏文件） | `running`：工具跑完就是 agent 在干活。文件不存在是 Tally 装上时会话正跑在长回合中间；`done` 是后台命令或子 agent 回来之后主会话接着干的新回合（2.1.266 起这种回合都有 `UserPromptSubmit`，更早的版本实测有没有的）；等审批必然已过 |
 | `PostToolUse` | 现有 `state == running` | 主会话工具摘要有变化时仅更新详情，`updated_at` 不变；没有可用摘要或与上次相同则不写 |
-| `PreCompact`（只在 Claude 侧注册，Codex 没有这个事件） | 无 | `compacting`：长会话压缩上下文要几十秒，不标出来看着像卡住。压完 Claude Code 发 `SessionStart`（`start_reason` 是 compact）写回 `running`；手动 `/compact` 压完没有回合，靠 app 看 Claude Code 自己的 status 补判回 `done` |
+| `PreCompact`（只在 Claude 侧注册，Codex 没有这个事件） | 无 | `compacting`：长会话压缩上下文要几十秒，不标出来看着像卡住。压完 Claude Code 发 `SessionStart`（`source` 是 compact）写回 `running`；手动 `/compact` 压完没有回合，靠 app 看 Claude Code 自己的 status 补判回 `done` |
 | `Stop` | 无 | `done` |
 | `SessionEnd` | 交互会话（见「已关闭的会话」） | `ended` |
 | `SessionEnd` | 无可恢复 transcript 或脚本会话（`claude -p`、`codex exec`） | 若已有有效状态，原子移为带唯一标识的一次性 `.tally-end` 结束记录供工牌消费，不加入已关闭会话；没有有效状态则删除会话文件 |

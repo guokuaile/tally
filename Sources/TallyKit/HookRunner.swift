@@ -142,6 +142,8 @@ public enum HookRunner {
                 updatedAt: (options.now().timeIntervalSince1970 * 1000).rounded(),
                 model: model
             )
+            // 接着聊的会话：两家的 SessionStart 都带 source == "resume"。之后的事件沿用，不然第一次 UserPromptSubmit 就把它抹了
+            record.resumed = previous?.resumed == true || (event == "SessionStart" && input["source"] as? String == "resume")
             if event == "PermissionRequest" {
                 record.waitingDetail = HookDecision.toolDetail(input, waiting: true)
             } else if event == "Notification", state == .waitingPermission, previous?.state == .waitingPermission {

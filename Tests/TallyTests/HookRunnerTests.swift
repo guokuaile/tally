@@ -104,8 +104,28 @@ final class HookRunnerTests: XCTestCase {
 
     // ── 映射表 ────────────────────────────────────────────────
 
+    func testResumeSessionStartMarksRecordResumedAndLaterEventsKeepIt() throws {
+        guard case .written = run(event("SessionStart", ["source": "resume"])) else { return XCTFail() }
+        XCTAssertTrue(try read().resumed)
+        guard case .written = run(event("UserPromptSubmit")) else { return XCTFail() }
+        XCTAssertTrue(try read().resumed)
+        guard case .written = run(event("Stop", ["last_assistant_message": "done"])) else { return XCTFail() }
+        XCTAssertTrue(try read().resumed)
+    }
+
+    func testOtherSessionStartSourcesAreNotResumedAndOldFilesDecodeFalse() throws {
+        guard case .written = run(event("SessionStart", ["source": "startup"])) else { return XCTFail() }
+        XCTAssertFalse(try read().resumed)
+        guard case .written = run(event("SessionStart", ["source": "compact"])) else { return XCTFail() }
+        XCTAssertFalse(try read().resumed)
+        let old = Data("""
+        {"session_id":"old-1","state":"running","cwd":"/tmp","transcript_path":"","updated_at":1}
+        """.utf8)
+        XCTAssertFalse(try JSONDecoder().decode(SessionRecord.self, from: old).resumed)
+    }
+
     func testSessionStartWritesFullRecordWithPidTtyTerm() throws {
-        guard case .written = run(event("SessionStart", ["start_reason": "compact"])) else { return XCTFail() }
+        guard case .written = run(event("SessionStart", ["source": "compact"])) else { return XCTFail() }
         let r = try read()
         XCTAssertEqual(r.state, .running)
         XCTAssertEqual(r.provider, "claude")
