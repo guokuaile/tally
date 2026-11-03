@@ -31,7 +31,8 @@ enum GhosttyMatch: Equatable {
     /// 3. 候选仍多于一个且没有会话标题时（Codex 不起会话标题，终端标题是「状态符号 + 空格 + 目录名」），
     ///    用目录名再筛一次。
     /// 4. Do not guess when multiple candidates remain: that would focus another session.
-    static func pick(terminals: [GhosttyTerminal], cwd: String, title: String?, provider: String = "claude", tty: String? = nil) -> GhosttyMatch {
+    static func pick(terminals: [GhosttyTerminal], cwd: String, title: String?, provider: String = "claude", tty: String? = nil, requireTTY: Bool = false) -> GhosttyMatch {
+        if requireTTY && (tty == nil || tty == "" || !terminals.contains(where: { $0.tty != nil })) { return .notFound }
         if let tty, !tty.isEmpty, terminals.contains(where: { $0.tty != nil }) {
             let matches = terminals.filter { terminal in
                 guard let terminalTTY = terminal.tty, !terminalTTY.isEmpty else { return false }
@@ -146,7 +147,7 @@ enum GhosttyLocator {
     }
 
     /// 找到就聚焦并把 Ghostty 激活。
-    static func focus(session: SessionRecord) async throws {
+    static func focus(session: SessionRecord, requireTTY: Bool = false) async throws {
         let list = try await terminals()
         var eligible = list
         if session.provider == "codex", session.tty == nil, list.contains(where: { $0.tty != nil }) {
@@ -158,7 +159,7 @@ enum GhosttyLocator {
             eligible = GhosttyMatch.codexCandidates(list, ttys: ttys)
         }
         let id: String
-        switch GhosttyMatch.pick(terminals: eligible, cwd: session.cwd, title: session.title, provider: session.provider, tty: session.tty) {
+        switch GhosttyMatch.pick(terminals: eligible, cwd: session.cwd, title: session.title, provider: session.provider, tty: session.tty, requireTTY: requireTTY) {
         case .found(let found): id = found
         case .notFound: throw Failure.notFound
         case .ambiguous: throw Failure.ambiguous

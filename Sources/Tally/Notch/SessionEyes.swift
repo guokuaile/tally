@@ -346,7 +346,7 @@ struct SessionEyes: View {
                 HStack(spacing: 4) {
                     ForEach(0..<3) { index in
                         Circle().fill(.white.opacity(index == 1 ? 0.75 : 0.35))
-                            .frame(width: index == 1 ? 6 : 5, height: index == 1 ? 6 : 5)
+                            .frame(width: size * (index == 1 ? 6 : 5) / 34, height: size * (index == 1 ? 6 : 5) / 34)
                     }
                 }
             } else {

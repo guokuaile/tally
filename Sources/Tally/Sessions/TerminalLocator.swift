@@ -64,15 +64,13 @@ enum TerminalLocator {
             try await ClaudeBackground.attach(session)
             return
         }
-        // 后台身份读不到时，Ghostty 的标题和目录回退可能命中别人的窗口。
-        if session.isClaude, session.term == "ghostty", session.pid != nil,
-           session.claudeCodeStatus(in: ClaudeHome.url.appendingPathComponent("sessions")) == .unknown {
-            throw Failure.notFound
-        }
+        // 后台身份读不到时，只允许精确 tty，不能按标题和目录猜到别人的窗口。
+        let requireTTY = session.isClaude && session.pid != nil &&
+            session.claudeCodeStatus(in: ClaudeHome.url.appendingPathComponent("sessions")) == .unknown
         switch kind(for: session.term, running: isRunning) {
         case .ghostty:
             do {
-                try await GhosttyLocator.focus(session: session)
+                try await GhosttyLocator.focus(session: session, requireTTY: requireTTY)
             } catch GhosttyLocator.Failure.ghosttyNotRunning {
                 throw Failure.notRunning("Ghostty")
             } catch GhosttyLocator.Failure.notFound {

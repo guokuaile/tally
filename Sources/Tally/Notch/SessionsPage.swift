@@ -7,6 +7,7 @@ struct SessionsPage: View {
     var jump = SessionJump.shared
     /// 翻到「已关闭」那一页：由 AI 页会话卡片标题行的切换按钮决定。
     var showingClosed = false
+    @State private var expandedHistory = false
 
     static func visibleSessions(_ sessions: [SessionRecord], now: Date) -> [SessionRecord] {
         func path(_ cwd: String) -> String {
@@ -23,35 +24,50 @@ struct SessionsPage: View {
     var body: some View {
         let now = Date()
         let ordered = SessionRecord.displayOrder(store.sessions, now: now)
-        let rows = showingClosed
+        let allRows = showingClosed
             ? ordered.filter { $0.state == .ended }
             : Self.visibleSessions(ordered.filter { $0.state != .ended }, now: now)
-        if rows.isEmpty {
-            VStack(spacing: 6) {
-                Image(systemName: showingClosed ? "clock.arrow.circlepath" : "terminal")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white.opacity(0.3))
-                Text(showingClosed ? "没有已关闭的会话" : "没有在跑的会话")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            .frame(maxWidth: .infinity, minHeight: 72, maxHeight: .infinity)
-        } else {
-            let crowded = SessionRecord.crowdedCWDs(rows)
-            let shortcutIndices = Dictionary(uniqueKeysWithValues: SessionRecord.shortcutOrder(store.sessions, now: now).enumerated().map { ($0.element.id, $0.offset) })
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, session in
-                        if !showingClosed, index == 0 || rows[index - 1].group(now: now) != session.group(now: now) {
-                            GroupHeader(group: session.group(now: now), first: index == 0)
+        let rows = showingClosed && !expandedHistory ? Array(allRows.prefix(10)) : allRows
+        VStack(spacing: 4) {
+            if rows.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: showingClosed ? "clock.arrow.circlepath" : "terminal")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white.opacity(0.3))
+                    Text(showingClosed ? "没有已关闭的会话" : "没有在跑的会话")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                .frame(maxWidth: .infinity, minHeight: 72, maxHeight: .infinity)
+            } else {
+                let crowded = SessionRecord.crowdedCWDs(rows)
+                let shortcutIndices = Dictionary(uniqueKeysWithValues: SessionRecord.shortcutOrder(store.sessions, now: now).enumerated().map { ($0.element.id, $0.offset) })
+                ScrollView(.vertical, showsIndicators: showingClosed) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, session in
+                            if !showingClosed, index == 0 || rows[index - 1].group(now: now) != session.group(now: now) {
+                                GroupHeader(group: session.group(now: now), first: index == 0)
+                            }
+                            // 临时会话不可跳转，不占快捷键序号。
+                            SessionRow(session: session, now: now,
+                                       shortcut: !showingClosed && jump.shortcutHints ? shortcutIndices[session.id].flatMap { PanelKey.sessionShortcutLabel($0) } : nil,
+                                       tty: crowded.contains(session.cwd) ? session.tty : nil)
                         }
-                        // 临时会话不可跳转，不占快捷键序号。
-                        SessionRow(session: session, now: now,
-                                   shortcut: !showingClosed && jump.shortcutHints ? shortcutIndices[session.id].flatMap { PanelKey.sessionShortcutLabel($0) } : nil,
-                                   tty: crowded.contains(session.cwd) ? session.tty : nil)
                     }
                 }
+                if showingClosed && allRows.count > 10 {
+                    Button(expandedHistory ? "收起" : "查看更多（\(allRows.count - 10)）") {
+                        expandedHistory.toggle()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .frame(maxWidth: .infinity, minHeight: 28)
+                }
             }
+        }
+        .onChange(of: showingClosed) { _, closed in
+            if !closed { expandedHistory = false }
         }
     }
 }
@@ -286,7 +302,7 @@ struct StateIcon: View {
     @State private var visible = false
 
     var body: some View {
-        SessionEyes(mood: mood, identity: identity, active: visible)
+        SessionEyes(mood: mood, identity: identity, active: visible, size: state == .ended ? 24 : 34)
             .accessibilityHidden(false)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(label)

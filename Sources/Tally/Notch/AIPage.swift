@@ -28,18 +28,21 @@ struct AIPage: View {
 struct ClosedPageToggle: View {
     let count: Int
     @Binding var showingClosed: Bool
+    @State private var hovered = false
 
     var body: some View {
         Button { showingClosed.toggle() } label: {
             Text(showingClosed ? "‹ 会话" : "已关闭 \(count) ›")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.65))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 1)
-                .background(Capsule().fill(.white.opacity(0.10)))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(.horizontal, 12)
+                .frame(minHeight: 28)
+                .background(Capsule().fill(.white.opacity(hovered ? 0.20 : 0.12)))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(showingClosed ? "返回当前会话" : "查看已关闭的会话")
     }
 }
 

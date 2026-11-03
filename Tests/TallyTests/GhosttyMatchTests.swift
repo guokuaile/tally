@@ -59,6 +59,16 @@ final class GhosttyMatchTests: XCTestCase {
         XCTAssertEqual(GhosttyMatch.pick(terminals: [first, first], cwd: "/tmp", title: nil, tty: "ttys005"), .ambiguous)
     }
 
+    func testUnknownClaudeStatusRequiresExactTTY() {
+        let terminal = GhosttyTerminal(id: "A", name: "✳ Foo", workingDirectory: "/tmp", tty: "/dev/ttys005")
+        let legacy = GhosttyTerminal(id: "B", name: "✳ Foo", workingDirectory: "/tmp")
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [terminal], cwd: "/tmp", title: "Foo", tty: "ttys005", requireTTY: true), .found(id: "A"))
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [terminal], cwd: "/tmp", title: "Foo", tty: "ttys006", requireTTY: true), .notFound)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [terminal], cwd: "/tmp", title: "Foo", tty: nil, requireTTY: true), .notFound)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [legacy], cwd: "/tmp", title: "Foo", tty: "ttys005", requireTTY: true), .notFound)
+        XCTAssertEqual(GhosttyMatch.pick(terminals: [terminal, terminal], cwd: "/tmp", title: "Foo", tty: "ttys005", requireTTY: true), .ambiguous)
+    }
+
     func testAncestorDirectoryMatchesAndDeepestWins() {
         let root = GhosttyTerminal(id: "R", name: "zsh", workingDirectory: "/Users/me")
         let mid = GhosttyTerminal(id: "M", name: "zsh", workingDirectory: "/Users/me/workspace")
