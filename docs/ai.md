@@ -87,7 +87,7 @@ hook 的硬约束：永远 `exit 0`（`Stop` 上 exit 2 会阻止 agent 结束�
 
 ### 标题（`TranscriptTitle`）
 
-Claude 的 transcript 是 JSONL，标题记录两种：`{"type":"ai-title","aiTitle":…}` 与 `/rename` 的 `{"type":"custom-title","customTitle":…}`，后者还有边车 `<transcript 目录>/<session_id>/custom-title.json`。读法：边车 → 文件尾 64 KB 从后往前找（丢掉首个换行前的半行）→ 都没有为 null。hook 只做前两步；app 在 `title == null` 时再试，仍空就整文件扫一次（每会话只扫一次，结果缓存），还没有就拿用户敲的第一句话顶上（`TranscriptTitle.firstPrompt`，app 侧；读到就记住，没读到的按读时的文件大小记住、文件没长不重读）：读文件头 1 MB，Claude 取第一条主链、非 `isMeta`、非压缩摘要（`isCompactSummary`）的 `user` 记录（斜杠命令存成 `<command-name>` / `<command-args>`，取成「/名字 参数」），Codex 取 rollout 里第一条 role 为 user 的 `message`（它自己塞的 `# AGENTS.md instructions`、`<environment_context>` 也记成 user，以 `#` / `<` 起头的跳过；本机实测用户那句在 180 KB 上下，前面排着系统提示、工具表、AGENTS.md、world_state）；空白折成一个空格、最多 80 字。连这也没有才用 cwd 最后一段显示。Codex 不设标题，它的行一律是第一句话。
+Claude 的 transcript 是 JSONL，标题记录两种：`{"type":"ai-title","aiTitle":…}` 与 `/rename` 的 `{"type":"custom-title","customTitle":…}`，后者还有边车 `<transcript 目录>/<session_id>/custom-title.json`。读法：边车 → 文件尾 64 KB 从后往前找（丢掉首个换行前的半行）→ 都没有为 null。hook 只做前两步；app 在 `title == null` 时再试，仍空就从文件尾按 1 MB 块倒着扫到开头（不整读：百 MB 的 transcript 整读要在内存放两份；每会话只扫一次，结果缓存），还没有就拿用户敲的第一句话顶上（`TranscriptTitle.firstPrompt`，app 侧；读到就记住，没读到的按读时的文件大小记住、文件没长不重读）：读文件头 1 MB，Claude 取第一条主链、非 `isMeta`、非压缩摘要（`isCompactSummary`）的 `user` 记录（斜杠命令存成 `<command-name>` / `<command-args>`，取成「/名字 参数」），Codex 取 rollout 里第一条 role 为 user 的 `message`（它自己塞的 `# AGENTS.md instructions`、`<environment_context>` 也记成 user，以 `#` / `<` 起头的跳过；本机实测用户那句在 180 KB 上下，前面排着系统提示、工具表、AGENTS.md、world_state）；空白折成一个空格、最多 80 字。连这也没有才用 cwd 最后一段显示。Codex 不设标题，它的行一律是第一句话。
 
 ### 后台还在跑（Claude Code 的 `sessions/<pid>.json`）
 

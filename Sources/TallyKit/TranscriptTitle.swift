@@ -5,7 +5,7 @@ import Foundation
 /// 三个来源，按可靠程度排：
 /// 1. `/rename` 留下的边车 `<transcript 目录>/<session_id>/custom-title.json`
 /// 2. 文件末尾 64 KB 里最后一条 `ai-title` 或 `custom-title` 记录
-/// 3. 整个文件扫一遍（只有 app 会做，且每个会话只做一次）
+/// 3. 从文件尾往前把整个文件扫一遍（只有 app 会做，且每个会话只做一次）
 public enum TranscriptTitle {
 
     public static let tailBytes = 64 * 1024
@@ -289,29 +289,81 @@ public enum TranscriptTitle {
         }
     }
 
-    /// 整个文件扫一遍。大 transcript 有几 MB，调用方要缓存结果。
-    public static func readFull(from url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return parse(String(decoding: data, as: UTF8.self), truncated: false)
+    /// 倒读的块长。长会话的 transcript 上百 MB，整读要在内存里放两份（实测 102 MB 峰值 208 MB、主线程卡 1.4 秒）；
+    /// 标题记录通常在后段，从尾往前一块块读多数一块就命中，最坏（标题在开头）也只是多读几块，内存是一块加最长一行的两倍上下。
+    public static let fullScanChunk = 1024 * 1024
+
+    /// 从文件尾往前按块扫整个文件，找最后一条标题记录。调用方要缓存结果。
+    /// `chunk` 只给用例缩小块长，好在几百字节的文件里摆出跨块和标题在开头两种情况。
+    public static func readFull(from url: URL, chunk: Int = fullScanChunk) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return nil }
+        let newline = UInt8(ascii: "\n")
+        var end = size
+        // 后一块开头那半行的碎片，靠后的在前：它的前半截在这一块或更前的块里，拼起来才是整行。
+        // 存碎片、凑齐一行才拼一次：几十 MB 的单行（tool_result 里的 base64 图）每轮重拼一次是平方量级
+        var carry: [Data] = []
+        func joined(_ head: Data) -> Data {
+            var line = head
+            for piece in carry.reversed() { line.append(piece) }
+            return line
+        }
+        enum Step { case found(String), unreadable, next }
+        while end > 0 {
+            let length = Int(min(UInt64(chunk), end))
+            end -= UInt64(length)
+            // 每块读出来的 NSData 是自动释放的，不按块清池就攒到整轮读完才放（JSONLUsageParser 同一个坑：实测 102 MB 无标题的文件峰值 114 MB）
+            let step: Step = autoreleasepool {
+                guard (try? handle.seek(toOffset: end)) != nil, let data = try? handle.read(upToCount: length) else { return .unreadable }
+                var lineEnd = data.endIndex
+                // 换行只在这一块里找：带过来的碎片里没有换行
+                while let newlineIndex = data[data.startIndex..<lineEnd].lastIndex(of: newline) {
+                    let head = data[(newlineIndex + 1)..<lineEnd]
+                    let line = carry.isEmpty ? head : joined(Data(head))
+                    carry.removeAll()
+                    if let title = title(inLine: line) { return .found(title) }
+                    lineEnd = newlineIndex
+                }
+                // 第一个换行之前的半行开头还在前一块里，带到下一轮；到了文件头它才是整行
+                carry.append(Data(data[data.startIndex..<lineEnd]))
+                if end == 0, let title = title(inLine: joined(Data())) { return .found(title) }
+                return .next
+            }
+            switch step {
+            case .found(let title): return title
+            case .unreadable: return nil
+            case .next: continue
+            }
+        }
+        return nil
     }
 
     public static func parse(_ text: String, truncated: Bool) -> String? {
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         if truncated, !lines.isEmpty { lines.removeFirst() }
+        // 先按子串筛：尾读是 hook 每个事件都走的热路径，几百行里只有命中的那几行才值得拷成 Data 解 JSON
         for line in lines.reversed() where line.contains("\"ai-title\"") || line.contains("\"custom-title\"") {
-            guard let data = line.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let type = object["type"] as? String
-            else { continue }
-            let raw: String?
-            switch type {
-            case "ai-title": raw = object["aiTitle"] as? String
-            case "custom-title": raw = object["customTitle"] as? String
-            default: raw = nil
-            }
-            guard let title = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { continue }
-            return title
+            if let title = title(inLine: Data(line.utf8)) { return title }
         }
         return nil
+    }
+
+    private static let titleMarkers = ["\"ai-title\"", "\"custom-title\""].map { Data($0.utf8) }
+
+    /// 一行里的标题：先按字节找标记，命中才解 JSON（绝大多数行没有标记，不值得逐行解）。
+    private static func title(inLine line: Data) -> String? {
+        guard titleMarkers.contains(where: { line.range(of: $0) != nil }),
+              let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let type = object["type"] as? String
+        else { return nil }
+        let raw: String?
+        switch type {
+        case "ai-title": raw = object["aiTitle"] as? String
+        case "custom-title": raw = object["customTitle"] as? String
+        default: raw = nil
+        }
+        guard let title = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
+        return title
     }
 }

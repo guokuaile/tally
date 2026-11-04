@@ -74,6 +74,43 @@ final class TranscriptTitleTests: XCTestCase {
         XCTAssertEqual(TranscriptTitle.readFull(from: url), "假" + String(repeating: "x", count: 70 * 1024))
     }
 
+    // ── 整文件倒读 ─────────────────────────────────────────────
+
+    private let filler = "{\"type\":\"user\",\"message\":{\"content\":\"这一行没有标题，只是把文件撑长\"}}"
+
+    func testFullScanWalksEveryChunkToTitleAtFileStart() throws {
+        // 标题在第一行、后面几十块填充：倒读得走到头还认得出，和块长无关
+        let url = try tempFile(([titleLine("开头")] + Array(repeating: filler, count: 40)).joined(separator: "\n") + "\n")
+        for chunk in [7, 64, 256, 4096, TranscriptTitle.fullScanChunk] {
+            XCTAssertEqual(TranscriptTitle.readFull(from: url, chunk: chunk), "开头", "块长 \(chunk)")
+        }
+    }
+
+    func testFullScanJoinsLineSplitAcrossChunkBoundary() throws {
+        // 块长从 1 到整个文件逐个试：切口落在标题行任何位置（含标记中间）都得拼回来；
+        // 更早的「旧」不能抢在后面的「新」前头；正文里碰巧出现的 ai-title 字样不是标题记录
+        let content = [titleLine("旧"), filler, titleLine("新"), filler, "{\"type\":\"user\",\"note\":\"ai-title\"}"].joined(separator: "\n") + "\n"
+        let url = try tempFile(content)
+        for chunk in 1...content.utf8.count {
+            XCTAssertEqual(TranscriptTitle.readFull(from: url, chunk: chunk), "新", "块长 \(chunk)")
+        }
+    }
+
+    func testFullScanReassemblesLinesLongerThanChunk() throws {
+        // 单行比块长得多（tool_result 里的大文件、base64 图）：没标记的长行拼回来后跳过，带标记的长标题行拼回来后认得出
+        let longTitle = "长" + String(repeating: "t", count: 3000)
+        let longBody = "{\"type\":\"user\",\"message\":{\"content\":\"" + String(repeating: "b", count: 5000) + "\"}}"
+        let before = try tempFile([titleLine("前"), longBody, filler].joined(separator: "\n") + "\n")
+        XCTAssertEqual(TranscriptTitle.readFull(from: before, chunk: 64), "前")
+        let within = try tempFile([filler, titleLine(longTitle), longBody].joined(separator: "\n") + "\n")
+        XCTAssertEqual(TranscriptTitle.readFull(from: within, chunk: 64), longTitle)
+    }
+
+    func testFullScanReadsLastLineWithoutTrailingNewlineAndEmptyFile() throws {
+        XCTAssertEqual(TranscriptTitle.readFull(from: try tempFile(filler + "\n" + titleLine("没换行")), chunk: 16), "没换行")
+        XCTAssertNil(TranscriptTitle.readFull(from: try tempFile("")))
+    }
+
     func testBlankTitleIgnoredAndTrimmed() {
         XCTAssertNil(TranscriptTitle.parse(titleLine("   ") + "\n", truncated: false))
         XCTAssertEqual(TranscriptTitle.parse(titleLine(" 有 ") + "\n", truncated: false), "有")
