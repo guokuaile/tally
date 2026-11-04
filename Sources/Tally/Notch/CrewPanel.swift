@@ -9,6 +9,8 @@ struct CrewSlot: Equatable {
     let startedAt: Date
     /// 同一时刻进场的几个角色错开相位，不然齐刷刷同步眨眼
     let phase: Double
+    /// 这个项目分到的角色（`CrewCastStore`）；「+N」胶囊是球
+    var cast: CastMember = .ball
 }
 
 /// 光标停在或点在哪一格。
@@ -51,20 +53,29 @@ final class CrewFrameCache {
         /// 等久了的档和 mood 一样决定片段和颜色，所以进缓存键
         var tier: CrewTier = .fresh
         let skin: BloubArt.Style.Skin
+        /// 项目分到的角色；换角色就是另一套图
+        let cast: CastMember
     }
     struct Key: Hashable {
         let clip: String
         let index: Int
         let look: Look
+        /// 定格帧步态为 0，和同一帧号的动态帧是两张图
+        let still: Bool
     }
     /// 一格的位图比槽宽：光晕、环绕线、「?」都伸出 27pt 的格子，球心在 (24, 19)
     static let box = CGSize(width: 48, height: 32)
     static let anchor = CGPoint(x: 24, y: CrewGeometry.bodyCenterY)
 
     let art: BloubArt
+    let cast: CastArt
     private var images: [Key: CGImage] = [:]
 
-    init(art: BloubArt) { self.art = art }
+    /// `cast` 不传就用进程内那份分配表的素材（默认参数在隔离外求值会报警，所以在体内兜底）
+    init(art: BloubArt, cast: CastArt? = nil) {
+        self.art = art
+        self.cast = cast ?? CrewCastStore.shared.art
+    }
 
     var count: Int { images.count }
 
@@ -74,10 +85,12 @@ final class CrewFrameCache {
         let frame = clip.frames[key.index]
         let time = Double(key.index) / clip.fps
         let style = CrewStyle.style(mood: key.look.mood, skin: key.look.skin, tier: key.look.tier)
+        // 球造不出角色（nil），走 bloub 原来的画法；定格帧步态 0
+        let actor = CastActor(art: cast, member: key.look.cast, amp: key.still ? 0 : CastActor.amp(for: key.look.mood), frameIndex: key.index, frameCount: clip.frames.count)
         let renderer = ImageRenderer(content: Canvas { context, _ in
             context.translateBy(x: Self.anchor.x, y: Self.anchor.y)
             context.scaleBy(x: CrewGeometry.scale, y: CrewGeometry.scale)
-            frame.draw(in: context, time: time, style: style)
+            frame.draw(in: context, time: time, style: style, actor: actor)
         }.frame(width: Self.box.width, height: Self.box.height))
         renderer.scale = scale
         guard let image = renderer.cgImage else { return nil }
@@ -187,7 +200,7 @@ final class CrewStripView: NSView {
             guard let project = slot.project else { continue }
             let elapsed = max(0, now.timeIntervalSince(slot.startedAt)) + slot.phase
             guard let picked = CrewPlayback.pick(mood: project.mood, tier: project.tier, elapsed: elapsed, still: still, art: cache.art) else { continue }
-            let key = CrewFrameCache.Key(clip: picked.clip, index: picked.index, look: .init(mood: project.mood, tier: project.tier, skin: skin))
+            let key = CrewFrameCache.Key(clip: picked.clip, index: picked.index, look: .init(mood: project.mood, tier: project.tier, skin: skin, cast: slot.cast), still: still)
             guard shown[index] != key, let image = cache.image(key, scale: scale) else { continue }
             cells[index].contents = image
             shown[index] = key
@@ -305,23 +318,25 @@ final class CrewController {
     private var asleep = false
     private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     private var observers: [NSObjectProtocol] = []
-    /// cwd → 项目键：解符号链接要走文件系统，每次会话变化都对每条重解在主线程上不值当
-    private var canonical: [String: String] = [:]
     private var staleTimer: Timer?
     private var clock: Timer?
     private let cache: CrewFrameCache?
+    /// 角色分配表和目录规范化缓存都在它那儿，AI 页、药丸、工牌查的是同一张表
+    private let cast: CrewCastStore
 
     var frameCache: CrewFrameCache? { cache }
     var clockInterval: Double? { clock?.timeInterval }
     var dropdownWindow: NSPanel? { dropdown }
     var avatarWindow: NSPanel? { avatar }
 
-    init(art: BloubArt? = .bundled) {
-        if let art, CrewMood.allCases.map(\.clip).allSatisfy({ art.clips[$0] != nil }) {
-            cache = CrewFrameCache(art: art)
+    init(art: BloubArt? = .bundled, cast: CrewCastStore? = nil) {
+        let cast = cast ?? .shared
+        self.cast = cast
+        if let art {
+            cache = CrewFrameCache(art: art, cast: cast.art)
         } else {
-            // 文件整个解不开和缺片段都要留痕：开关开着却看不到小人，没有这行日志只能猜
-            Log.error(art == nil ? "bloub/frames.json 读不到或解不开，刘海两侧不画角色" : "frames.json 里缺小刻片段，刘海两侧不画角色")
+            // 开关开着却看不到小人，没有这行日志只能猜；缺哪段、坏哪段 BloubArt 自己已经记了
+            Log.error("bloub/frames.json 读不到或片段不全（原因见上一条日志），刘海两侧不画角色")
             cache = nil
         }
     }
@@ -353,7 +368,6 @@ final class CrewController {
             playback.removeAll()
             projects.removeAll()
             layout = CrewLayout(right: [], left: [], overflow: 0)
-            canonical.removeAll()
             expanded = nil
             cache?.keep([])
         }
@@ -398,13 +412,7 @@ final class CrewController {
     func refresh(_ sessions: [SessionRecord], now: Date = Date()) {
         self.sessions = sessions
         guard enabled else { return }
-        let canonicalize = { [self] (cwd: String) -> String in
-            if let hit = canonical[cwd] { return hit }
-            let key = cwd.isEmpty ? "" : CrewRoster.standardized(URL(fileURLWithPath: cwd).resolvingSymlinksInPath().path)
-            canonical[cwd] = key
-            return key
-        }
-        projects = CrewRoster.projects(sessions, now: now, canonicalize: canonicalize)
+        projects = CrewRoster.projects(sessions, now: now, canonicalize: cast.canonicalize)
         var next: [String: (mood: CrewMood, tier: CrewTier, startedAt: Date)] = [:]
         for project in projects {
             // 变档和变 mood 一样换片段，从头播
@@ -420,7 +428,8 @@ final class CrewController {
         let shown = side == .right ? layout.right : layout.left
         var slots = shown.map { project in
             let startedAt = playback[project.id]?.startedAt ?? Date()
-            return CrewSlot(project: project, overflow: 0, startedAt: startedAt, phase: Double(CrewRoster.bucket(project.id + "·phase", of: 6)) * 0.41)
+            return CrewSlot(project: project, overflow: 0, startedAt: startedAt, phase: Double(CrewRoster.bucket(project.id + "·phase", of: 6)) * 0.41,
+                            cast: cast.member(forKey: project.id))
         }
         if side == layout.overflowSide, layout.overflow > 0 {
             slots.append(CrewSlot(project: nil, overflow: layout.overflow, startedAt: .distantPast, phase: 0))
@@ -460,7 +469,7 @@ final class CrewController {
             wing.sharingType = sharingType
             wing.setFrame(frame, display: false)
             wing.strip.configure(slots: slots, skin: skin, size: frame.size)
-            for slot in slots { if let project = slot.project { looks.insert(.init(mood: project.mood, tier: project.tier, skin: skin)) } }
+            for slot in slots { if let project = slot.project { looks.insert(.init(mood: project.mood, tier: project.tier, skin: skin, cast: slot.cast)) } }
             if !wing.isVisible { wing.orderFrontRegardless() }
         }
         renderDropdown(on: metrics)
@@ -500,10 +509,11 @@ final class CrewController {
         if !panel.isVisible { panel.orderFrontRegardless() }
         let targetX = hover.side == .right ? dropdownFrame.minX + 29 : dropdownFrame.maxX - 29
         let target = CGRect(x: targetX - 19, y: dropdownFrame.maxY - 6 - 38, width: 38, height: 38)
-        let moving = avatar ?? CrewAvatarPanel(mood: project.mood, tier: project.tier)
+        let portrait = cast.member(forKey: project.id)
+        let moving = avatar ?? CrewAvatarPanel(mood: project.mood, tier: project.tier, cast: portrait)
         avatar = moving
         moving.sharingType = sharingType
-        moving.update(mood: project.mood, tier: project.tier)
+        moving.update(mood: project.mood, tier: project.tier, cast: portrait)
         if avatarID != project.id || !moving.isVisible {
             let start = CGRect(x: anchorX - 11, y: wing.frame.maxY - CrewGeometry.bodyCenterY - 11, width: 22, height: 22)
             moving.setFrame(reduceMotion ? target : start, display: true)

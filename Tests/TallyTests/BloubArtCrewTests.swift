@@ -13,10 +13,10 @@ final class BloubArtCrewTests: XCTestCase {
 
     private func art() throws -> BloubArt { try XCTUnwrap(BloubArt(url: Self.url)) }
 
-    /// 坏掉的小刻片段只少那一段，AI 页的会话片段照旧；坏掉的会话片段整份作废。
-    func testBrokenCrewClipOnlyDropsThatClip() throws {
+    /// 任一小刻片段坏了或缺了整份作废：翅膀和 AI 页都靠这六段
+    func testBrokenOrMissingCrewClipVoidsTheWholeFile() throws {
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: Self.url)) as? [String: Any])
-        var clips = try XCTUnwrap(json["clips"] as? [String: Any])
+        let clips = try XCTUnwrap(json["clips"] as? [String: Any])
         func write(_ mutate: (inout [String: Any]) -> Void) throws -> URL {
             var copy = clips
             mutate(&copy)
@@ -25,16 +25,13 @@ final class BloubArtCrewTests: XCTestCase {
             try JSONSerialization.data(withJSONObject: json).write(to: url)
             return url
         }
-        let crewBroken = try write { $0["crew-run"] = ["fps": 20, "frames": []] }
-        defer { try? FileManager.default.removeItem(at: crewBroken) }
-        let tolerant = try XCTUnwrap(BloubArt(url: crewBroken))
-        XCTAssertNil(tolerant.clips["crew-run"])
-        XCTAssertNotNil(tolerant.clips["working"])
-        XCTAssertNotNil(tolerant.clips["crew-done"])
-        let sessionBroken = try write { $0["working"] = ["fps": 30, "frames": []] }
-        defer { try? FileManager.default.removeItem(at: sessionBroken) }
-        XCTAssertNil(BloubArt(url: sessionBroken))
-        _ = clips.removeValue(forKey: "unused")
+        let broken = try write { $0["crew-run"] = ["fps": 20, "frames": []] }
+        defer { try? FileManager.default.removeItem(at: broken) }
+        XCTAssertNil(BloubArt(url: broken))
+        let missing = try write { $0.removeValue(forKey: "crew-done") }
+        defer { try? FileManager.default.removeItem(at: missing) }
+        XCTAssertNil(BloubArt(url: missing))
+        XCTAssertNotNil(BloubArt(url: Self.url))
     }
     private func clip(_ name: String) throws -> BloubArt.Clip { try XCTUnwrap(art().clips[name], name) }
     private func rawClips() throws -> [String: [String: Any]] {
@@ -168,34 +165,21 @@ final class BloubArtCrewTests: XCTestCase {
     }
 
     func testBodyPiecesDecodeAsBodyMaterial() throws {
-        let art = try art()
-        for name in ["compacting", "crew-compacting"] {
-            let clip = try XCTUnwrap(art.clips[name])
-            let thinking = clip.frame(at: 3.3, loop: true)
-            XCTAssertEqual(thinking.dots.count, 2, name)
-            XCTAssertTrue(thinking.dots.allSatisfy { $0.material == .body }, name)
-            let burst = clip.frame(at: 0.5, loop: true)
-            XCTAssertFalse(burst.dots.isEmpty, name)
-            XCTAssertTrue(burst.dots.allSatisfy { $0.material == .solid }, name)
-        }
+        let compacting = try clip("crew-compacting")
+        let thinking = compacting.frame(at: 3.3, loop: true)
+        XCTAssertEqual(thinking.dots.count, 2)
+        XCTAssertTrue(thinking.dots.allSatisfy { $0.material == .body })
+        let burst = compacting.frame(at: 0.5, loop: true)
+        XCTAssertFalse(burst.dots.isEmpty)
+        XCTAssertTrue(burst.dots.allSatisfy { $0.material == .solid })
         let alert = try clip("crew-permission").frame(at: 1, loop: true)
         XCTAssertEqual(alert.dots.count, 1)
         XCTAssertEqual(alert.dots.first?.material, .body)
         XCTAssertTrue(alert.eyes.isEmpty, "整个身体变成「!」时没有眼睛")
     }
 
-    func testSessionClipsKeepTheirSampling() throws {
-        let art = try art()
-        let expected = ["working": 192, "permission": 120, "input": 120, "compacting": 114, "happy": 96, "stale": 30]
-        for (name, count) in expected {
-            let clip = try XCTUnwrap(art.clips[name], name)
-            XCTAssertEqual(clip.fps, 30, name)
-            XCTAssertEqual(clip.frames.count, count, name)
-            XCTAssertTrue(clip.frames.allSatisfy { $0.glow == 0 && $0.ring == 0 && $0.lids == 0 && !$0.arcEyes }, name)
-        }
-    }
-
-    func testFileWithoutCrewClipsStillDecodesSessionClips() throws {
+    /// 六段小刻片段一段都不能少：删光的文件整份作废
+    func testFileWithoutCrewClipsIsVoid() throws {
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: Self.url)) as? [String: Any])
         var clips = try XCTUnwrap(json["clips"] as? [String: Any])
         for name in Self.crewDurations.keys { clips[name] = nil }
@@ -203,14 +187,11 @@ final class BloubArtCrewTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("bloub-session-only-\(UUID().uuidString).json")
         try JSONSerialization.data(withJSONObject: json).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        let art = try XCTUnwrap(BloubArt(url: url))
-        XCTAssertNotNil(art.clips["working"])
-        XCTAssertNil(art.clips["crew-run"])
-        XCTAssertNotNil(art.frame(mood: .working, time: 1))
+        XCTAssertNil(BloubArt(url: url))
     }
 
-    /// 包络越界的帧解不出来：小刻片段整段丢掉（翅膀不画），会话片段照旧。
-    func testEnvelopeOutOfRangeDropsTheCrewClip() throws {
+    /// 包络越界的帧解不出来：那段算坏了，整份作废
+    func testEnvelopeOutOfRangeVoidsTheFile() throws {
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: Self.url)) as? [String: Any])
         var clips = try XCTUnwrap(json["clips"] as? [String: Any])
         var run = try XCTUnwrap(clips["crew-run"] as? [String: Any])
@@ -222,9 +203,7 @@ final class BloubArtCrewTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("bloub-bad-glow-\(UUID().uuidString).json")
         try JSONSerialization.data(withJSONObject: json).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        let art = try XCTUnwrap(BloubArt(url: url))
-        XCTAssertNil(art.clips["crew-run"])
-        XCTAssertNotNil(art.clips["working"])
+        XCTAssertNil(BloubArt(url: url))
     }
 
     func testOneShotClipHoldsItsLastFrameAndLoopWraps() throws {
@@ -349,5 +328,35 @@ final class BloubArtCrewTests: XCTestCase {
         XCTAssertEqual(CrewMood.compacting.still.time, 3.2)
         XCTAssertEqual(CrewMood.permission.still.time, 1.6)
         XCTAssertEqual(CrewMood.stale.still.clip, "crew-stale")
+    }
+
+    /// 等待两段的符号与眼睛（原来按会话片段验）：等输入全程带「?」和眼睛，等审批前 2.4 秒身体就是「!」没有眼睛、回球后才有
+    func testWaitingClipsKeepSymbolsAndEyes() throws {
+        let input = try clip("crew-input")
+        XCTAssertTrue(input.frames.allSatisfy { $0.symbol == .question && !$0.eyes.isEmpty && !$0.body.isEmpty && $0.alpha == 1 })
+        for (current, next) in zip(input.frames, input.frames.dropFirst() + [input.frames[0]]) {
+            XCTAssertLessThan(abs(current.body.boundingRect.width - next.body.boundingRect.width), 12)
+        }
+        let permission = try clip("crew-permission")
+        XCTAssertTrue(permission.frames.allSatisfy { $0.symbol == nil && !$0.body.isEmpty })
+        XCTAssertTrue(permission.frames[6...48].allSatisfy { $0.eyes.isEmpty }, "「!」那段没有眼睛")
+        XCTAssertTrue(permission.frames[49...].allSatisfy { !$0.eyes.isEmpty }, "回球后有眼睛")
+        XCTAssertTrue(permission.frame(at: CrewMood.permission.still.time, loop: false).eyes.isEmpty, "定格帧就是「!」")
+        XCTAssertNotEqual(permission.frames[20].body, input.frames[20].body)
+    }
+
+    /// 在跑的环绕线、压缩中的粒子、六段的循环接缝（原来按会话片段验）
+    func testRunKeepsOrbitsAndCompactingKeepsParticles() throws {
+        let run = try clip("crew-run")
+        let orbit = try XCTUnwrap(run.frames.first { !$0.arcs.isEmpty })
+        XCTAssertTrue(orbit.arcs.allSatisfy { !$0.front.isEmpty && !$0.back.isEmpty })
+        let burst = try clip("crew-compacting").frame(at: 0.5, loop: true)
+        XCTAssertFalse(burst.dots.isEmpty)
+        XCTAssertTrue(burst.dotsBehind)
+        for name in Self.crewDurations.keys {
+            let loop = try clip(name)
+            XCTAssertEqual(loop.frame(at: loop.duration, loop: true).body, loop.frames[0].body, name)
+        }
+        XCTAssertNil(BloubArt(url: Self.root.appendingPathComponent("Resources/missing-bloub.json")))
     }
 }

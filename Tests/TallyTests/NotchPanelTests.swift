@@ -270,19 +270,19 @@ final class CrewWingTests: XCTestCase {
     @MainActor
     func testFrameCacheRendersOnceAndEvictsUnusedLooks() throws {
         let cache = CrewFrameCache(art: try art())
-        let look = CrewFrameCache.Look(mood: .run, skin: .glass)
-        let key = CrewFrameCache.Key(clip: "crew-run", index: 10, look: look)
+        let look = CrewFrameCache.Look(mood: .run, skin: .glass, cast: .ball)
+        let key = CrewFrameCache.Key(clip: "crew-run", index: 10, look: look, still: false)
         let image = try XCTUnwrap(cache.image(key, scale: 2))
         XCTAssertEqual(image.width, 96)
         XCTAssertEqual(image.height, 64)
         XCTAssertTrue(cache.image(key, scale: 2) === image, "第二次直接命中")
         XCTAssertEqual(cache.count, 1)
-        _ = cache.image(CrewFrameCache.Key(clip: "crew-stale", index: 0, look: .init(mood: .stale, skin: .gradient)), scale: 2)
+        _ = cache.image(CrewFrameCache.Key(clip: "crew-stale", index: 0, look: .init(mood: .stale, skin: .gradient, cast: .ball), still: true), scale: 2)
         XCTAssertEqual(cache.count, 2)
         cache.keep([look])
         XCTAssertEqual(cache.count, 1, "失联那套不在屏上了就扔掉")
-        XCTAssertNil(cache.image(CrewFrameCache.Key(clip: "crew-run", index: 999, look: look), scale: 2), "越界的帧不画")
-        XCTAssertNil(cache.image(CrewFrameCache.Key(clip: "nope", index: 0, look: look), scale: 2))
+        XCTAssertNil(cache.image(CrewFrameCache.Key(clip: "crew-run", index: 999, look: look, still: false), scale: 2), "越界的帧不画")
+        XCTAssertNil(cache.image(CrewFrameCache.Key(clip: "nope", index: 0, look: look, still: false), scale: 2))
     }
 
     @MainActor
@@ -295,11 +295,12 @@ final class CrewWingTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("bloub-no-done-\(UUID().uuidString).json")
         try JSONSerialization.data(withJSONObject: json).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        let crew = CrewController(art: try XCTUnwrap(BloubArt(url: url)))
+        // 缺片段整份作废（AI 页和翅膀都靠这六段）：控制器拿到 nil 不崩、不画翅膀
+        let crew = CrewController(art: BloubArt(url: url))
         crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly)
         crew.relayout(metrics: m14)
         crew.refresh(DemoData.sessions(now: Date(), overflow: false))
-        XCTAssertNil(crew.wing(.right), "缺片段：翅膀不画，AI 页照旧")
+        XCTAssertNil(crew.wing(.right), "缺片段：翅膀不画")
     }
 }
 

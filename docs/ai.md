@@ -132,7 +132,7 @@ Tally 存在的理由是「等审批的会话晚发现几分钟是常态」，�
 
 ### 会话行
 
-分四组（`SessionRecord.displayOrder`；等你组按开始等的时刻正序，等得最久的在最上面、就是 ⌘1，被忘掉的那条才该最显眼；其余组按 `updated_at` 倒序）：**等你**（等审批、等输入）、**在跑**（忙、压缩中、主回合已结束但后台仍有工作）、**完成**（没有后台工作的完成记录）、**失联**（未完成且两小时没有更新），空组不画，组头是一行灰色小字。已关闭的不在这一页：会话卡片标题行右边有「已关闭 N ›」（`ClosedPageToggle`，`Card` 的 `accessory`），点了卡片里换成已关闭列表，标题变「已关闭」、按钮变「‹ 会话」翻回来；不落盘，每次展开面板都回到会话。已关闭单独放一页，是因为它点下去会开一个新终端：混在主列表组末，离跑完的会话一行之隔，容易误触；折叠在列表底部也试过，要往下翻才找得到。一行是无方底的 bloub 动画（状态动作见下方显示规则；辅助功能读出状态）+ 标题（太长从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上）+ 标签 + 目录名（这一页里同一目录有不止一个会话时跟上 tty，如「note · ttys004」：同目录跑同一个 skill 的两条标题只差 URL 尾巴，一眼看是同一行，`SessionRecord.crowdedCWDs`）+ 距上次事件多久；压缩中后面跟「压缩上下文中」，完成但后台还有活用环绕旋转动画、标题旁绿色小标签「后台 agent 在跑」或「后台命令在跑」（见「后台还在跑」），已关闭的标题变灰、后面跟「已关闭」，点行没有动作，行尾「接着聊」按钮才在新终端里接着聊。标签是提供方标志（Claude 橙、OpenAI 白）加模型短名（`SessionRecord.modelLabel`：`claude-opus-5` →「Opus 5」、`claude-fable-5-1` →「Fable 5.1」、`claude-haiku-4-5-20251001` →「Haiku 4.5」，别家原样如「gpt-6-astra」）；还不知道模型时写「Claude」「Codex」。面板展开时 ⌘1–⌘9、⌘0 跳第 N 行（⌘0 是第 10 个，原来只到 ⌘5，第 6 个会话起就没有键）：按分组后的显示顺序数，不数已关闭和尚待关联的临时会话（`SessionRecord.shortcutOrder`），所以有人在等时 ⌘1 就是最急的那个；按住 ⌘ 时前十行行尾浮出 ⌘1…⌘9、⌘0（`PanelKey.sessionShortcutLabel`），松开就消失（默认开，设置里可关，见 [panel.md](panel.md)「键盘」）。列表空显示终端图标加「没有在跑的会话」。悬停行有底色。点行走 `TerminalLocator.focus`（经 `SessionJump`；已关闭的行尾按钮走 `SessionResume`，见「已关闭的会话」），失败在行内显示「找不到窗口」或「<app> 没在跑」；失败原因按会话记在 `SessionJump.failures`，⌘1–⌘5 跳失败时同一行一样显示。
+分四组（`SessionRecord.displayOrder`；等你组按开始等的时刻正序，等得最久的在最上面、就是 ⌘1，被忘掉的那条才该最显眼；其余组按 `updated_at` 倒序）：**等你**（等审批、等输入）、**在跑**（忙、压缩中、主回合已结束但后台仍有工作）、**完成**（没有后台工作的完成记录）、**失联**（未完成且两小时没有更新），空组不画，组头是一行灰色小字。已关闭的不在这一页：会话卡片标题行右边有「已关闭 N ›」（`ClosedPageToggle`，`Card` 的 `accessory`），点了卡片里换成已关闭列表，标题变「已关闭」、按钮变「‹ 会话」翻回来；不落盘，每次展开面板都回到会话。已关闭单独放一页，是因为它点下去会开一个新终端：混在主列表组末，离跑完的会话一行之隔，容易误触；折叠在列表底部也试过，要往下翻才找得到。一行是该项目的小刻角色（状态片段与角色分配见 [crew.md](crew.md)「状态表」「角色池」；辅助功能读出状态）+ 标题（太长从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上）+ 标签 + 目录名（这一页里同一目录有不止一个会话时跟上 tty，如「note · ttys004」：同目录跑同一个 skill 的两条标题只差 URL 尾巴，一眼看是同一行，`SessionRecord.crowdedCWDs`）+ 距上次事件多久；压缩中后面跟「压缩上下文中」，完成但后台还有活用环绕旋转动画、标题旁绿色小标签「后台 agent 在跑」或「后台命令在跑」（见「后台还在跑」），已关闭的标题变灰、后面跟「已关闭」，点行没有动作，行尾「接着聊」按钮才在新终端里接着聊。标签是提供方标志（Claude 橙、OpenAI 白）加模型短名（`SessionRecord.modelLabel`：`claude-opus-5` →「Opus 5」、`claude-fable-5-1` →「Fable 5.1」、`claude-haiku-4-5-20251001` →「Haiku 4.5」，别家原样如「gpt-6-astra」）；还不知道模型时写「Claude」「Codex」。面板展开时 ⌘1–⌘9、⌘0 跳第 N 行（⌘0 是第 10 个，原来只到 ⌘5，第 6 个会话起就没有键）：按分组后的显示顺序数，不数已关闭和尚待关联的临时会话（`SessionRecord.shortcutOrder`），所以有人在等时 ⌘1 就是最急的那个；按住 ⌘ 时前十行行尾浮出 ⌘1…⌘9、⌘0（`PanelKey.sessionShortcutLabel`），松开就消失（默认开，设置里可关，见 [panel.md](panel.md)「键盘」）。列表空显示终端图标加「没有在跑的会话」。悬停行有底色。点行走 `TerminalLocator.focus`（经 `SessionJump`；已关闭的行尾按钮走 `SessionResume`，见「已关闭的会话」），失败在行内显示「找不到窗口」或「<app> 没在跑」；失败原因按会话记在 `SessionJump.failures`，⌘1–⌘5 跳失败时同一行一样显示。
 
 ### 跳回终端（`TerminalLocator`）
 
@@ -261,7 +261,7 @@ Claude 的路径都跟着 `ClaudeHome`（默认 `~/.claude`，`CLAUDE_CONFIG_DIR
 
 配速标记（`QuotaPace`）：在轨道时间已过去比例处画刻线，同样从左向右；用量领先时间 10 个百分点时变橙。窗口长度未知的不画。百分比、陈旧标记、重置时间与配速含义继续提供辅助功能文本。
 
-会话与弹窗共用 `SessionEyes`，各状态复用 bloub 原始动画，透明底配近黑的玻璃质感主体、白色眼睛；参考用户提供的视频，用灰色反光提亮主体上沿和下沿，青蓝、紫粉亮色集中在随轮廓变化的外圈及柔光，不加方形底板。忙用 `play → orbit → idle`（三角主体、六条前后环绕线、旋转和形变），等审批用 `notify → wide` 的视线、眨眼、睁眼和持续跳动的蓝点；等输入用已有 `egg → hexagon` 的蛋形与六边形变换。两个等待动作均为 4 秒循环，角色、光圈和运动全程连续；眼神完整保留，`!` / `?` 作为右上方独立的情绪符号持续显示，向外倾斜约 18° 并轻微摆动，跟随主体轻弹。两个符号字号为 148.4（相对于 316 单位画布），比原来放大 40%；两个符号沿字形纵向使用浅青 → 粉白 → 浅紫渐变，去掉容易融入背景的深蓝。等待角色整体缩至 90%，在 316 单位画布内左移 8、下移 8，符号保持原大小与位置，给符号圆点与主体光圈留出间隙。符号没有底板、不遮眼睛；审批提示点在左上沿持续跳动，半径为 14–17 单位，保留青蓝渐变，避免和右上符号挤在一起，输入没有蓝点。压缩用 `burst → thinking`（收缩、粒子聚合和三点），完成用 `wink → idle`（眨眼）；已关闭显示三个静态点，失联保留悲伤眼静态帧。bloub 原引擎负责轮廓插值、遮挡关系与视线透视，本地增加外置情绪符号及轻弹。身体分出去的碎片（压缩中思考段的两个侧点）按身体材质画成带描边的小玻璃球，不是实心色点，和刘海小人共用这条绘制规则（见 [crew.md](crew.md)）。减少动态效果时保留角色和右上符号的静态组合。回归检查角色与眼睛全程保留、循环边界连续、右上符号位置及蓝点覆盖；原生验收查看 34pt 会话和 28pt 提示的完整循环。外圈沿原主体轮廓描边，色相缓慢流转；环绕线与压缩粒子统一为青蓝、紫粉色系。主体中央保持近黑，边缘反光均剪裁在轮廓内；其余状态的轮廓、运动和前后遮挡沿用原版。来源版本、MIT 许可与重建命令见 `Resources/bloub/README.md`。
+会话行与提示药丸的小人和刘海小人同一套（[crew.md](crew.md)「状态表」「角色池」）：该项目分到的角色（`CrewCastStore.shared.member(for:)`）跑该状态的 crew 片段，34pt 行与 28pt 药丸按 316 单位画布映射（球身 21.5 / 17.7pt）；mood 按名册同一条折叠规则取（失联判在最前，完成但后台有活算在跑），失联行灰身半合眼、不再半透明，已关闭显示三个静态点；减少动态效果取各状态的定格帧。同项目的行同一个角色、同一个相位。片段来源版本、MIT 许可与重建命令见 `Resources/bloub/README.md`。
 
 用量区各提供方的品牌标志统一静止，保留各自原色；Claude、Codex 和其他提供方遵循同一规则。配额轨道的前沿微光与会话状态动画继续播放。
 
@@ -273,7 +273,7 @@ Claude 的路径都跟着 `ClaudeHome`（默认 `~/.claude`，`CLAUDE_CONFIG_DIR
 
 ## 验证
 
-`QuotaBarRenderingTests` 验证已用位置从左向右单调增长、0% / 100% 无流光、前沿流光不越过已用边界，以及 bloub 的轮廓旋转、前后彩色轨道、通知和粒子状态。原生视觉验收看完整动作与紧凑用量轨道。
+`QuotaBarRenderingTests` 验证已用位置从左向右单调增长、0% / 100% 无流光、前沿流光不越过已用边界；小刻片段的契约（符号与眼睛、环绕线与粒子、循环接缝）在 `BloubArtCrewTests`。原生视觉验收看完整动作与紧凑用量轨道。
 
 ```bash
 swift test --filter 'QuotaBarRenderingTests|HookDecisionTests|HookRunnerTests|SessionModelTests|TranscriptTitleTests|GhosttyMatchTests|TerminalLocatorTests|ClaudeQuotaReadOnlyTests|ClaudeTokenBoxTests|ClaudeLimitsCacheTests|UsageStoreTests|UsageScanCacheTests|JSONLUsageParserTests|JSONLUsageParserMemoryTests|CodexQuotaWindowTests|AntigravityParsingTests|KeychainReaderTests|TokenFormatTests|ProviderCredentialsTests|DeepSeekUsageProviderTests|KimiUsageProviderTests|GLMUsageProviderTests|NewAPIUsageProviderTests|WaitLedgerTests'

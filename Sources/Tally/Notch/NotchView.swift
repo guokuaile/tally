@@ -300,13 +300,17 @@ extension Peek.Style {
     var isCharacter: Bool { self == .session || self == .ask || self == .badge }
 }
 
-/// 不动的小刻：该状态的静态帧、该状态的配色（工牌用项目当前的状态），28pt。
+/// 小刻：该状态的片段、该状态的配色（工牌用项目当前的状态）、该项目的角色，28pt。`elapsed` 为 nil 画定格帧，给了就按它选帧并开步态。
 struct CrewBadgeIcon: View {
     let mood: CrewMood
     /// 等久了的档（docs/crew.md「等久了换档」）；工牌和提示条用的是刚弹出那一档
     var tier: CrewTier = .fresh
+    /// 画谁：每个调用点都得明说，漏改的编译不过
+    let cast: CastMember
     var size: CGFloat = 28
     var inset: CGFloat = 0
+    /// 画布边长对应多少 bloub 单位：200 是球身撑满，AI 页行和药丸沿用 316（34pt 格里球身 21.5pt）
+    var unit: CGFloat = 200
     var elapsed: Double? = nil
     var prefs = PreferencesStore.shared
 
@@ -315,9 +319,10 @@ struct CrewBadgeIcon: View {
             guard let art = BloubArt.bundled, let picked = CrewPlayback.pick(mood: mood, tier: tier, elapsed: elapsed ?? 0, still: elapsed == nil, art: art),
                   let clip = art.clips[picked.clip] else { return }
             context.translateBy(x: size.width / 2, y: size.height / 2)
-            context.scaleBy(x: size.width * (1 - inset * 2) / 200, y: size.height * (1 - inset * 2) / 200)
+            context.scaleBy(x: size.width * (1 - inset * 2) / unit, y: size.height * (1 - inset * 2) / unit)
+            let actor = CastActor(art: CrewCastStore.shared.art, member: cast, amp: elapsed == nil ? 0 : CastActor.amp(for: mood), frameIndex: picked.index, frameCount: clip.frames.count)
             clip.frames[picked.index].draw(in: context, time: Double(picked.index) / clip.fps,
-                                           style: CrewStyle.style(mood: mood, skin: prefs.prefs.crewSkin == "gradient" ? .gradient : .glass, tier: tier))
+                                           style: CrewStyle.style(mood: mood, skin: prefs.prefs.crewSkin == "gradient" ? .gradient : .glass, tier: tier), actor: actor)
         }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
@@ -328,6 +333,7 @@ struct PeekIcon: View {
     let peek: Peek
     let appeared: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appearedAt = Date()
 
     var body: some View {
         ZStack {
@@ -353,17 +359,24 @@ struct PeekIcon: View {
         .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.55), value: appeared)
     }
 
+    /// 会话类提示里的小刻：这个项目的角色跑该状态的片段，28pt 格按 316 单位映射（球身 17.7pt）
+    private func crew(mood: CrewMood) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: reduceMotion)) { timeline in
+            CrewBadgeIcon(mood: mood, cast: peek.cast, size: 28, unit: 316, elapsed: reduceMotion ? nil : timeline.date.timeIntervalSince(appearedAt))
+        }
+    }
+
     @ViewBuilder
     private var glyph: some View {
         if peek.failureMessage != nil {
             Image(systemName: "exclamationmark.triangle.fill")
         } else { switch peek.style {
         case .session:
-            SessionEyes(mood: .happy, identity: peek.sessionId ?? "", size: 28)
+            crew(mood: .done)
         case .ask:
-            SessionEyes(mood: peek.label == "等输入" ? .input : .permission, identity: peek.sessionId ?? "", size: 28)
+            crew(mood: peek.label == "等输入" ? .input : .permission)
         case .badge:
-            CrewBadgeIcon(mood: peek.crewMood)
+            CrewBadgeIcon(mood: peek.crewMood, cast: peek.cast)
         case .pluggedIn:
             Image(systemName: "bolt.fill")
                 .symbolEffect(.bounce.up, options: .nonRepeating, value: appeared)

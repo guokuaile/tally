@@ -30,7 +30,7 @@ final class PillQueuePeekTests: XCTestCase {
     /// 工牌：通用版式的字段、按项目去重、不和同一会话的状态提示互相替换、展开面板清掉。
     func testBadgeDeduplicatesByProjectNotBySession() {
         let session = record("s1")
-        let badge = Peek.badge(project("/code/repo", [session]))
+        let badge = Peek.badge(project("/code/repo", [session]), cast: .ball)
         XCTAssertEqual(badge.style, .badge)
         XCTAssertEqual(badge.id, "badge-claude:s1")
         XCTAssertEqual(badge.label, "新会话")
@@ -45,11 +45,11 @@ final class PillQueuePeekTests: XCTestCase {
         queue.enqueue(badge, at: origin, sessionSeconds: 5, batterySeconds: 3)
         queue.enqueue(badge, at: origin.addingTimeInterval(1), sessionSeconds: 5, batterySeconds: 3)
         XCTAssertEqual(queue.visible.map(\.id), ["badge-claude:s1"], "同一会话只一张")
-        queue.enqueue(Peek.session(session), at: origin.addingTimeInterval(2), sessionSeconds: 5, batterySeconds: 3)
+        queue.enqueue(Peek.session(session, cast: .ball), at: origin.addingTimeInterval(2), sessionSeconds: 5, batterySeconds: 3)
         XCTAssertEqual(queue.visible.count, 2, "同一会话的完成提示不替换工牌")
         queue.enqueue(badge, at: origin.addingTimeInterval(3), sessionSeconds: 5, batterySeconds: 3)
         XCTAssertEqual(queue.visible.count, 2, "工牌也不替换会话提示")
-        queue.enqueue(Peek.badge(project("/code/other", [record("s2")])), at: origin.addingTimeInterval(3), sessionSeconds: 5, batterySeconds: 3)
+        queue.enqueue(Peek.badge(project("/code/other", [record("s2")]), cast: .ball), at: origin.addingTimeInterval(3), sessionSeconds: 5, batterySeconds: 3)
         XCTAssertEqual(queue.visible.count, 2)
         XCTAssertEqual(queue.pending.count, 1)
         queue.clear()
@@ -59,7 +59,7 @@ final class PillQueuePeekTests: XCTestCase {
 
     /// 停留跟会话走、优先级和配额一档、没有刘海屏不发通知；排队过期直接丢，不进「详情已过期」汇总。
     func testBadgeStaysSessionSecondsAndExpiredPendingIsDroppedNotSummarized() {
-        let badge = Peek.badge(project("/code/repo", [record("s1")]))
+        let badge = Peek.badge(project("/code/repo", [record("s1")]), cast: .ball)
         XCTAssertEqual(badge.duration(session: 5, battery: 3), 5)
         XCTAssertEqual(badge.priority, 1)
         XCTAssertFalse(badge.notifiesWithoutNotch)
@@ -274,7 +274,7 @@ final class PillQueuePeekTests: XCTestCase {
         var queue = PillQueue()
         queue.setHeightLimit(900, at: origin)
         for id in ["a", "b", "c"] {
-            queue.enqueue(Peek.badge(project("/code/repo", [record(id)])), at: origin, sessionSeconds: 5, batterySeconds: 3)
+            queue.enqueue(Peek.badge(project("/code/repo", [record(id)]), cast: .ball), at: origin, sessionSeconds: 5, batterySeconds: 3)
         }
         XCTAssertEqual(queue.visible.count, 1, "工牌依次悬挂，其他工牌排队")
         XCTAssertEqual(queue.pending.count, 2)
@@ -292,20 +292,20 @@ final class PillQueuePeekTests: XCTestCase {
     }
 
     func testBadgeSubtitleFallsBackToProviderWhenModelUnknown() {
-        XCTAssertEqual(Peek.badge(project("/code/repo", [record("s1", provider: "codex", model: nil)])).subtitle, "Codex")
-        XCTAssertNil(Peek.badge(project("/code/empty", [])).subtitle)
-        XCTAssertNil(Peek.badge(project("/code/empty", [])).sessionId)
+        XCTAssertEqual(Peek.badge(project("/code/repo", [record("s1", provider: "codex", model: nil)]), cast: .ball).subtitle, "Codex")
+        XCTAssertNil(Peek.badge(project("/code/empty", []), cast: .ball).subtitle)
+        XCTAssertNil(Peek.badge(project("/code/empty", []), cast: .ball).sessionId)
     }
 
     func testBadgeTargetsTheNewSessionInAnExistingProject() {
         let old = record("old")
         let newcomer = record("new")
         let group = project("/code/repo", [old, newcomer])
-        let badge = Peek.badge(group, session: newcomer)
+        let badge = Peek.badge(group, session: newcomer, cast: .ball)
         XCTAssertEqual(badge.id, "badge-claude:new")
         XCTAssertEqual(badge.sessionId, "new")
         XCTAssertEqual(badge.subtitle, "Claude · Opus 5")
-        XCTAssertNotEqual(badge.id, Peek.badge(group, session: old).id)
+        XCTAssertNotEqual(badge.id, Peek.badge(group, session: old, cast: .ball).id)
     }
 
     func testBadgeDistinguishesUntitledSessions() {
@@ -314,8 +314,8 @@ final class PillQueuePeekTests: XCTestCase {
         first.title = nil
         second.title = nil
         let group = project("/code/repo", [first, second])
-        XCTAssertEqual(Peek.badge(group, session: first).subtitle, "Claude · Opus 5")
-        XCTAssertEqual(Peek.badge(group, session: second).subtitle, "Claude · Opus 5")
+        XCTAssertEqual(Peek.badge(group, session: first, cast: .ball).subtitle, "Claude · Opus 5")
+        XCTAssertEqual(Peek.badge(group, session: second, cast: .ball).subtitle, "Claude · Opus 5")
     }
 
     func testThreeVisibleAndEachQueuedPillGetsFullTimeOnlyWhenShown() {
@@ -376,11 +376,11 @@ final class PillQueuePeekTests: XCTestCase {
         newer.updatedAt = 2
         newer.title = "new"
         var queue = PillQueue()
-        queue.enqueue(.session(newer), at: origin, sessionSeconds: 5, batterySeconds: 3)
-        XCTAssertFalse(queue.enqueueFailure(Peek.session(old).failed("无法确定窗口"), for: old, current: [newer], at: origin, sessionSeconds: 5, batterySeconds: 3))
+        queue.enqueue(.session(newer, cast: .ball), at: origin, sessionSeconds: 5, batterySeconds: 3)
+        XCTAssertFalse(queue.enqueueFailure(Peek.session(old, cast: .ball).failed("无法确定窗口"), for: old, current: [newer], at: origin, sessionSeconds: 5, batterySeconds: 3))
         XCTAssertEqual(queue.visible.first?.peek?.title, "new")
         queue.clear()
-        XCTAssertTrue(queue.enqueueFailure(Peek.session(old).failed("无法确定窗口"), for: old, current: [old], at: origin, sessionSeconds: 5, batterySeconds: 3))
+        XCTAssertTrue(queue.enqueueFailure(Peek.session(old, cast: .ball).failed("无法确定窗口"), for: old, current: [old], at: origin, sessionSeconds: 5, batterySeconds: 3))
         XCTAssertEqual(queue.visible.first?.peek?.failureMessage, "无法确定窗口")
     }
 

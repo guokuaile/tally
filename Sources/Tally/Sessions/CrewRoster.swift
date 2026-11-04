@@ -84,7 +84,11 @@ enum CrewRoster {
     static let launchGrace: TimeInterval = 10
 
     /// 名册只认两家：hook 只写 claude / codex（`HookRunner.providers`），别的值按 Claude 算，和 `providerLabel` 一致。
-    static func tool(of session: SessionRecord) -> String { session.provider == "codex" ? "codex" : "claude" }
+    static func tool(of session: SessionRecord) -> String { tool(provider: session.provider) }
+    static func tool(provider: String) -> String { provider == "codex" ? "codex" : "claude" }
+
+    /// 名册的项目 id 和角色分配表（`CrewCastStore`）的键是同一个字符串：工具、冒号、规范化目录
+    static func projectKey(tool: String, path: String) -> String { "\(tool):\(path)" }
 
     /// 失联判在最前，和 AI 页「失联」同一函数；`done` 还有后台活算在跑。`ended` 不进名册，调用方先滤掉。
     static func mood(of session: SessionRecord, now: Date) -> CrewMood? {
@@ -120,7 +124,7 @@ enum CrewRoster {
             let waitingSince = folded.isWaiting
                 ? ordered.compactMap { $0.isWaiting && !$0.isStale(now: now) ? ($0.waitingSince ?? $0.updatedDate) : nil }.min()
                 : nil
-            return CrewProject(id: "\(key.tool):\(key.path)", provider: key.tool, path: key.path, name: last.isEmpty ? "/" : last, sessions: ordered,
+            return CrewProject(id: projectKey(tool: key.tool, path: key.path), provider: key.tool, path: key.path, name: last.isEmpty ? "/" : last, sessions: ordered,
                                mood: folded, waitingSince: waitingSince, tier: CrewTier.of(waited: waitingSince.map { now.timeIntervalSince($0) }))
         }.sorted { a, b in
             if a.mood != b.mood { return a.mood < b.mood }

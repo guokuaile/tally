@@ -60,7 +60,7 @@ final class PeekTests: XCTestCase {
 
     func testSessionPeekUsesTitleAndFirstLineOfMessage() {
         let record = SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "第一行\n第二行", updatedAt: 1)
-        let peek = Peek.session(record)
+        let peek = Peek.session(record, cast: .ball)
         XCTAssertEqual(peek.style, .session)
         XCTAssertEqual(peek.title, "标题")
         XCTAssertEqual(peek.subtitle, "第一行 第二行")
@@ -77,21 +77,21 @@ final class PeekTests: XCTestCase {
         XCTAssertNotEqual(failure.id, peek.id)
         XCTAssertNil(peek.failureMessage)
         XCTAssertEqual(peek.duration(session: 5, battery: 4), 5)
-        XCTAssertEqual(Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: nil, transcriptPath: "", message: "", updatedAt: 1)).subtitle, "跑完了 · 点这里跳过去")
+        XCTAssertEqual(Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: nil, transcriptPath: "", message: "", updatedAt: 1), cast: .ball).subtitle, "跑完了 · 点这里跳过去")
     }
 
     func testWaitingSessionsPeekAsAsk() {
-        let ask = Peek.session(SessionRecord(sessionId: "s", state: .waitingPermission, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1))
+        let ask = Peek.session(SessionRecord(sessionId: "s", state: .waitingPermission, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1), cast: .ball)
         XCTAssertEqual(ask.style, .ask)
         XCTAssertEqual(ask.label, "等审批")
         XCTAssertEqual(ask.duration(session: 5, battery: 4), 8, "等审批停得最久")
-        XCTAssertEqual(Peek.session(SessionRecord(sessionId: "s", state: .waitingInput, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1)).label, "等输入")
+        XCTAssertEqual(Peek.session(SessionRecord(sessionId: "s", state: .waitingInput, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1), cast: .ball).label, "等输入")
     }
 
     /// 停留时长跟着设置走：等审批固定比跑完多 askExtra，电池走自己那个。
     func testPeekDurationFollowsPreferences() {
-        let done = Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "", updatedAt: 1))
-        let ask = Peek.session(SessionRecord(sessionId: "s", state: .waitingPermission, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1))
+        let done = Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "", updatedAt: 1), cast: .ball)
+        let ask = Peek.session(SessionRecord(sessionId: "s", state: .waitingPermission, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: nil, updatedAt: 1), cast: .ball)
         XCTAssertEqual(done.duration(session: 9, battery: 4), 9)
         XCTAssertEqual(ask.duration(session: 9, battery: 4), 9 + Peek.askExtra, "等审批比跑完多留，真要人来的那种")
         XCTAssertEqual(Peek.battery(.full).duration(session: 9, battery: 6), 6, "电池走自己那个秒数")
@@ -121,7 +121,7 @@ final class PeekTests: XCTestCase {
     }
 
     func testOnlyBatteryPeeksStayOutOfSystemNotifications() {
-        let done = Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "", updatedAt: 1))
+        let done = Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "", updatedAt: 1), cast: .ball)
         XCTAssertTrue(done.notifiesWithoutNotch)
         XCTAssertTrue(Peek.quota(QuotaEvent(provider: .codex, window: "7 天", kind: .exhausted, resetsAt: nil)).notifiesWithoutNotch)
         XCTAssertTrue(Peek.shelf(names: ["a"], enabled: true).notifiesWithoutNotch)
@@ -140,7 +140,7 @@ final class PeekTests: XCTestCase {
 
     /// 点提示条按设置三选一；电池类不可点，给空计划。
     func testPeekTapPlan() {
-        let session = Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "", updatedAt: 1))
+        let session = Peek.session(SessionRecord(sessionId: "s", state: .done, cwd: "/tmp/x", title: "标题", transcriptPath: "", message: "", updatedAt: 1), cast: .ball)
         XCTAssertEqual(session.tapPlan(.terminal), Peek.TapPlan(focusTerminal: true, openAI: false))
         XCTAssertEqual(session.tapPlan(.ai), Peek.TapPlan(focusTerminal: false, openAI: true))
         XCTAssertEqual(session.tapPlan(.both), Peek.TapPlan(focusTerminal: true, openAI: true))

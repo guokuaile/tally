@@ -24,6 +24,13 @@ struct BloubArt {
         var small = false
     }
     struct Arc { let front: Path; let back: Path; let shading: GraphicsContext.Shading; let start: CGPoint; let end: CGPoint; let width: Double; let opacity: Double }
+    /// 身体轮廓的仿射拟合：质心、主轴角、两个主方差开根 ÷ 参考（`crew-run` 第 0 帧）；角色照它平移、歪、缩、压扁
+    struct Fit {
+        var cx: Double, cy: Double, theta: Double, sx: Double, sy: Double
+        static let identity = Fit(cx: 0, cy: 0, theta: 0, sx: 1, sy: 1)
+    }
+    /// 一只 bloub 眼睛的矩阵拆出来的位置、大小、旋转、透明度；角色的眼睛照它动
+    struct EyeSpec { let center: CGPoint; let size: CGSize; let rotation: Double; let alpha: Double }
     struct Frame {
         let body: Path
         let alpha: Double
@@ -39,11 +46,18 @@ struct BloubArt {
         var ring: Double = 0
         var lids: Double = 0
         var arcEyes = false
+        var fit = Fit.identity
+        /// 按 x 排：角色的左眼跟 bloub 的左眼。玻璃球仍画 `eyes`
+        var eyeSpecs: [EyeSpec] = []
 
         var symbolAnchor: CGPoint { CGPoint(x: 104, y: -73 + symbolY) }
 
-        func draw(in supplied: GraphicsContext, time: Double = 0, style: Style = Style()) {
+        func draw(in supplied: GraphicsContext, time: Double = 0, style: Style = Style(), actor: CastActor? = nil) {
             var context = supplied
+            // 有角色且这一帧有眼睛：身体换成「角色轮廓 × 这一帧的拟合 × 步态」；没眼睛的帧（等审批的「!」、压缩炸开、完成的彗星）角色变回玻璃球
+            let cast = eyeSpecs.isEmpty ? nil : actor
+            let castMatrix = cast.map { $0.matrix(self) } ?? .identity
+            let shape = cast.map { $0.character.outline.applying(castMatrix) } ?? body
             context.opacity *= style.opacity
             if symbol != nil && !style.compactSymbol {
                 context.translateBy(x: -8, y: 8)
@@ -62,7 +76,7 @@ struct BloubArt {
                     Gradient(colors: [color.opacity(glowAmount), color.opacity(0)]), center: CGPoint(x: 0, y: -10), startRadius: 0, endRadius: 190))
             }
             // 身体和它分出去的碎片一个材质：模糊光晕描边 → 近黑玻璃或套系渐变 → 描边 → 裁在轮廓里、锚在自己中心的高光
-            func glass(_ path: Path, center: CGPoint, radius: Double, in base: GraphicsContext) {
+            func glass(_ path: Path, center: CGPoint, radius: Double, in base: GraphicsContext, sprite: CastActor? = nil) {
                 // 光晕和改之前一样是模糊的描边：AI 页和药丸的画法不变；翅膀一帧只画一次存成位图，模糊的开销不在每 tick 上
                 base.drawLayer { glow in
                     glow.opacity *= 0.5
@@ -70,6 +84,8 @@ struct BloubArt {
                     glow.stroke(path, with: rim, style: StrokeStyle(lineWidth: haloWidth, lineJoin: .round))
                 }
                 base.fill(path, with: BloubArt.bodyShading(style, center: center, radius: radius))
+                // 玻璃渐变填完、流光描边之前把角色位图裁在轮廓里画上去，描边和高光照旧压在上面
+                if let sprite { sprite.paintBody(in: base, clip: path, matrix: castMatrix) }
                 base.stroke(path, with: rim, style: StrokeStyle(lineWidth: rimWidth, lineJoin: .round))
                 var inner = base
                 inner.clip(to: path)
@@ -105,7 +121,7 @@ struct BloubArt {
             if dotsBehind { drawDots() }
             var face = context
             face.opacity *= alpha
-            glass(body, center: .zero, radius: 100, in: face)
+            glass(shape, center: .zero, radius: 100, in: face, sprite: cast)
             if ring > 0 {
                 // 绿环和描边同一套粗细：模糊的宽描边打底（预览 0.6），再压一道实线
                 var green = face
@@ -113,25 +129,30 @@ struct BloubArt {
                 green.drawLayer { halo in
                     halo.opacity *= 0.6
                     halo.addFilter(.blur(radius: haloBlur))
-                    halo.stroke(body, with: .color(BloubArt.ringColor), style: StrokeStyle(lineWidth: haloWidth, lineJoin: .round))
+                    halo.stroke(shape, with: .color(BloubArt.ringColor), style: StrokeStyle(lineWidth: haloWidth, lineJoin: .round))
                 }
-                green.stroke(body, with: .color(BloubArt.ringColor), style: StrokeStyle(lineWidth: rimWidth, lineJoin: .round))
+                green.stroke(shape, with: .color(BloubArt.ringColor), style: StrokeStyle(lineWidth: rimWidth, lineJoin: .round))
             }
-            face.clip(to: body)
-            for eye in eyes {
-                var layer = face
-                layer.opacity *= eye.opacity
-                if arcEyes {
-                    layer.stroke(eye.path, with: eye.shading, style: StrokeStyle(lineWidth: 7, lineCap: .round))
-                    continue
+            face.clip(to: shape)
+            if let cast {
+                // bloub 的眼睛和缺口不画，角色自己的眼睛按 bloub 眼睛的位移 / 缩放 / 旋转动
+                cast.drawEyes(in: face, frame: self)
+            } else {
+                for eye in eyes {
+                    var layer = face
+                    layer.opacity *= eye.opacity
+                    if arcEyes {
+                        layer.stroke(eye.path, with: eye.shading, style: StrokeStyle(lineWidth: 7, lineCap: .round))
+                        continue
+                    }
+                    layer.fill(eye.path, with: eye.shading)
+                    if let lid = eye.lid {
+                        layer.clip(to: eye.path)
+                        layer.fill(lid, with: .color(style.lid))
+                    }
                 }
-                layer.fill(eye.path, with: eye.shading)
-                if let lid = eye.lid {
-                    layer.clip(to: eye.path)
-                    layer.fill(lid, with: .color(style.lid))
-                }
+                if let notch { face.fill(notch, with: BloubArt.bodyShading(style)) }
             }
-            if let notch { face.fill(notch, with: BloubArt.bodyShading(style)) }
             if !dotsBehind { drawDots() }
             if let notif {
                 let bounds = notif.boundingRect
@@ -221,23 +242,44 @@ struct BloubArt {
         let clips: [String: Clip]
     }
 
-    /// 文件里有什么片段就解什么；只有会话六个片段是硬要求，小刻片段缺了翅膀不画、AI 页照旧
+    /// 六个小刻片段是硬要求：任一缺失或坏掉整份作废（翅膀和 AI 页都靠它们），作废前点名是哪段；多余的片段坏了只是没有那段
     init?(url: URL) {
-        guard let data = try? Data(contentsOf: url), let file = try? JSONDecoder().decode(DataFile.self, from: data) else { return nil }
+        guard let data = try? Data(contentsOf: url) else {
+            Log.error("bloub/frames.json 读不到：\(url.path)")
+            return nil
+        }
+        let file: DataFile
+        do { file = try JSONDecoder().decode(DataFile.self, from: data) } catch {
+            Log.error("bloub/frames.json 解不开：\(error)")
+            return nil
+        }
+        let required = CrewMood.allCases.map(\.clip)
         var clips: [String: Clip] = [:]
         for (name, clip) in file.clips {
-            let required = SessionEyes.Mood(rawValue: name).map { $0 != .sleeping } ?? false
             guard clip.fps > 0, clip.fps.isFinite, !clip.frames.isEmpty, let frames = Self.decodeFrames(clip.frames) else {
-                // 坏掉的会话片段整份作废；坏掉的小刻片段只是没有那段（翅膀自己发现缺片段后不画），AI 页照旧
-                if required { return nil }
+                if required.contains(name) {
+                    Log.error("bloub/frames.json 的 \(name) 片段坏了，整份作废")
+                    return nil
+                }
                 continue
             }
             clips[name] = Clip(fps: clip.fps, frames: frames)
         }
-        for mood in SessionEyes.Mood.allCases where mood != .sleeping {
-            guard clips[mood.rawValue] != nil else { return nil }
+        for name in required where clips[name] == nil {
+            Log.error("bloub/frames.json 缺 \(name) 片段，整份作废")
+            return nil
         }
-        self.clips = clips
+        // 拟合的参考方差取 crew-run 第 0 帧（接近正圆）：正圆帧拟合出 sx = sy = 1。解码时存的是方差开根，这里统一除掉
+        let base = clips[CrewMood.run.clip]!.frames[0].fit
+        let ref = sqrt((base.sx * base.sx + base.sy * base.sy) / 2)
+        self.clips = clips.mapValues { clip in
+            Clip(fps: clip.fps, frames: clip.frames.map { frame in
+                var normalized = frame
+                normalized.fit.sx /= ref
+                normalized.fit.sy /= ref
+                return normalized
+            })
+        }
     }
 
     private static func decodeFrames(_ frames: [DataFile.Frame]) -> [Frame]? {
@@ -294,8 +336,65 @@ struct BloubArt {
         let symbolY = frame.symbolY ?? 0
         let glow = frame.glow ?? 0, ring = frame.ring ?? 0, lids = frame.lids ?? 0
         guard symbolY.isFinite, (0...1).contains(glow), (0...1).contains(ring), (0...1).contains(lids) else { return nil }
+        // 眼睛矩阵拆成位置 / 大小 / 旋转，按 x 排：角色的左眼跟 bloub 的左眼
+        let specs = frame.eyes.map { eye -> EyeSpec in
+            let m = eye.matrix
+            return EyeSpec(center: CGPoint(x: m[4], y: m[5]), size: CGSize(width: eye.width * hypot(m[0], m[1]), height: eye.height * hypot(m[2], m[3])),
+                           rotation: atan2(m[1], m[0]), alpha: eye.alpha)
+        }.sorted { $0.center.x < $1.center.x }
         return Frame(body: body, alpha: frame.bodyAlpha, eyes: eyes, dots: dots, dotsBehind: frame.dotsBehind, arcs: arcs, notch: frame.notch?.path, notif: frame.notif?.path, symbol: frame.symbol, symbolY: symbolY,
-                     glow: glow, ring: ring, lids: lids, arcEyes: frame.arcEyes ?? false)
+                     glow: glow, ring: ring, lids: lids, arcEyes: frame.arcEyes ?? false, fit: Self.moments(frame.body), eyeSpecs: specs)
+    }
+
+    /// 身体轮廓按曲线细分（三次曲线 12 份）、等弧长重采样 240 点后的质心与二阶矩；`sx` / `sy` 先存方差开根，`init` 再按参考归一。
+    /// 主轴角折到 (−45°, 45°]，接近正圆时主轴方向是噪声，按各向异性压下去
+    static func moments(_ values: [Double]) -> Fit {
+        var pts: [CGPoint] = [], cur = CGPoint.zero
+        var i = 0
+        while i < values.count {
+            let op = values[i]
+            i += 1
+            switch op {
+            case 0, 1:
+                cur = CGPoint(x: values[i], y: values[i + 1])
+                pts.append(cur)
+                i += 2
+            case 2:
+                let p0 = cur, p1 = CGPoint(x: values[i], y: values[i + 1]), p2 = CGPoint(x: values[i + 2], y: values[i + 3]), p3 = CGPoint(x: values[i + 4], y: values[i + 5])
+                for k in 1...12 {
+                    let t = Double(k) / 12, u = 1 - t
+                    pts.append(CGPoint(x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
+                                       y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y))
+                }
+                cur = p3
+                i += 6
+            default: break
+            }
+        }
+        let n = pts.count
+        guard n >= 3 else { return .identity }
+        let seg = (0..<n).map { hypot(pts[($0 + 1) % n].x - pts[$0].x, pts[($0 + 1) % n].y - pts[$0].y) }
+        let total = seg.reduce(0, +)
+        guard total > 0 else { return .identity }
+        let step = total / 240
+        var samples: [CGPoint] = [], acc = 0.0, k = 0
+        for s in 0..<240 {
+            let target = Double(s) * step
+            while acc + seg[k] < target { acc += seg[k]; k = (k + 1) % n }
+            let a = pts[k], b = pts[(k + 1) % n], f = seg[k] > 0 ? (target - acc) / seg[k] : 0
+            samples.append(CGPoint(x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f))
+        }
+        let count = Double(samples.count)
+        let cx = samples.map(\.x).reduce(0, +) / count, cy = samples.map(\.y).reduce(0, +) / count
+        var sxx = 0.0, syy = 0.0, sxy = 0.0
+        for p in samples { let dx = p.x - cx, dy = p.y - cy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy }
+        sxx /= count; syy /= count; sxy /= count
+        var theta = 0.5 * atan2(2 * sxy, sxx - syy)
+        let c = cos(theta), s = sin(theta)
+        var v1 = sxx * c * c + syy * s * s + 2 * sxy * s * c, v2 = sxx * s * s + syy * c * c - 2 * sxy * s * c
+        if theta > .pi / 4 { theta -= .pi / 2; swap(&v1, &v2) } else if theta < -.pi / 4 { theta += .pi / 2; swap(&v1, &v2) }
+        let aniso = abs(v1 - v2) / (v1 + v2), weight = min(1, max(0, (aniso - 0.02) / 0.06))
+        return Fit(cx: cx, cy: cy, theta: theta * weight, sx: sqrt(max(v1, 1)), sy: sqrt(max(v2, 1)))
     }
 
     static func color(_ hex: String) -> Color? {
@@ -303,7 +402,7 @@ struct BloubArt {
         return Color(red: Double((rgb >> 16) & 255)/255, green: Double((rgb >> 8) & 255)/255, blue: Double(rgb & 255)/255)
     }
 
-    private static func path(_ values: [Double]) -> Path? {
+    static func path(_ values: [Double]) -> Path? {
         guard values.allSatisfy(\.isFinite) else { return nil }
         var path = Path()
         var i = 0
@@ -322,57 +421,5 @@ struct BloubArt {
             i += count
         }
         return path
-    }
-
-    func frame(mood: SessionEyes.Mood, time: Double, still: Bool = false) -> Frame? {
-        guard let clip = clips[mood.rawValue] else { return nil }
-        return clip.frame(at: still ? (mood == .permission || mood == .input ? 2.4 : 0.9) : time, loop: true)
-    }
-}
-
-struct SessionEyes: View {
-    enum Mood: String, CaseIterable { case working, permission, input, compacting, happy, sleeping, stale }
-    let mood: Mood
-    var identity = ""
-    var active = true
-    var size: CGFloat = 34
-    var art: BloubArt? = .bundled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var appearedAt = Date()
-
-    var body: some View {
-        Group {
-            if mood == .sleeping {
-                HStack(spacing: 4) {
-                    ForEach(0..<3) { index in
-                        Circle().fill(.white.opacity(index == 1 ? 0.75 : 0.35))
-                            .frame(width: size * (index == 1 ? 6 : 5) / 34, height: size * (index == 1 ? 6 : 5) / 34)
-                    }
-                }
-            } else {
-                animatedBody
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
-        .onChange(of: mood) { _, _ in appearedAt = Date() }
-    }
-
-    private var animatedBody: some View {
-        let still = !active || reduceMotion || mood == .stale
-        return TimelineView(.animation(minimumInterval: 1.0 / 30, paused: still)) { timeline in
-            let phase = Double(identity.utf8.reduce(0) { ($0 * 31 + Int($1)) % 997 }) / 997
-            let time = still ? 0.9 : max(0, timeline.date.timeIntervalSince(appearedAt)) + phase
-            if let art, let frame = art.frame(mood: mood, time: time, still: still) {
-                Canvas { context, canvas in
-                    context.translateBy(x: canvas.width/2, y: canvas.height/2)
-                    context.scaleBy(x: canvas.width/316, y: canvas.height/316)
-                    frame.draw(in: context, time: time)
-                }
-                .opacity(mood == .stale ? 0.55 : 1)
-            } else {
-                Image(systemName: "exclamationmark.triangle").help("会话动画素材未加载")
-            }
-        }
     }
 }

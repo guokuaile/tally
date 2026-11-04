@@ -135,7 +135,7 @@ struct SessionRow: View {
 
     private func content(stale: Bool, ended: Bool) -> some View {
             HStack(spacing: 8) {
-                StateIcon(state: session.state, stale: stale, backgroundWork: session.backgroundWork != nil, identity: session.sessionId)
+                StateIcon(session: session, stale: stale)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
                         // 从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上
@@ -293,46 +293,66 @@ struct RowTag: View {
     }
 }
 
-/// 状态语义保留在辅助功能文本中，不依赖颜色或动画。
+/// 状态语义保留在辅助功能文本中，不依赖颜色或动画。小人和刘海翅膀同一套：该项目分到的角色跑该状态的 crew 片段（docs/crew.md「角色池」）；已关闭画三个静态点。
 struct StateIcon: View {
-    let state: SessionRecord.State
+    let session: SessionRecord
     let stale: Bool
-    let backgroundWork: Bool
-    var identity = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visible = false
 
     var body: some View {
-        SessionEyes(mood: mood, identity: identity, active: visible, size: state == .ended ? 24 : 34)
-            .accessibilityHidden(false)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(label)
-            .help(label)
-            .onScrollVisibilityChange(threshold: 0.05) { visible = $0 }
+        Group {
+            if let mood {
+                // 同项目的行同一个角色、同一个相位：相位按项目键取（和翅膀同一个散列），时间用墙钟
+                TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !visible || reduceMotion)) { timeline in
+                    CrewBadgeIcon(mood: mood, cast: CrewCastStore.shared.member(for: session), size: 34, unit: 316,
+                                  elapsed: reduceMotion ? nil : timeline.date.timeIntervalSinceReferenceDate + phase)
+                }
+                .frame(width: 34, height: 34)
+            } else {
+                HStack(spacing: 4) {
+                    ForEach(0..<3) { index in
+                        Circle().fill(.white.opacity(index == 1 ? 0.75 : 0.35))
+                            .frame(width: 24 * (index == 1 ? 6 : 5) / 34, height: 24 * (index == 1 ? 6 : 5) / 34)
+                    }
+                }
+                .frame(width: 24, height: 24)
+            }
+        }
+        .accessibilityHidden(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .help(label)
+        .onScrollVisibilityChange(threshold: 0.05) { visible = $0 }
     }
 
-    private var mood: SessionEyes.Mood {
+    /// 名册同一条折叠规则（`CrewRoster.mood(of:)`）：失联判在最前，完成但后台还有活算在跑；已关闭没有 mood
+    private var mood: CrewMood? {
+        if session.state == .ended { return nil }
         if stale { return .stale }
-        switch state {
+        switch session.state {
         case .waitingPermission: return .permission
         case .waitingInput: return .input
-        case .running: return .working
         case .compacting: return .compacting
-        case .done: return backgroundWork ? .working : .happy
-        case .ended: return .sleeping
+        case .running: return .run
+        case .done: return session.backgroundWork == nil ? .done : .run
+        case .ended: return nil
         }
+    }
+
+    private var phase: Double {
+        Double(CrewRoster.bucket(CrewCastStore.shared.key(provider: session.provider, cwd: session.cwd) + "·phase", of: 6)) * 0.41
     }
 
     private var label: String {
         if stale { return "失联" }
-        switch state {
+        switch session.state {
         case .waitingPermission: return "等审批"
         case .waitingInput: return "等输入"
         case .running: return "正在工作"
         case .compacting: return "压缩上下文中"
-        case .done: return backgroundWork ? "主回合已结束，后台仍在工作" : "已完成"
+        case .done: return session.backgroundWork == nil ? "已完成" : "主回合已结束，后台仍在工作"
         case .ended: return "已关闭"
         }
     }
-
-
 }

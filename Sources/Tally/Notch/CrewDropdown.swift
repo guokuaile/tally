@@ -102,9 +102,10 @@ struct CrewDropdownView: View {
 private struct CrewMovingAvatar: View {
     let mood: CrewMood
     var tier: CrewTier = .fresh
+    let cast: CastMember
     var body: some View {
         GeometryReader { geometry in
-            CrewBadgeIcon(mood: mood, tier: tier, size: min(geometry.size.width, geometry.size.height), inset: 0.12)
+            CrewBadgeIcon(mood: mood, tier: tier, cast: cast, size: min(geometry.size.width, geometry.size.height), inset: 0.12)
         }.accessibilityHidden(true)
     }
 }
@@ -112,8 +113,8 @@ private struct CrewMovingAvatar: View {
 final class CrewAvatarPanel: NSPanel {
     private let host: NSHostingView<CrewMovingAvatar>
 
-    init(mood: CrewMood, tier: CrewTier = .fresh) {
-        host = NSHostingView(rootView: CrewMovingAvatar(mood: mood, tier: tier))
+    init(mood: CrewMood, tier: CrewTier = .fresh, cast: CastMember) {
+        host = NSHostingView(rootView: CrewMovingAvatar(mood: mood, tier: tier, cast: cast))
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isFloatingPanel = true
         hidesOnDeactivate = false
@@ -129,7 +130,7 @@ final class CrewAvatarPanel: NSPanel {
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-    func update(mood: CrewMood, tier: CrewTier = .fresh) { host.rootView = CrewMovingAvatar(mood: mood, tier: tier) }
+    func update(mood: CrewMood, tier: CrewTier = .fresh, cast: CastMember) { host.rootView = CrewMovingAvatar(mood: mood, tier: tier, cast: cast) }
 }
 
 private struct CrewDropdownButtonStyle: ButtonStyle {

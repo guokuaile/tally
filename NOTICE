@@ -66,7 +66,12 @@ MediaRemote、stdout 出 JSON、stdin 收命令、stdin 关闭即退出）参考
 
 Claude、OpenAI、Cursor、Antigravity、DeepSeek、Kimi、智谱 GLM / Z.ai 的名称与标志归各自所有者，放在这里只用来标明是哪家的会话与用量。
 
-会话表情矢量数据改编自 jeremy-prt/bloub，版本 b4bb3c1b5f93c7b87a2e8d620f667c4093d97749：
+小刻片段的矢量数据改编自 jeremy-prt/bloub，版本 b4bb3c1b5f93c7b87a2e8d620f667c4093d97749：
 https://github.com/jeremy-prt/bloub
 Copyright (c) 2026 Jérémy Perret，MIT License，全文保留于 Resources/bloub/LICENSE 并随应用打包。
 原始身体轮廓、形变、旋转、前后轨道、粒子、通知和眼神均由上游引擎采样；Tally 选择对应会话状态的原版动作序列。
+
+小刻的位图角色素材 Resources/cast/（cast.json 与各角色 PNG）由 Resources/cast/export.swift 抠自 Digo 的角色参考图
+（digo-faces-sheet@2x.png，sha256 见 Resources/cast/README.md），是作者在参考图基础上改动的版本，
+声明见 Resources/cast/LICENSE 并随应用打包；原始角色形象的权利归 Digo 及其作者所有。
+公开仓库的快照不带这个目录（scripts/release.sh），没有 Resources/cast/LICENSE 时 scripts/build-dmg.sh 与 release.sh 拒绝打包、发版。

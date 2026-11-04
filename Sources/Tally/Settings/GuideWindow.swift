@@ -105,9 +105,12 @@ struct GuideView: View {
         guard let art = BloubArt.bundled else { return [] }
         let cache = CrewFrameCache(art: art)
         let skin: BloubArt.Style.Skin = PreferencesStore.shared.prefs.crewSkin == "gradient" ? .gradient : .glass
-        return CrewMood.allCases.compactMap { mood in
+        let pool = cache.cast.pool
+        return CrewMood.allCases.enumerated().compactMap { index, mood in
+            // 六个定格帧按池子前六个角色依次画（球、猫、小恶魔、刺球、显示器、手柄），一眼看出角色不止一种；没素材时都是球
+            let cast = pool[index % pool.count]
             guard let pick = CrewPlayback.pick(mood: mood, elapsed: 0, still: true, art: art),
-                  let image = cache.image(CrewFrameCache.Key(clip: pick.clip, index: pick.index, look: CrewFrameCache.Look(mood: mood, skin: skin)), scale: 2)
+                  let image = cache.image(CrewFrameCache.Key(clip: pick.clip, index: pick.index, look: CrewFrameCache.Look(mood: mood, skin: skin, cast: cast), still: true), scale: 2)
             else { return nil }
             return Still(mood: mood, image: image)
         }
@@ -116,7 +119,7 @@ struct GuideView: View {
     /// 编一条跑完的 Claude 会话给提示条用。
     private static let samplePeek = Peek.session(SessionRecord(
         sessionId: "guide", provider: "claude", state: .done, cwd: "/Users/you/code/shop-web", title: "给订单列表加分页",
-        transcriptPath: "", message: nil, updatedAt: Date().timeIntervalSince1970 * 1000, model: "claude-opus-5"))
+        transcriptPath: "", message: nil, updatedAt: Date().timeIntervalSince1970 * 1000, model: "claude-opus-5"), cast: .ball)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {

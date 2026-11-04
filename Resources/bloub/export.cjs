@@ -5,7 +5,7 @@ const { writeFileSync } = require('node:fs');
 const compiled = resolve(process.argv[2]);
 const { BotEngine } = require(resolve(compiled, 'engine.js'));
 const { EXPRESSION_BY_ID } = require(resolve(compiled, 'expressions.js'));
-const SESSION_FPS = 30, CREW_FPS = 20, R = 100, TAU = Math.PI * 2;
+const CREW_FPS = 20, R = 100, TAU = Math.PI * 2;
 const numbers = s => (s.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
 function path(d, lift = 0) {
   const ops = { M: 0, L: 1, C: 2, Z: 3 };
@@ -17,53 +17,6 @@ function path(d, lift = 0) {
 // the native renderer paints it with the body's material instead of a flat colour.
 const dot = (d, lift = 0) => ({ ...d, y: d.y + lift, path: d.d ? path(d.d) : null, d: undefined,
   ...(!d.color && d.depth == null ? { piece: true } : {}) });
-
-// ---- session clips (AI page and pills), unchanged parameters ----
-const cycles = {
-  working: [['play', 2], ['orbit', 3.4], ['idle', 1]],
-  permission: [['notify', 2], ['wide', 2]],
-  input: [['egg', 2], ['hexagon', 2]],
-  compacting: [['burst', 2.6], ['thinking', 1.2]],
-  happy: [['wink', 1.6], ['idle', 1.6]],
-  stale: [['idle', 1]]
-};
-function sample(mood, cycle) {
-  const fps = SESSION_FPS;
-  const engine = new BotEngine(100, cycle[0][0], null, mood === 'stale' ? EXPRESSION_BY_ID.get('triste') : null);
-  const frames = [];
-  const frameCount = cycle.reduce((n, [, duration]) => n + Math.round(duration * fps), 0);
-  const waiting = mood === 'permission' || mood === 'input';
-  const notification = mood === 'permission' ? new BotEngine(100, 'notify').sample(1).notif : null;
-  let index = 0;
-  // A warm-up cycle preserves the upstream transition across the loop boundary.
-  for (let pass = 0; pass < 2; pass++) {
-    for (const [state, duration] of cycle) {
-      engine.setState(state, index / fps);
-      for (let j = 0; j < Math.round(duration * fps); j++, index++) {
-        if (!pass) continue;
-        const f = engine.sample(index / fps);
-        const wave = (1 - Math.cos(frames.length / frameCount * 2 * Math.PI)) / 2;
-        const lift = waiting ? -18 * wave : 0;
-        const badge = notification ? { ...notification, x: -notification.x, y: notification.y + lift - 8 * wave, r: 14 + 3 * wave } : f.notif;
-        frames.push({
-          body: path(f.bodyPath, lift), bodyAlpha: f.bodyAlpha,
-          eyes: f.eyes.map(e => {
-            const n = numbers(e.d);
-            const matrix = numbers(e.matrix);
-            matrix[5] += lift;
-            return { width: -2*n[0], height: 2*(n[2]-n[1]), matrix, alpha: e.alpha };
-          }),
-          dots: f.dots.map(d => dot(d, lift)),
-          dotsBehind: f.dotsBehind,
-          arcs: f.arcs.map(a => ({ front: path(a.front), back: path(a.back), width: a.width, opacity: a.opacity, grad: a.grad })),
-          notif: badge, notch: notification ? { ...badge, r: badge.r + 5.4 } : f.notch,
-          ...(waiting ? { symbol: mood === 'permission' ? '!' : '?', symbolY: lift } : {})
-        });
-      }
-    }
-  }
-  return { fps, frames };
-}
 
 // ---- crew clips (小刻 beside the notch): 20 fps, every transform baked into the coordinates ----
 const eye = (w, h, tilt = 0, open = 1) => ({ w, h, tilt, open });
@@ -113,7 +66,7 @@ function mapPath(values, T, scale = 1) {
   return out;
 }
 const circle = (c, T) => c && (([x, y]) => ({ x, y, r: c.r }))(apply(T, c.x, c.y));
-// One decimal is 0.01 pt at the 22 pt crew size and keeps the file under the 4.8 MB budget; the session clips keep three.
+// One decimal is 0.01 pt at the 22 pt crew size and keeps the six clips around 1.5 MB.
 const round1 = v => Array.isArray(v) ? v.map(round1) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, round1(x)]))
   : typeof v === 'number' ? Math.round(v*10)/10 : v;
 function sampleCrew(spec) {
@@ -169,7 +122,6 @@ function sampleCrew(spec) {
 }
 
 const clips = {
-  ...Object.fromEntries(Object.entries(cycles).map(([mood, cycle]) => [mood, sample(mood, cycle)])),
   ...Object.fromEntries(Object.entries(crew).map(([name, spec]) => [name, sampleCrew(spec)]))
 };
 writeFileSync(resolve(__dirname, 'frames.json'), JSON.stringify({ clips }, (_, v) => typeof v === 'number' ? Math.round(v*1000)/1000 : v));

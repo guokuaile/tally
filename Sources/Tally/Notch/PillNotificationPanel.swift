@@ -305,10 +305,10 @@ struct PillNotificationView: View {
     @ViewBuilder
     private var badgePortrait: some View {
         if reduceMotion {
-            CrewBadgeIcon(mood: .run, size: 68, inset: 0.12)
+            CrewBadgeIcon(mood: .run, cast: peek.cast, size: 68, inset: 0.12)
         } else {
             TimelineView(.animation(minimumInterval: 1.0 / 20)) { timeline in
-                CrewBadgeIcon(mood: .run, size: 68, inset: 0.12, elapsed: timeline.date.timeIntervalSince(portraitStart))
+                CrewBadgeIcon(mood: .run, cast: peek.cast, size: 68, inset: 0.12, elapsed: timeline.date.timeIntervalSince(portraitStart))
             }
             .frame(width: 68, height: 68)
         }

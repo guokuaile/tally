@@ -72,6 +72,8 @@ struct Peek: Equatable {
     var failureMessage: String? = nil
     /// 工牌左侧那个小刻用哪套调色板（docs/crew.md「工牌」）
     var crewMood: CrewMood = .done
+    /// 这条提示属于哪个项目的角色（docs/crew.md「角色池」）；会话类提示由控制器从分配表填，别的是球
+    var cast: CastMember = .ball
     var badgeKind: BadgeLifecycle.Kind = .joined
     var isProvisional = false
 
@@ -130,7 +132,7 @@ struct Peek: Equatable {
     }
 
     /// 会话跑完（绿勾）或在等我（橙色叹号 / 问号）。
-    static func session(_ record: SessionRecord) -> Peek {
+    static func session(_ record: SessionRecord, cast: CastMember) -> Peek {
         let id = "session-\(record.sessionId)-\(record.state.rawValue)-\(record.updatedAt)"
         var peek: Peek
         switch record.state {
@@ -147,11 +149,12 @@ struct Peek: Equatable {
         peek.modelLabel = record.modelLabel ?? record.providerLabel
         peek.cwdLabel = record.cwdLabel
         peek.sessionState = record.state
+        peek.cast = cast
         return peek
     }
 
     /// 新会话工牌指向该会话；通用版式显示项目和提供方。
-    static func badge(_ project: CrewProject, session: SessionRecord? = nil, kind: BadgeLifecycle.Kind = .joined) -> Peek {
+    static func badge(_ project: CrewProject, session: SessionRecord? = nil, kind: BadgeLifecycle.Kind = .joined, cast: CastMember) -> Peek {
         let first = session ?? project.sessions.first
         let subtitle = first.map { session in
             return [session.providerLabel, session.modelLabel].compactMap { $0 }.joined(separator: " · ")
@@ -162,6 +165,7 @@ struct Peek: Equatable {
         peek.crewMood = project.mood
         peek.badgeKind = kind
         peek.isProvisional = first?.isProvisional ?? false
+        peek.cast = cast
         return peek
     }
 
@@ -321,7 +325,7 @@ final class NotchController {
         crew.onSessionClick = { [weak self] session in
             guard let self else { return }
             self.crewExpand.dismiss()
-            self.jump(to: session, reporting: .session(session))
+            self.jump(to: session, reporting: .session(session, cast: CrewCastStore.shared.member(for: session)))
         }
         crew.rosterChanged = { [weak self] _ in
             guard let self else { return }
@@ -329,13 +333,15 @@ final class NotchController {
         }
         crewExpand.apply = { [weak self] in self?.crew.setExpanded($0) }
         // 点小人跳终端和点药丸走同一条失败路径：撑开的格点完就收，失败只写在 failures 里的话人什么都看不到
-        crewExpand.jump = { [weak self] session in self?.jump(to: session, reporting: .session(session)) }
+        crewExpand.jump = { [weak self] session in self?.jump(to: session, reporting: .session(session, cast: CrewCastStore.shared.member(for: session))) }
         crewExpand.openAI = { [weak self] in
             self?.state.select(.ai)
             self?.open(pinned: true)
         }
         SessionStore.shared.sessionsChanged = { [weak self] records in
             guard let self else { return }
+            // 先分角色再算名册：翅膀、AI 页行、药丸查的是同一张表，谁先画都拿到同一个角色
+            CrewCastStore.shared.sync(records)
             self.crew.refresh(records)
             let active = Set(records.map(\.sessionId))
             self.alertVersions = self.alertVersions.filter { active.contains($0.key) }
@@ -405,24 +411,24 @@ final class NotchController {
                 // 第 0.5 秒先来一张工牌（直接注入，不经 newcomers 的 10 秒规则），它是首批可见三条之一
                 try? await Task.sleep(for: .seconds(0.5))
                 if let project = CrewRoster.projects(DemoData.sessions(now: Date()), now: Date()).first(where: { $0.name == "shop-web" }) {
-                    self?.showPeek(.badge(project))
+                    self?.showPeek(.badge(project, cast: CrewCastStore.shared.member(for: project.sessions[0])))
                 }
                 try? await Task.sleep(for: .seconds(0.5))
                 let records = DemoData.sessions(now: Date())
                 for record in records.filter({ $0.state == .waitingPermission || $0.state == .waitingInput || $0.state == .done }) {
-                    self?.showPeek(.session(record))
+                    self?.showPeek(.session(record, cast: CrewCastStore.shared.member(for: record)))
                 }
                 try? await Task.sleep(for: .seconds(1))
                 if var record = records.first(where: { $0.state == .done }) {
                     record.sessionId = "demo-queued"
                     record.title = "检查队列中的第四条"
-                    self?.showPeek(.session(record))
+                    self?.showPeek(.session(record, cast: CrewCastStore.shared.member(for: record)))
                 }
                 return
             }
             try? await Task.sleep(for: .seconds(4))
             if let record = SessionStore.shared.sessions.first(where: { $0.sessionId == DemoData.peekSessionId }) {
-                self?.showPeek(.session(record))
+                self?.showPeek(.session(record, cast: CrewCastStore.shared.member(for: record)))
             }
             try? await Task.sleep(for: .seconds(8))
             self?.showPeek(.quota(DemoData.quotaPeekEvent(now: Date())))
@@ -676,7 +682,8 @@ final class NotchController {
             var active = session
             active.state = .running
             guard let project = CrewRoster.projects([active], now: now).first else { continue }
-            showPeek(.badge(project, session: session, kind: kind))
+            // 角色按会话取（经分配表的目录规范化）：这里的 project 是默认规范化拼的，符号链接目录下 id 和表里的键对不上
+            showPeek(.badge(project, session: session, kind: kind, cast: CrewCastStore.shared.member(for: session)))
         }
     }
 
@@ -783,7 +790,7 @@ final class NotchController {
         guard alertVersions[record.sessionId] == version,
               SessionStore.shared.sessions.contains(where: { $0.sessionId == record.sessionId && $0.state == record.state && $0.updatedAt == record.updatedAt }) else { return }
         if PreferencesStore.shared.prefs.sessionSound { AlertSound.play(for: record.state) }
-        showPeek(.session(record))
+        showPeek(.session(record, cast: CrewCastStore.shared.member(for: record)))
     }
 
     private func clearPeek() {
