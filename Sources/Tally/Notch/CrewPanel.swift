@@ -11,6 +11,7 @@ struct CrewSlot: Equatable {
     let phase: Double
     /// 这个项目分到的角色（`CrewCastStore`）；「+N」胶囊是球
     var cast: CastMember = .ball
+    var hasNewCompletion = false
 }
 
 /// 光标停在或点在哪一格。
@@ -120,6 +121,7 @@ final class CrewStripView: NSView {
     private let background = CAShapeLayer()
     private var cells: [CALayer] = []
     private var extras: [CALayer] = []
+    private var completionDots: [CALayer?] = []
     private var shown: [CrewFrameCache.Key?] = []
     var onHover: ((Int?) -> Void)?
     var onClick: ((Int) -> Void)?
@@ -153,6 +155,7 @@ final class CrewStripView: NSView {
         for layer in cells + extras { layer.removeFromSuperlayer() }
         cells = []
         extras = []
+        completionDots = []
         shown = Array(repeating: nil, count: slots.count)
         for (index, slot) in slots.enumerated() {
             let center = CrewGeometry.slotCenterX(side: side, index: index, slots: slots.count)
@@ -162,6 +165,16 @@ final class CrewStripView: NSView {
             cell.contentsGravity = .resize
             layer?.addSublayer(cell)
             cells.append(cell)
+            if slot.hasNewCompletion {
+                let dot = CAShapeLayer()
+                dot.frame = CGRect(x: center + 7, y: 4, width: 6, height: 6)
+                dot.path = CGPath(ellipseIn: dot.bounds, transform: nil)
+                dot.fillColor = NSColor.systemGreen.cgColor
+                extras.append(dot)
+                completionDots.append(dot)
+            } else {
+                completionDots.append(nil)
+            }
             // 球上不画会话数：22pt 的玻璃球贴个白底角标像通知红点，数目在撑开的第二行看
             guard slot.project == nil else { continue }
             let text = "+\(slot.overflow)"
@@ -212,6 +225,7 @@ final class CrewStripView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for (position, cell) in cells.enumerated() { cell.opacity = position == index ? 0 : 1 }
+        for (position, dot) in completionDots.enumerated() { dot?.opacity = position == index ? 0 : 1 }
         CATransaction.commit()
     }
 
@@ -247,7 +261,8 @@ final class CrewStripView: NSView {
             let element = CrewAccessibleSlot()
             element.setAccessibilityRole(.button)
             element.setAccessibilityParent(self)
-            element.setAccessibilityLabel(slot.project.map { "\($0.name)，\($0.mood.label)，\($0.sessions.count) 个会话" } ?? "还有 \(slot.overflow) 个项目")
+            let label = slot.project.map { "\($0.name)，\($0.mood.label)，\($0.sessions.count) 个会话" } ?? "还有 \(slot.overflow) 个项目"
+            element.setAccessibilityLabel(label + (slot.hasNewCompletion ? "，有新完成，尚未跳回终端" : ""))
             let rect = CrewGeometry.hitRect(side: side, index: index, slots: slots.count, height: bounds.height)
             element.setAccessibilityFrame(window.convertToScreen(convert(rect, to: nil)))
             let projectID = slot.project?.id
@@ -301,6 +316,7 @@ final class CrewController {
     private(set) var projects: [CrewProject] = []
     private(set) var layout = CrewLayout(right: [], left: [], overflow: 0)
     private var sessions: [SessionRecord] = []
+    private var completionIDs: Set<String> = []
     private var playback: [String: (mood: CrewMood, tier: CrewTier, startedAt: Date)] = [:]
     private var wings: [CrewGeometry.Side: CrewPanel] = [:]
     private var dropdown: CrewDropdownPanel?
@@ -409,8 +425,9 @@ final class CrewController {
     }
 
     /// 会话变了（或过了一分钟，失联要按时间翻）：重算名册，mood 变了的槽重置时间原点。
-    func refresh(_ sessions: [SessionRecord], now: Date = Date()) {
+    func refresh(_ sessions: [SessionRecord], now: Date = Date(), completionIDs: Set<String>? = nil) {
         self.sessions = sessions
+        if let completionIDs { self.completionIDs = completionIDs }
         guard enabled else { return }
         projects = CrewRoster.projects(sessions, now: now, canonicalize: cast.canonicalize)
         var next: [String: (mood: CrewMood, tier: CrewTier, startedAt: Date)] = [:]
@@ -429,10 +446,12 @@ final class CrewController {
         var slots = shown.map { project in
             let startedAt = playback[project.id]?.startedAt ?? Date()
             return CrewSlot(project: project, overflow: 0, startedAt: startedAt, phase: Double(CrewRoster.bucket(project.id + "·phase", of: 6)) * 0.41,
-                            cast: cast.member(forKey: project.id))
+                            cast: cast.member(forKey: project.id), hasNewCompletion: project.sessions.contains { completionIDs.contains($0.sessionId) })
         }
         if side == layout.overflowSide, layout.overflow > 0 {
-            slots.append(CrewSlot(project: nil, overflow: layout.overflow, startedAt: .distantPast, phase: 0))
+            let visibleIDs = Set((layout.left + layout.right).map(\.id))
+            let hiddenHasCompletion = projects.contains { !visibleIDs.contains($0.id) && $0.sessions.contains { completionIDs.contains($0.sessionId) } }
+            slots.append(CrewSlot(project: nil, overflow: layout.overflow, startedAt: .distantPast, phase: 0, hasNewCompletion: hiddenHasCompletion))
         }
         return slots
     }
@@ -492,9 +511,9 @@ final class CrewController {
         let panel: CrewDropdownPanel
         if let existing = dropdown {
             panel = existing
-            panel.update(project: project, side: hover.side, select: select)
+            panel.update(project: project, side: hover.side, completionIDs: completionIDs, select: select)
         } else {
-            panel = CrewDropdownPanel(project: project, side: hover.side, select: select) { [weak self] inside in
+            panel = CrewDropdownPanel(project: project, side: hover.side, completionIDs: completionIDs, select: select) { [weak self] inside in
                 guard let self else { return }
                 self.onHover?(inside ? self.expanded : nil)
             }

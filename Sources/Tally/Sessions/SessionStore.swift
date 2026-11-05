@@ -17,9 +17,12 @@ final class SessionStore {
 
     /// 按 updated_at 倒序。
     private(set) var sessions: [SessionRecord] = []
+    /// 每次新完成换一个标识，避免较早发起的跳转清掉新一轮完成。
+    private(set) var unseenCompletions: [String: UUID] = [:]
     /// 一个会话进入 done / 等审批 / 等输入时调一次，控制器拿它在闭合态弹提示。
     var sessionAlert: ((SessionRecord) -> Void)?
     var sessionsChanged: (([SessionRecord]) -> Void)?
+    var completionsChanged: (() -> Void)?
     var badgeSessionsChanged: (([SessionRecord]) -> Void)?
     /// 等你账本（docs/ai.md「等你账本」）；`todayWaits` 是当天那一行，每轮刷新按当天重算，没等过为 nil。
     let waits: WaitLedger
@@ -81,6 +84,7 @@ final class SessionStore {
         // 演示模式：会话是编的；不建目录、不读、不盯、不清孤儿、不回写，也就不会冒出状态变化的提示
         if DemoMode.isOn {
             sessions = DemoData.sessions(now: Date()).sorted { $0.updatedAt > $1.updatedAt }
+            unseenCompletions = [DemoData.peekSessionId: UUID()]
             todayWaits = DemoData.waits
             return
         }
@@ -351,11 +355,22 @@ final class SessionStore {
         if recheck { scheduleRecheck() }
         badgeSessionsChanged?(loaded + closedForBadges)
         let alerts = Self.alerts(previous: sessions, current: loaded, quiet: quiet)
+        let doneIDs = Set(loaded.filter { $0.state == .done }.map(\.sessionId))
+        unseenCompletions = unseenCompletions.filter { doneIDs.contains($0.key) }
+        for record in alerts where record.state == .done {
+            unseenCompletions[record.sessionId] = UUID()
+        }
         waits.add(WaitLedger.finished(previous: sessions, current: loaded, now: now), now: now)
         todayWaits = waits.summary(on: now)
         sessions = loaded.sorted { $0.updatedAt > $1.updatedAt }
         sessionsChanged?(sessions)
         for record in alerts { sessionAlert?(record) }
+    }
+
+    func acknowledgeCompletion(_ sessionID: String, token: UUID?) {
+        guard let token, unseenCompletions[sessionID] == token else { return }
+        unseenCompletions.removeValue(forKey: sessionID)
+        completionsChanged?()
     }
 
     /// Claude Code 原地改写 `<pid>.json`，目录级 kqueue 收不到内容变化，按文件挂 vnode 监视器：等你、后台还在跑、回合结束当场刷新，

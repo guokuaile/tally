@@ -65,6 +65,35 @@ final class CrewWingTests: XCTestCase {
     }
 
     @MainActor
+    func testCompletionDotsFollowProjectAndOverflowMembership() throws {
+        _ = NSApplication.shared
+        let crew = CrewController(art: try art())
+        let now = Date()
+        let records = DemoData.sessions(now: now, overflow: true)
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly)
+        crew.relayout(metrics: m14)
+        defer { crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly) }
+        crew.refresh(records, now: now)
+        let visible = crew.layout.left + crew.layout.right
+        let shared = try XCTUnwrap(visible.first { $0.sessions.count > 1 })
+        let hidden = try XCTUnwrap(crew.projects.first { project in !visible.contains { $0.id == project.id } })
+        let a = shared.sessions[0].sessionId, b = shared.sessions[1].sessionId
+        let hiddenID = try XCTUnwrap(hidden.sessions.first?.sessionId)
+        func allSlots() -> [CrewSlot] {
+            CrewGeometry.Side.allCases.flatMap { (crew.wing($0) as? CrewPanel)?.strip.slots ?? [] }
+        }
+        crew.refresh(records, now: now, completionIDs: [a, b, hiddenID])
+        XCTAssertTrue(try XCTUnwrap(allSlots().first { $0.project?.id == shared.id }).hasNewCompletion)
+        XCTAssertTrue(try XCTUnwrap(allSlots().first { $0.overflow > 0 }).hasNewCompletion)
+        crew.refresh(records, now: now, completionIDs: [b])
+        XCTAssertTrue(try XCTUnwrap(allSlots().first { $0.project?.id == shared.id }).hasNewCompletion)
+        XCTAssertFalse(try XCTUnwrap(allSlots().first { $0.overflow > 0 }).hasNewCompletion)
+        crew.refresh(records, now: now, completionIDs: [])
+        XCTAssertFalse(try XCTUnwrap(allSlots().first { $0.project?.id == shared.id }).hasNewCompletion)
+        XCTAssertEqual(crew.projects.first { $0.id == shared.id }?.mood, shared.mood)
+    }
+
+    @MainActor
     func testDropdownRowsSelectTheirOwnSessionWithoutActivatingPanel() throws {
         _ = NSApplication.shared
         let now = Date()

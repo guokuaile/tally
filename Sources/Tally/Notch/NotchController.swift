@@ -342,13 +342,16 @@ final class NotchController {
             guard let self else { return }
             // 先分角色再算名册：翅膀、AI 页行、药丸查的是同一张表，谁先画都拿到同一个角色
             CrewCastStore.shared.sync(records)
-            self.crew.refresh(records)
+            self.crew.refresh(records, completionIDs: Set(SessionStore.shared.unseenCompletions.keys))
             let active = Set(records.map(\.sessionId))
             self.alertVersions = self.alertVersions.filter { active.contains($0.key) }
             guard !self.pillQueue.visible.isEmpty || !self.pillQueue.pending.isEmpty else { return }
             let waiting = Set(records.filter(\.isWaiting).map(\.sessionId))
             self.pillQueue.reconcileWaiting(activeSessionIDs: waiting, at: Date())
             self.refreshPills()
+        }
+        SessionStore.shared.completionsChanged = { [weak self] in
+            self?.crew.refresh(SessionStore.shared.sessions, completionIDs: Set(SessionStore.shared.unseenCompletions.keys))
         }
         SessionStore.shared.badgeSessionsChanged = { [weak self] records in self?.updateBadges(records) }
         UsageStore.shared.quotaAlert = { [weak self] event in
@@ -453,7 +456,7 @@ final class NotchController {
         }
         crew.apply(enabled: prefs.crewEnabled, perSide: prefs.crewPerSide, skin: prefs.crewSkin == "gradient" ? .gradient : .glass,
                    sharingType: panel.sharingType)
-        crew.refresh(SessionStore.shared.sessions)
+        crew.refresh(SessionStore.shared.sessions, completionIDs: Set(SessionStore.shared.unseenCompletions.keys))
         if prefs.badgeEnabled { updateBadges(SessionStore.shared.sessions) }
         if !pillQueue.visible.isEmpty || !pillQueue.pending.isEmpty || !pillPanels.isEmpty { refreshPills() }
         BatteryWatcher.shared.setEnabled(prefs.batteryPeek)

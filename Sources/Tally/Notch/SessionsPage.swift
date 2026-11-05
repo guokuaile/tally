@@ -105,6 +105,7 @@ struct SessionRow: View {
     /// 同目录有别的会话时跟在目录名后面的终端号，nil 不显示。
     let tty: String?
     var jump = SessionJump.shared
+    var store = SessionStore.shared
     @State private var hovered = false
 
     private static let relative: RelativeDateTimeFormatter = {
@@ -169,6 +170,12 @@ struct SessionRow: View {
                     .lineLimit(1)
                 }
                 Spacer(minLength: 4)
+                if store.unseenCompletions[session.sessionId] != nil && !ended {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 6, height: 6)
+                        .accessibilityLabel("新完成，尚未跳回终端")
+                }
                 if let failure = jump.failures[session.sessionId] {
                     Text(failure)
                         .font(.system(size: 10))
@@ -213,6 +220,13 @@ struct SessionRow: View {
 @Observable
 final class SessionJump {
     static let shared = SessionJump()
+    private let store: SessionStore
+    private let attemptFocus: (SessionRecord) async -> String?
+
+    init(store: SessionStore = .shared, attempt: @escaping (SessionRecord) async -> String? = SessionJump.attempt) {
+        self.store = store
+        self.attemptFocus = attempt
+    }
 
     /// session_id → 上次跳失败的原因；跳成功就清掉。
     private(set) var failures: [String: String] = [:]
@@ -222,8 +236,10 @@ final class SessionJump {
     /// 返回跳没跳成。
     @discardableResult
     func run(_ session: SessionRecord) async -> Bool {
-        let failure = await Self.attempt(session)
+        let completion = store.unseenCompletions[session.sessionId]
+        let failure = await attemptFocus(session)
         failures[session.sessionId] = failure
+        if failure == nil { store.acknowledgeCompletion(session.sessionId, token: completion) }
         return failure == nil
     }
 

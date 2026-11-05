@@ -257,6 +257,48 @@ final class SessionTurnEndTests: XCTestCase {
         SessionStore(directory: directory, claudeSessions: claudeSessions, processTable: AgentProcessTable())
     }
 
+    @MainActor
+    func testNewCompletionIsClearedOnlyBySuccessfulJump() async throws {
+        let store = makeStore()
+        try write(state: .done, transcript: [prompt])
+        store.reload()
+        XCTAssertTrue(store.unseenCompletions.isEmpty)
+        try write(state: .running, transcript: [prompt])
+        store.reload()
+        try write(state: .done, transcript: [prompt])
+        store.reload()
+        let first = try XCTUnwrap(store.unseenCompletions["s1"])
+        var completionChanges = 0
+        store.completionsChanged = { completionChanges += 1 }
+        store.reload()
+        XCTAssertEqual(store.unseenCompletions["s1"], first)
+        XCTAssertEqual(completionChanges, 0)
+
+        let failure = SessionJump(store: store, attempt: { _ in "找不到窗口" })
+        let session = try XCTUnwrap(store.sessions.first)
+        let failed = await failure.run(session)
+        XCTAssertFalse(failed)
+        XCTAssertEqual(store.unseenCompletions["s1"], first)
+
+        let success = SessionJump(store: store, attempt: { _ in nil })
+        let succeeded = await success.run(session)
+        XCTAssertTrue(succeeded)
+        XCTAssertTrue(store.unseenCompletions.isEmpty)
+        XCTAssertEqual(completionChanges, 1, "成功跳转后立即刷新刘海小人")
+
+        try write(state: .running, transcript: [prompt])
+        store.reload()
+        try write(state: .done, transcript: [prompt])
+        store.reload()
+        let next = try XCTUnwrap(store.unseenCompletions["s1"])
+        XCTAssertNotEqual(first, next)
+        store.acknowledgeCompletion("s1", token: first)
+        XCTAssertEqual(store.unseenCompletions["s1"], next)
+        try write(state: .running, transcript: [prompt])
+        store.reload()
+        XCTAssertTrue(store.unseenCompletions.isEmpty)
+    }
+
     /// 开始等的时刻与等你账本（docs/ai.md「等你」「等你账本」）。
     @MainActor
     func testWaitingSinceFollowsClaudeAndFinishedWaitsGoToTheLedger() throws {
@@ -323,6 +365,7 @@ final class SessionTurnEndTests: XCTestCase {
         XCTAssertEqual(store.sessions.first?.state, .done)
         XCTAssertNil(store.sessions.first?.message)
         XCTAssertTrue(alerts.isEmpty, "人就在终端前按的键，不弹")
+        XCTAssertTrue(store.unseenCompletions.isEmpty, "打断不是新完成")
 
         // 下一句话：hook 写 running，尾巴最后一条是新输入
         try write(state: .running, transcript: [prompt, interrupt, snapshot, prompt])

@@ -4,6 +4,7 @@ import SwiftUI
 struct CrewDropdownView: View {
     let project: CrewProject
     let side: CrewGeometry.Side
+    var completionIDs: Set<String> = []
     let select: (SessionRecord) -> Void
     private var avatar: some View {
         Color.clear.frame(width: 38, height: 38).accessibilityHidden(true)
@@ -80,6 +81,10 @@ struct CrewDropdownView: View {
                                     }
                                 }
                                 Spacer(minLength: 0)
+                                if completionIDs.contains(session.sessionId) {
+                                    Circle().fill(.green).frame(width: 6, height: 6)
+                                        .accessibilityLabel("新完成，尚未跳回终端")
+                                }
                                 Image(systemName: "arrow.up.right").font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
                             }
                             .padding(.horizontal, 9)
@@ -159,8 +164,8 @@ final class CrewDropdownPanel: NSPanel {
     static let wingGap: CGFloat = 4
     private let host: CrewDropdownHost
 
-    init(project: CrewProject, side: CrewGeometry.Side, select: @escaping (SessionRecord) -> Void, hover: @escaping (Bool) -> Void) {
-        host = CrewDropdownHost(rootView: CrewDropdownView(project: project, side: side, select: select))
+    init(project: CrewProject, side: CrewGeometry.Side, completionIDs: Set<String> = [], select: @escaping (SessionRecord) -> Void, hover: @escaping (Bool) -> Void) {
+        host = CrewDropdownHost(rootView: CrewDropdownView(project: project, side: side, completionIDs: completionIDs, select: select))
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isFloatingPanel = true
         hidesOnDeactivate = false
@@ -177,8 +182,8 @@ final class CrewDropdownPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    func update(project: CrewProject, side: CrewGeometry.Side, select: @escaping (SessionRecord) -> Void) {
-        host.rootView = CrewDropdownView(project: project, side: side, select: select)
+    func update(project: CrewProject, side: CrewGeometry.Side, completionIDs: Set<String>, select: @escaping (SessionRecord) -> Void) {
+        host.rootView = CrewDropdownView(project: project, side: side, completionIDs: completionIDs, select: select)
     }
 
     static func frame(anchorX: CGFloat, top: CGFloat, screen: CGRect, count: Int, side: CrewGeometry.Side = .right) -> CGRect {
