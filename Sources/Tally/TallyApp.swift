@@ -213,8 +213,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 点 Dock 图标（设置窗口开着时才有）把设置窗口叫回来。
+    /// Background relaunches must not turn into a request to open settings.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard sender.activationPolicy() == .regular else { return false }
         if !flag { SettingsWindowController.shared.show() }
         return true
     }

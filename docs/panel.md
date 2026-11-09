@@ -109,6 +109,8 @@ open -a Tally --args --demo --open network    # 静态截图：钉住展开到�
 
 `SettingsWindowController`：700 × 540、可竖向拉伸的普通窗口，打开时 app 切成常规激活策略（Toggle 才能接键盘和点击），关窗切回附件型；打开前先收起面板，否则被面板盖住——收起放在 `SettingsWindowController.show()` 里（`willShow`），不放在某个入口上：⌘, 在设置窗口已经是 key 时走的是主菜单的「设置…」，不经过面板的键盘监视器，原来只有面板入口收起面板，这条路上面板就一直盖在设置窗口前面（钉住面板 + 设置窗口开着时合成一次 ⌘, 复现过）。入口：面板齿轮、右键菜单、主菜单 / ⌘,、`--open settings`、首次启动指引的「去装 hook」（`show(section: .hooks)`）。选中项放在控制器持有的 `SettingsSelection`（`@Observable`）里而不是视图的 `@State`，窗口已经开着时 `show(section:)` 也跳得过去；不带参数的 `show()` 停在上次那一页。
 
+附件型后台运行时忽略系统的重新打开事件：开机自启的 `open` 可能遇到已经运行的 Tally，不能因此弹出设置。设置或指引打开时应用是常规型，保留 Dock 图标的窗口恢复行为；主动打开设置的入口不变。
+
 版式照 Atoll / 系统设置（`SettingsWindowView`）：`NavigationSplitView`，左边侧栏 `List(.sidebar)`，每行是带渐变底的 24pt 圆角方块图标 + 名字，十项分四组——「通用」「面板」不带组头，「功能」下「提示」「文件架」「音乐」「应用」，「AI」下「AI 会话」「hook」「用量」，「关于」单独在底部不带组头；右边是当前项的 `Form`（`.formStyle(.grouped)` 在根上设一次），每个开关一节、解释放节脚注。各项内容：
 
 | 项 | 内容 |
