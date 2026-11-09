@@ -191,6 +191,43 @@ extension CastArt.Character {
     }
 }
 
+/// Quantized overlays keep one-shot animation frames bounded in the wing cache.
+struct CastMotion: Hashable {
+    enum Kind: Hashable { case think, unsure, sleep, surprise, happy, farewell, greet }
+    let kind: Kind
+    let step: Int
+    var strength: Double { sin(.pi * Double(step) / 20) }
+
+    private static func window(_ kind: Kind, time: Double, start: Double, duration: Double) -> CastMotion? {
+        guard time.isFinite, time >= start, time < start + duration else { return nil }
+        return CastMotion(kind: kind, step: min(19, Int((time - start) / duration * 20)))
+    }
+
+    static func forCrew(mood: CrewMood, tier: CrewTier, elapsed: Double, phase: Double, still: Bool) -> CastMotion? {
+        guard !still, elapsed.isFinite, elapsed >= 0 else { return nil }
+        if tier == .dusty && mood.isWaiting {
+            return window(.sleep, time: (elapsed + phase).truncatingRemainder(dividingBy: 5), start: 1, duration: 2.5)
+        }
+        switch mood {
+        case .run: return window(.think, time: (elapsed + phase).truncatingRemainder(dividingBy: 4.3), start: 2.4, duration: 1.5)
+        case .input: return window(.unsure, time: (elapsed + phase).truncatingRemainder(dividingBy: 4), start: 0.4, duration: 2.2)
+        case .stale: return window(.sleep, time: (elapsed + phase).truncatingRemainder(dividingBy: 5), start: 1, duration: 2.5)
+        case .permission: return window(.surprise, time: elapsed, start: max(0, 2.5 - phase), duration: 1)
+        case .done: return window(.happy, time: elapsed, start: max(0, 2.15 - phase), duration: 1)
+        case .compacting: return nil
+        }
+    }
+
+    static func forBadge(_ kind: BadgeLifecycle.Kind, elapsed: Double?) -> CastMotion? {
+        guard let elapsed else { return nil }
+        return window(kind == .departed ? .farewell : .happy, time: elapsed, start: 0.9, duration: 1)
+    }
+
+    static func forHover(elapsed: Double) -> CastMotion? {
+        window(.greet, time: elapsed, start: 0, duration: 0.8)
+    }
+}
+
 /// 一帧要画的角色：角色数据 + 位图 + 步态幅度 + 片段里的相位。`BloubArt.Frame.draw(actor:)` 用；ball 造不出来（nil）。
 struct CastActor {
     let member: CastMember
@@ -200,13 +237,15 @@ struct CastActor {
     let amp: Double
     /// 帧号 / 片段帧数
     let phase: Double
+    let motion: CastMotion?
 
-    init?(art: CastArt, member: CastMember, amp: Double, frameIndex: Int, frameCount: Int) {
+    init?(art: CastArt, member: CastMember, amp: Double, frameIndex: Int, frameCount: Int, motion: CastMotion? = nil) {
         guard let character = art.characters[member.name] else { return nil }
         self.member = member
         self.character = character
         bitmap = art.bitmap(member)
         self.amp = amp
+        self.motion = motion
         phase = frameCount > 0 ? Double(frameIndex) / Double(frameCount) : 0
     }
 
@@ -222,7 +261,19 @@ struct CastActor {
     func matrix(_ frame: BloubArt.Frame) -> CGAffineTransform {
         let fit = frame.fit
         let body = CGAffineTransform(translationX: fit.cx, y: fit.cy).rotated(by: fit.theta).scaledBy(x: fit.sx, y: fit.sy)
-        return CastArt.gait(kind: character.gait, phase: phase, amp: amp).concatenating(body)
+        let s = motion?.strength ?? 0
+        let extra: CGAffineTransform
+        switch motion?.kind {
+        case .happy: extra = CGAffineTransform(translationX: 0, y: -14 * s).scaledBy(x: 1 - 0.04 * s, y: 1 + 0.04 * s)
+        case .sleep: extra = CGAffineTransform(translationX: 0, y: 3 * s).scaledBy(x: 1 + 0.03 * s, y: 1 - 0.08 * s)
+        case .think: extra = CGAffineTransform(rotationAngle: -0.09 * s)
+        case .unsure: extra = CGAffineTransform(rotationAngle: 0.08 * sin(2 * .pi * Double(motion?.step ?? 0) / 20))
+        case .surprise: extra = CGAffineTransform(scaleX: 1 + 0.05 * s, y: 1 + 0.08 * s)
+        case .farewell: extra = CGAffineTransform(translationX: 0, y: 5 * s).rotated(by: 0.09 * s)
+        case .greet: extra = CGAffineTransform(translationX: 0, y: -5 * s)
+        case nil: extra = .identity
+        }
+        return CastArt.gait(kind: character.gait, phase: phase, amp: amp).concatenating(extra).concatenating(body)
     }
 
     /// 两只眼相对静止位的位移（身体坐标系），给测试看
@@ -236,6 +287,43 @@ struct CastActor {
 
     /// 黑身（原黑身、白身反相）用 lighten 让玻璃渐变透出来；白身原色正常盖住
     private var usesLighten: Bool { !(character.whiteBodied && !member.inverted) }
+
+    func drawSurprise(in context: GraphicsContext, frame: BloubArt.Frame, style: BloubArt.Style) {
+        guard motion?.kind == .surprise, let motion else { return }
+        var layer = context
+        layer.opacity *= motion.strength
+        layer.concatenate(matrix(frame))
+        let box = character.outline.boundingRect
+        switch member.name {
+        case "cat":
+            var spikes = Path()
+            for side in [-1.0, 1.0] {
+                let x = side < 0 ? box.minX : box.maxX
+                for y in [-25.0, 0, 25] {
+                    spikes.move(to: CGPoint(x: x - side * 8, y: y - 9))
+                    spikes.addLine(to: CGPoint(x: x + side * 16, y: y - 3))
+                    spikes.addLine(to: CGPoint(x: x - side * 8, y: y + 8))
+                    spikes.closeSubpath()
+                }
+            }
+            layer.fill(spikes, with: BloubArt.bodyShading(style))
+            layer.stroke(spikes, with: .color(style.rim[0]), lineWidth: 5)
+        case "folder":
+            for offset in [-23.0, 12.0] {
+                let paper = Path(roundedRect: CGRect(x: offset - 13, y: box.minY - 20, width: 28, height: 31), cornerRadius: 2)
+                layer.fill(paper, with: .color(.white.opacity(0.9)))
+                layer.stroke(paper, with: .color(.black.opacity(0.7)), lineWidth: 2)
+            }
+        case "bulb":
+            var rays = Path()
+            for x in [-70.0, -35, 0, 35, 70] {
+                rays.move(to: CGPoint(x: x, y: box.minY - 5))
+                rays.addLine(to: CGPoint(x: x * 1.08, y: box.minY - 20))
+            }
+            layer.stroke(rays, with: .color(style.rim[0]), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+        default: break
+        }
+    }
 
     /// 玻璃渐变填完、流光描边之前：位图裁在轮廓里画上去，脸色块跟着
     func paintBody(in base: GraphicsContext, clip: Path, matrix: CGAffineTransform) {
@@ -257,7 +345,10 @@ struct CastActor {
         for (i, eye) in character.eyes.enumerated() {
             let spec = frame.eyeSpecs[i], rest = CastArt.restEyes[i]
             let p = spec.center.applying(inverse)
-            let d = CGPoint(x: p.x - rest.center.x, y: p.y - rest.center.y)
+            var d = CGPoint(x: p.x - rest.center.x, y: p.y - rest.center.y)
+            if motion?.kind == .unsure {
+                d.x += 12 * sin(2 * .pi * Double(motion?.step ?? 0) / 20)
+            }
             let sx = (spec.size.width / rest.size.width) / fit.sx, sy = (spec.size.height / rest.size.height) / fit.sy
             // 有瞳孔的眼白只跟一半位移，剩下的给瞳孔，眼珠才像在转；没瞳孔的整只眼跟 0.8
             let gw = eye.pupil == nil ? 0.8 : 0.5
@@ -269,7 +360,7 @@ struct CastActor {
             layer.scaleBy(x: sx * eye.scale, y: sy * eye.scale)
             layer.translateBy(x: -eye.center.x, y: -eye.center.y)
             let white = eye.whiteColor.color(inverted: member.inverted)
-            if frame.arcEyes {
+            if frame.arcEyes || motion?.kind == .happy && (motion?.strength ?? 0) > 0.25 {
                 // 笑眼 / 合眼是一道弧：弦在眼睛下三分之一，弓顶顶到上缘
                 var arc = Path()
                 arc.move(to: CGPoint(x: eye.center.x - 0.55 * eye.size.width, y: eye.center.y + 0.12 * eye.size.height))
@@ -285,10 +376,12 @@ struct CastActor {
                 inner.translateBy(x: d.x * (1 - gw), y: d.y * (1 - gw))
                 inner.fill(pupil, with: .color(eye.pupilColor.color(inverted: member.inverted)))
             }
-            if frame.lids > 0 {
+            let extraLids = motion?.kind == .sleep ? 0.35 * (motion?.strength ?? 0) : motion?.kind == .think ? 0.2 * (motion?.strength ?? 0) : 0
+            let lidAmount = min(1, max(frame.lids, extraLids))
+            if lidAmount > 0 {
                 var lid = layer
                 lid.clip(to: eye.white)
-                lid.fill(Path(CGRect(x: eye.center.x - eye.size.width, y: eye.center.y - eye.size.height / 2, width: 2 * eye.size.width, height: eye.size.height * frame.lids)),
+                lid.fill(Path(CGRect(x: eye.center.x - eye.size.width, y: eye.center.y - eye.size.height / 2, width: 2 * eye.size.width, height: eye.size.height * lidAmount)),
                          with: .color(eye.skin.color(inverted: member.inverted)))
             }
         }

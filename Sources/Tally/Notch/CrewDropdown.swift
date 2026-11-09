@@ -108,15 +108,37 @@ private struct CrewMovingAvatar: View {
     let mood: CrewMood
     var tier: CrewTier = .fresh
     let cast: CastMember
+    var generation = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var began = Date()
+    @State private var greeting = true
     var body: some View {
         GeometryReader { geometry in
-            CrewBadgeIcon(mood: mood, tier: tier, cast: cast, size: min(geometry.size.width, geometry.size.height), inset: 0.12)
-        }.accessibilityHidden(true)
+            if reduceMotion || !greeting {
+                CrewBadgeIcon(mood: mood, tier: tier, cast: cast, size: min(geometry.size.width, geometry.size.height), inset: 0.12)
+            } else {
+                TimelineView(.animation(minimumInterval: 1.0 / 20)) { timeline in
+                    let elapsed = timeline.date.timeIntervalSince(began)
+                    CrewBadgeIcon(mood: mood, tier: tier, cast: cast, size: min(geometry.size.width, geometry.size.height), inset: 0.12,
+                                  motionOverride: CastMotion.forHover(elapsed: elapsed))
+                }
+            }
+        }
+        .accessibilityHidden(true)
+        .task(id: "\(generation)-\(reduceMotion)") {
+            began = Date()
+            greeting = true
+            guard !reduceMotion else { return }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            greeting = false
+        }
     }
 }
 
 final class CrewAvatarPanel: NSPanel {
     private let host: NSHostingView<CrewMovingAvatar>
+    private var generation = 0
 
     init(mood: CrewMood, tier: CrewTier = .fresh, cast: CastMember) {
         host = NSHostingView(rootView: CrewMovingAvatar(mood: mood, tier: tier, cast: cast))
@@ -135,7 +157,10 @@ final class CrewAvatarPanel: NSPanel {
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-    func update(mood: CrewMood, tier: CrewTier = .fresh, cast: CastMember) { host.rootView = CrewMovingAvatar(mood: mood, tier: tier, cast: cast) }
+    func update(mood: CrewMood, tier: CrewTier = .fresh, cast: CastMember, restart: Bool = false) {
+        if restart { generation += 1 }
+        host.rootView = CrewMovingAvatar(mood: mood, tier: tier, cast: cast, generation: generation)
+    }
 }
 
 private struct CrewDropdownButtonStyle: ButtonStyle {

@@ -86,6 +86,35 @@ final class CrewGeometryTests: XCTestCase {
         XCTAssertEqual(stillDone.time, 3.0, "预览定格页 STILL.done")
     }
 
+    func testCharacterMotionRespectsMoodTierAndReducedMotion() {
+        XCTAssertEqual(CastMotion.forCrew(mood: .run, tier: .fresh, elapsed: 3, phase: 0, still: false)?.kind, .think)
+        XCTAssertEqual(CastMotion.forCrew(mood: .input, tier: .fresh, elapsed: 1, phase: 0, still: false)?.kind, .unsure)
+        XCTAssertEqual(CastMotion.forCrew(mood: .stale, tier: .fresh, elapsed: 2, phase: 0, still: false)?.kind, .sleep)
+        XCTAssertEqual(CastMotion.forCrew(mood: .permission, tier: .dusty, elapsed: 2, phase: 0, still: false)?.kind, .sleep)
+        XCTAssertNil(CastMotion.forCrew(mood: .compacting, tier: .fresh, elapsed: 2, phase: 0, still: false))
+        for mood in CrewMood.allCases {
+            XCTAssertNil(CastMotion.forCrew(mood: mood, tier: .fresh, elapsed: 3, phase: 0, still: true))
+        }
+    }
+
+    func testOneShotCharacterMotionsAndBadgeLifecycle() {
+        for phase in [0.0, 0.41, 0.82, 1.23, 1.64, 2.05] {
+            let surpriseStart = 2.5 - phase
+            let happyStart = 2.15 - phase
+            XCTAssertEqual(CastMotion.forCrew(mood: .permission, tier: .fresh, elapsed: surpriseStart + 0.5, phase: phase, still: false)?.kind, .surprise)
+            XCTAssertNil(CastMotion.forCrew(mood: .permission, tier: .fresh, elapsed: surpriseStart + 4.5, phase: phase, still: false))
+            XCTAssertEqual(CastMotion.forCrew(mood: .done, tier: .fresh, elapsed: happyStart + 0.5, phase: phase, still: false)?.kind, .happy)
+            XCTAssertNil(CastMotion.forCrew(mood: .done, tier: .fresh, elapsed: happyStart + 6.5, phase: phase, still: false))
+        }
+        XCTAssertEqual(CastMotion.forBadge(.joined, elapsed: 1.2)?.kind, .happy)
+        XCTAssertEqual(CastMotion.forBadge(.returned, elapsed: 1.2)?.kind, .happy)
+        XCTAssertEqual(CastMotion.forBadge(.departed, elapsed: 1.2)?.kind, .farewell)
+        XCTAssertNil(CastMotion.forBadge(.joined, elapsed: nil))
+        XCTAssertNil(CastMotion.forBadge(.joined, elapsed: 2))
+        XCTAssertEqual(CastMotion.forHover(elapsed: 0.4)?.kind, .greet)
+        XCTAssertNil(CastMotion.forHover(elapsed: 0.8))
+    }
+
     func testStripOutlineRoundsOnlyTheOuterBottomCorner() {
         let right = CrewGeometry.outline(side: .right, size: CGSize(width: 109, height: 32))
         XCTAssertTrue(right.contains(CGPoint(x: 1, y: 31)), "内侧底角是直角")

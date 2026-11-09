@@ -154,6 +154,20 @@ final class CastArtTests: XCTestCase {
         XCTAssertEqual(cache.count, 2)
     }
 
+    func testExtraMotionRendersAndCacheKeepsItSeparate() throws {
+        let cache = CrewFrameCache(art: try XCTUnwrap(Self.bloub), cast: Self.art)
+        for (mood, index, kind) in [(CrewMood.run, 60, CastMotion.Kind.think), (.input, 30, .unsure), (.stale, 40, .sleep), (.permission, 60, .surprise), (.done, 60, .happy)] {
+            for name in ["cat", "folder", "bulb"] {
+                let look = CrewFrameCache.Look(mood: mood, skin: .glass, cast: CastMember(name: name, inverted: false))
+                let normal = try XCTUnwrap(cache.image(CrewFrameCache.Key(clip: mood.clip, index: index, look: look, still: false), scale: 2))
+                let step = kind == .unsure ? 5 : 10
+                let changed = try XCTUnwrap(cache.image(CrewFrameCache.Key(clip: mood.clip, index: index, look: look, still: false,
+                                                                            motion: CastMotion(kind: kind, step: step)), scale: 2))
+                XCTAssertTrue(pixels(normal) != pixels(changed), "\(name) \(kind)")
+            }
+        }
+    }
+
     func testMissingDirectoryDegradesToBall() {
         let art = CastArt(directory: FileManager.default.temporaryDirectory.appendingPathComponent("cast-\(UUID().uuidString)"))
         XCTAssertEqual(art.pool, [.ball])

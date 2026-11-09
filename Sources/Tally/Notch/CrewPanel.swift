@@ -63,6 +63,7 @@ final class CrewFrameCache {
         let look: Look
         /// 定格帧步态为 0，和同一帧号的动态帧是两张图
         let still: Bool
+        var motion: CastMotion? = nil
     }
     /// 一格的位图比槽宽：光晕、环绕线、「?」都伸出 27pt 的格子，球心在 (24, 19)
     static let box = CGSize(width: 48, height: 32)
@@ -87,7 +88,7 @@ final class CrewFrameCache {
         let time = Double(key.index) / clip.fps
         let style = CrewStyle.style(mood: key.look.mood, skin: key.look.skin, tier: key.look.tier)
         // 球造不出角色（nil），走 bloub 原来的画法；定格帧步态 0
-        let actor = CastActor(art: cast, member: key.look.cast, amp: key.still ? 0 : CastActor.amp(for: key.look.mood), frameIndex: key.index, frameCount: clip.frames.count)
+        let actor = CastActor(art: cast, member: key.look.cast, amp: key.still ? 0 : CastActor.amp(for: key.look.mood), frameIndex: key.index, frameCount: clip.frames.count, motion: key.motion)
         let renderer = ImageRenderer(content: Canvas { context, _ in
             context.translateBy(x: Self.anchor.x, y: Self.anchor.y)
             context.scaleBy(x: CrewGeometry.scale, y: CrewGeometry.scale)
@@ -211,9 +212,11 @@ final class CrewStripView: NSView {
         CATransaction.setDisableActions(true)
         for (index, slot) in slots.enumerated() {
             guard let project = slot.project else { continue }
-            let elapsed = max(0, now.timeIntervalSince(slot.startedAt)) + slot.phase
+            let age = max(0, now.timeIntervalSince(slot.startedAt))
+            let elapsed = age + slot.phase
             guard let picked = CrewPlayback.pick(mood: project.mood, tier: project.tier, elapsed: elapsed, still: still, art: cache.art) else { continue }
-            let key = CrewFrameCache.Key(clip: picked.clip, index: picked.index, look: .init(mood: project.mood, tier: project.tier, skin: skin, cast: slot.cast), still: still)
+            let motion = CastMotion.forCrew(mood: project.mood, tier: project.tier, elapsed: age, phase: slot.phase, still: still)
+            let key = CrewFrameCache.Key(clip: picked.clip, index: picked.index, look: .init(mood: project.mood, tier: project.tier, skin: skin, cast: slot.cast), still: still, motion: motion)
             guard shown[index] != key, let image = cache.image(key, scale: scale) else { continue }
             cells[index].contents = image
             shown[index] = key
@@ -532,8 +535,9 @@ final class CrewController {
         let moving = avatar ?? CrewAvatarPanel(mood: project.mood, tier: project.tier, cast: portrait)
         avatar = moving
         moving.sharingType = sharingType
-        moving.update(mood: project.mood, tier: project.tier, cast: portrait)
-        if avatarID != project.id || !moving.isVisible {
+        let restart = avatarID != project.id || !moving.isVisible
+        moving.update(mood: project.mood, tier: project.tier, cast: portrait, restart: restart)
+        if restart {
             let start = CGRect(x: anchorX - 11, y: wing.frame.maxY - CrewGeometry.bodyCenterY - 11, width: 22, height: 22)
             moving.setFrame(reduceMotion ? target : start, display: true)
             moving.orderFrontRegardless()

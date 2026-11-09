@@ -119,6 +119,7 @@ struct BloubArt {
             }
             for arc in arcs { strokeArc(arc.back, arc) }
             if dotsBehind { drawDots() }
+            cast?.drawSurprise(in: context, frame: self, style: style)
             var face = context
             face.opacity *= alpha
             glass(shape, center: .zero, radius: 100, in: face, sprite: cast)

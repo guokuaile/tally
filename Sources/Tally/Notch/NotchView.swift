@@ -312,6 +312,8 @@ struct CrewBadgeIcon: View {
     /// 画布边长对应多少 bloub 单位：200 是球身撑满，AI 页行和药丸沿用 316（34pt 格里球身 21.5pt）
     var unit: CGFloat = 200
     var elapsed: Double? = nil
+    var badgeKind: BadgeLifecycle.Kind? = nil
+    var motionOverride: CastMotion? = nil
     var prefs = PreferencesStore.shared
 
     var body: some View {
@@ -320,7 +322,11 @@ struct CrewBadgeIcon: View {
                   let clip = art.clips[picked.clip] else { return }
             context.translateBy(x: size.width / 2, y: size.height / 2)
             context.scaleBy(x: size.width * (1 - inset * 2) / unit, y: size.height * (1 - inset * 2) / unit)
-            let actor = CastActor(art: CrewCastStore.shared.art, member: cast, amp: elapsed == nil ? 0 : CastActor.amp(for: mood), frameIndex: picked.index, frameCount: clip.frames.count)
+            let motion: CastMotion?
+            if let badgeKind { motion = CastMotion.forBadge(badgeKind, elapsed: elapsed) }
+            else if let motionOverride { motion = motionOverride }
+            else { motion = CastMotion.forCrew(mood: mood, tier: tier, elapsed: elapsed ?? 0, phase: 0, still: elapsed == nil) }
+            let actor = CastActor(art: CrewCastStore.shared.art, member: cast, amp: elapsed == nil ? 0 : CastActor.amp(for: mood), frameIndex: picked.index, frameCount: clip.frames.count, motion: motion)
             clip.frames[picked.index].draw(in: context, time: Double(picked.index) / clip.fps,
                                            style: CrewStyle.style(mood: mood, skin: prefs.prefs.crewSkin == "gradient" ? .gradient : .glass, tier: tier), actor: actor)
         }
