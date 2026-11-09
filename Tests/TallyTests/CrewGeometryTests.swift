@@ -115,6 +115,28 @@ final class CrewGeometryTests: XCTestCase {
         XCTAssertNil(CastMotion.forHover(elapsed: 0.8))
     }
 
+    func testOneShotMotionWaitsForVisibleFrameAtAnyClipPhase() {
+        XCTAssertEqual(CastMotion.forCrew(mood: .permission, tier: .fresh, elapsed: 3.5, phase: 3.5, still: false)?.kind, .surprise)
+        XCTAssertEqual(CastMotion.forCrew(mood: .done, tier: .fresh, elapsed: 3.75, phase: 5, still: false)?.kind, .happy)
+        XCTAssertNil(CastMotion.forCrew(mood: .permission, tier: .fresh, elapsed: 7.5, phase: 3.5, still: false))
+        XCTAssertNil(CastMotion.forCrew(mood: .done, tier: .fresh, elapsed: 9.75, phase: 5, still: false))
+    }
+
+    func testSessionRowUsesStateAgeWithoutChangingWallClockClipPhase() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let art = try XCTUnwrap(BloubArt(url: root.appendingPathComponent("Resources/bloub/frames.json")))
+        let start = Date(timeIntervalSinceReferenceDate: 1_000_000_000)
+        for (mood, phase, age, expected) in [(CrewMood.permission, 3.5, 3.5, CastMotion.Kind.surprise), (.done, 1.0, 3.75, .happy)] {
+            let now = start.addingTimeInterval(age)
+            let motion = StateIcon.rowMotion(mood: mood, art: art, now: now, startedAt: start, phase: phase, still: false)
+            XCTAssertEqual(motion?.kind, expected)
+            let picked = try XCTUnwrap(CrewPlayback.pick(mood: mood, elapsed: now.timeIntervalSinceReferenceDate + phase, still: false, art: art))
+            XCTAssertFalse(try XCTUnwrap(art.clips[picked.clip]).frames[picked.index].eyeSpecs.isEmpty)
+            XCTAssertNil(StateIcon.rowMotion(mood: mood, art: art, now: now, startedAt: start, phase: phase, still: true))
+            XCTAssertNil(StateIcon.rowMotion(mood: mood, art: art, now: now.addingTimeInterval(10), startedAt: start, phase: phase, still: false))
+        }
+    }
+
     func testStripOutlineRoundsOnlyTheOuterBottomCorner() {
         let right = CrewGeometry.outline(side: .right, size: CGSize(width: 109, height: 32))
         XCTAssertTrue(right.contains(CGPoint(x: 1, y: 31)), "内侧底角是直角")

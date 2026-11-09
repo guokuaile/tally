@@ -316,14 +316,18 @@ struct StateIcon: View {
     let stale: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visible = false
+    @State private var moodStartedAt = Date()
 
     var body: some View {
         Group {
             if let mood {
                 // 同项目的行同一个角色、同一个相位：相位按项目键取（和翅膀同一个散列），时间用墙钟
                 TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !visible || reduceMotion)) { timeline in
+                    let motion = BloubArt.bundled.flatMap {
+                        Self.rowMotion(mood: mood, art: $0, now: timeline.date, startedAt: moodStartedAt, phase: phase, still: reduceMotion)
+                    }
                     CrewBadgeIcon(mood: mood, cast: CrewCastStore.shared.member(for: session), size: 34, unit: 316,
-                                  elapsed: reduceMotion ? nil : timeline.date.timeIntervalSinceReferenceDate + phase)
+                                  elapsed: reduceMotion ? nil : timeline.date.timeIntervalSinceReferenceDate + phase, motionOverride: motion)
                 }
                 .frame(width: 34, height: 34)
             } else {
@@ -340,7 +344,14 @@ struct StateIcon: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .help(label)
+        .onChange(of: mood) { _, _ in moodStartedAt = Date() }
         .onScrollVisibilityChange(threshold: 0.05) { visible = $0 }
+    }
+
+    static func rowMotion(mood: CrewMood, art: BloubArt, now: Date, startedAt: Date, phase: Double, still: Bool) -> CastMotion? {
+        guard let clip = art.clips[mood.clip] else { return nil }
+        let startPhase = (startedAt.timeIntervalSinceReferenceDate + phase).truncatingRemainder(dividingBy: clip.duration)
+        return CastMotion.forCrew(mood: mood, tier: .fresh, elapsed: max(0, now.timeIntervalSince(startedAt)), phase: startPhase, still: still)
     }
 
     /// 名册同一条折叠规则（`CrewRoster.mood(of:)`）：失联判在最前，完成但后台还有活算在跑；已关闭没有 mood

@@ -212,8 +212,12 @@ struct CastMotion: Hashable {
         case .run: return window(.think, time: (elapsed + phase).truncatingRemainder(dividingBy: 4.3), start: 2.4, duration: 1.5)
         case .input: return window(.unsure, time: (elapsed + phase).truncatingRemainder(dividingBy: 4), start: 0.4, duration: 2.2)
         case .stale: return window(.sleep, time: (elapsed + phase).truncatingRemainder(dividingBy: 5), start: 1, duration: 2.5)
-        case .permission: return window(.surprise, time: elapsed, start: max(0, 2.5 - phase), duration: 1)
-        case .done: return window(.happy, time: elapsed, start: max(0, 2.15 - phase), duration: 1)
+        case .permission:
+            let start = (2.5 - phase).truncatingRemainder(dividingBy: 4)
+            return window(.surprise, time: elapsed, start: start < 0 ? start + 4 : start, duration: 1)
+        case .done:
+            let start = (2.15 - phase).truncatingRemainder(dividingBy: 6)
+            return window(.happy, time: elapsed, start: start < 0 ? start + 6 : start, duration: 1)
         case .compacting: return nil
         }
     }
