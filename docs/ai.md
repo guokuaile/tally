@@ -138,13 +138,15 @@ Tally 存在的理由是「等审批的会话晚发现几分钟是常态」，�
 
 ### 跳回终端（`TerminalLocator`）
 
+在调度中心的窗口概览里点击会话或会话提示时，先选中目标终端，再退出概览：macOS 在概览期间即使接受终端激活也不会自动退出。退出前用公开窗口列表同时确认 Dock 与 WindowManager 的全屏概览窗口，再打开系统自带的「调度中心」应用收起概览；普通桌面不触发，无法确认时不猜。窗口层级是 macOS 27.2 的实测信号，其他系统若不匹配就不自动收起。这个操作不请求辅助功能权限，不使用私有框架。
+
 Claude Code 状态文件标记 `kind: bg` 的会话先走后台接入：用 `claude agents --json` 按完整 session ID 与 PID 唯一匹配活动后台会话，校验短 ID 后在新终端执行 `claude attach`。查询失败、无唯一匹配或目录不存在时提示失败，不猜别的会话；打开新窗口需要终端自动化授权。状态文件属于同一 session、标记 `kind: bg` 且 `spare: true` 时，超过 10 秒且 transcript 不存在的备用记录不显示、不改写或删除；以后文件或状态恢复就重新显示。有 transcript 的记录保留原状态与文件，并标「后台会话暂不可接入」，避免误报离职和误删。状态文件瞬时读不到时保留此前的后台身份，不猜普通终端；Claude 状态未知的 Ghostty 会话仅在会话 tty 与终端 tty 唯一精确匹配时跳转，不按标题和目录猜窗口。终端接受开窗命令不代表 attach 已成功，后续错误由终端显示。
 
 按 `term` 分派（`kind(for:running:)` 纯函数）：
 
 | `term` | 做法 |
 |---|---|
-| `ghostty` | AppleScript 枚举 `window → tab → terminal`（id / name / working directory；支持时也读 tty），`focus terminal id`。分隔符在 tell 块外取 `character id 9`：块内写 `tab` 会被 Ghostty 的 `tab` 类遮蔽 |
+| `ghostty` | AppleScript 枚举 `window → tab → terminal`（id / name / working directory；支持时也读 tty），在同一个 tell 块内 `focus terminal id` 并 `activate`，由 Ghostty 自己到前台。分隔符在 tell 块外取 `character id 9`：块内写 `tab` 会被 Ghostty 的 `tab` 类遮蔽 |
 | `Apple_Terminal` | AppleScript 找 `tty` 相等的 tab，`set selected tab`，窗口置前，块内 `activate` |
 | `iTerm.app` | 同上，遍历 `windows → tabs → sessions` 比 `tty`，`select` 会话与窗口，块内 `activate` |
 | `vscode` | VS Code 与 Cursor 都报 vscode，哪个在跑用哪个（`com.microsoft.VSCode` / `com.todesktop.230313mzl4w4u92`）。它们没有能定位到某个终端标签的脚本接口，所以用它打开会话的 `cwd`：编辑器会把那个工程的窗口带到前台，比单纯 `activate()` 接近「跳回这个会话」——而且后台 app 调 `activate()` 常被系统的协作激活规则挡掉，点了没反应 |

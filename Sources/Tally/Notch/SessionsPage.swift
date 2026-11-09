@@ -253,6 +253,7 @@ final class SessionJump {
             } else {
                 try await TerminalLocator.focus(session: session)
             }
+            guard await MissionControl.shared.dismissIfVisible() else { return "无法确认调度中心状态" }
             return nil
         } catch TerminalLocator.Failure.notFound {
             return "找不到窗口"

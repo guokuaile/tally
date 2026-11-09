@@ -164,10 +164,17 @@ enum GhosttyLocator {
         case .notFound: throw Failure.notFound
         case .ambiguous: throw Failure.ambiguous
         }
-        let escaped = id.replacingOccurrences(of: "\"", with: "\\\"")
-        _ = try await execute("tell application id \"com.mitchellh.ghostty\" to focus terminal id \"\(escaped)\"")
-        runningGhostty()?.activate()
+        _ = try await execute(focusScript(id: id))
         Log.debug("聚焦终端 \(id)")
+    }
+
+    static func focusScript(id: String) -> String {
+        """
+        tell application id "com.mitchellh.ghostty"
+            focus terminal id \(SessionResume.appleScriptString(id))
+            activate
+        end tell
+        """
     }
 
     /// 和 Terminal / iTerm 走同一个执行器：后台跑（授权框弹出时主线程不能卡住）、

@@ -13,6 +13,14 @@ final class TerminalLocatorTests: XCTestCase {
         XCTAssertEqual(kind("ghostty"), .ghostty)
     }
 
+    @MainActor
+    func testGhosttyFocusAlsoActivatesTargetApplication() throws {
+        let script = GhosttyLocator.focusScript(id: "terminal-id")
+        XCTAssertNotNil(NSAppleScript(source: script))
+        XCTAssertTrue(script.contains("focus terminal id \"terminal-id\""))
+        XCTAssertTrue(script.contains("activate"), "Focusing a terminal must also bring Ghostty to the foreground")
+    }
+
 
     func testBackgroundSessionRequiresUniqueExactIdentity() throws {
         let data = Data(#"[{"kind":"background","sessionId":"full-id","id":"abc123","pid":42},{"kind":"interactive","sessionId":"other","id":"other","pid":99}]"#.utf8)
