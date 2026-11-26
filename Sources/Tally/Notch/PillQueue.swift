@@ -47,6 +47,7 @@ struct PillQueue {
         var enqueuedAt: Date
         var shownAt: Date?
         var expiresAt: Date?
+        var isRetiring = false
 
         var peek: Peek? {
             if case .peek(let peek) = content { return peek }
@@ -82,11 +83,14 @@ struct PillQueue {
     private static let visibleLimit = 3
     private static let detailedPendingLimit = 30
     private static let pendingLifetime: TimeInterval = 60
+    private static let badgeEntranceDuration: TimeInterval = 1.6
+    private static let badgeExitDuration: TimeInterval = 0.18
 
     private var showing: [Queued] = []
     private var waiting: [Queued] = []
     private var nextSequence: UInt64 = 0
     private var heightLimit: CGFloat = .greatestFiniteMagnitude
+    private var badgeYieldAt: Date?
 
     var visible: [Item] { showing.map(\.item) }
     var pending: [Item] { waiting.map(\.item) }
@@ -96,7 +100,7 @@ struct PillQueue {
         let pendingDeadlines = waiting.compactMap { queued in
             queued.isWaiting || queued.item.summary != nil ? nil : queued.item.enqueuedAt.addingTimeInterval(Self.pendingLifetime)
         }
-        return (shownDeadlines + pendingDeadlines).min()
+        return (shownDeadlines + pendingDeadlines + [badgeYieldAt].compactMap { $0 }).min()
     }
 
     mutating func setHeightLimit(_ height: CGFloat, at now: Date) {
@@ -104,7 +108,8 @@ struct PillQueue {
         guard limit != heightLimit else { return }
         heightLimit = limit
         while !showing.isEmpty && occupiedHeight(showing) > heightLimit {
-            waiting.append(showing.removeLast())
+            let removed = showing.removeLast()
+            if !removed.item.isRetiring { waiting.append(removed) }
         }
         advance(to: now)
     }
@@ -138,9 +143,15 @@ struct PillQueue {
         let key = deduplicationKey(for: peek)
         if let key,
            let index = showing.firstIndex(where: { $0.item.peek.flatMap(deduplicationKey) == key }) {
-            showing[index] = displayed(queued, at: now)
-            refill(at: now)
-            return
+            if showing[index].item.isRetiring {
+                // A later lifecycle transition can queue, but must not restart an outgoing badge.
+                guard showing[index].item.peek?.badgeKind != peek.badgeKind
+                    || waiting.contains(where: { $0.item.peek.flatMap(deduplicationKey) == key }) else { return }
+            } else {
+                showing[index] = displayed(queued, at: now)
+                refill(at: now)
+                return
+            }
         }
         if let key,
            let index = waiting.firstIndex(where: { $0.item.peek.flatMap(deduplicationKey) == key }) {
@@ -155,7 +166,7 @@ struct PillQueue {
 
     /// Call after a fresh session snapshot. A waiting prompt is actionable only while that session still waits.
     mutating func reconcileWaiting(activeSessionIDs: Set<String>, at now: Date) {
-        advance(to: now)
+        expire(to: now)
         showing.removeAll { entry in
             entry.isWaiting && !activeSessionIDs.contains(entry.item.peek?.sessionId ?? "")
         }
@@ -191,6 +202,7 @@ struct PillQueue {
     mutating func clear() {
         showing.removeAll()
         waiting.removeAll()
+        badgeYieldAt = nil
     }
 
     private mutating func takeSequence() -> UInt64 {
@@ -206,16 +218,35 @@ struct PillQueue {
     }
 
     private mutating func refill(at now: Date) {
-        while showing.count < Self.visibleLimit, !waiting.isEmpty {
-            let hasBadge = showing.contains { $0.item.peek?.style == .badge }
-            let fitting = waiting.indices.filter { index in
-                (!hasBadge || waiting[index].item.peek?.style != .badge) && occupiedHeight(showing + [waiting[index]]) <= heightLimit
+        badgeYieldAt = nil
+        if let index = showing.firstIndex(where: { $0.item.peek?.style == .badge }) {
+            guard !showing[index].item.isRetiring else { return }
+            let pills = waiting.filter { $0.item.peek?.style != .badge && occupiedHeight([$0]) <= heightLimit }
+            guard !pills.isEmpty else { return }
+            // Cap the grace from both entrance and notification arrival; replacing a badge cannot postpone a pill.
+            let entranceEnd = (showing[index].item.shownAt ?? now).addingTimeInterval(Self.badgeEntranceDuration)
+            let waitingLimit = pills.map(\.item.enqueuedAt).min()!.addingTimeInterval(Self.badgeEntranceDuration)
+            let yieldAt = pills.contains(where: \.isWaiting) ? now : min(entranceEnd, waitingLimit)
+            if yieldAt <= now {
+                showing[index].item.isRetiring = true
+                showing[index].item.expiresAt = now.addingTimeInterval(Self.badgeExitDuration)
+            } else {
+                badgeYieldAt = yieldAt
             }
-            guard let index = fitting.max(by: { left, right in
+            return
+        }
+        while showing.count < Self.visibleLimit, !waiting.isEmpty {
+            let fitting = waiting.indices.filter { index in
+                occupiedHeight(showing + [waiting[index]]) <= heightLimit
+            }
+            let pills = fitting.filter { waiting[$0].item.peek?.style != .badge }
+            let candidates = pills.isEmpty ? (showing.isEmpty ? fitting : []) : pills
+            guard let index = candidates.max(by: { left, right in
                 let a = waiting[left], b = waiting[right]
                 return a.priority == b.priority ? a.sequence > b.sequence : a.priority < b.priority
             }) else { break }
             showing.append(displayed(waiting.remove(at: index), at: now))
+            if showing.last?.item.peek?.style == .badge { break }
         }
     }
 
@@ -262,7 +293,7 @@ struct PillQueue {
     }
 
     private func deduplicationKey(for peek: Peek) -> String? {
-        // 工牌按项目去重（id 就是项目键），不和同一会话的状态提示互相替换
+        // Badge IDs include provider and session; newer lifecycle states replace pending badges, never pills.
         if peek.style == .badge { return "badge:\(peek.id)" }
         if let sessionID = peek.sessionId { return "session:\(sessionID)" }
         guard peek.style == .quotaHigh || peek.style == .quotaExhausted || peek.style == .quotaReset else { return nil }

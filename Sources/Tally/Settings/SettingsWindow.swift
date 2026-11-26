@@ -17,7 +17,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let selection = SettingsSelection()
         self.selection = selection
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -64,9 +64,10 @@ final class SettingsSelection {
     var section: SettingsSection = .general
 }
 
-/// 侧栏的十项：前两项和最后一项不带组标题（系统设置的做法），中间按「功能」「AI」分组。
+// Feature settings share the existing sidebar and keep detailed controls out of the notch.
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, panel, ai, alerts, shelf, music, apps, hooks, usage, about
+    case general, panel, ai, alerts, shelf, music, apps, displays, wallpaper, hooks, usage, about
+
 
     var id: String { rawValue }
 
@@ -79,6 +80,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .shelf: return "文件架"
         case .music: return "音乐"
         case .apps: return "应用"
+        case .displays: return "显示器"
+        case .wallpaper: return "壁纸"
         case .hooks: return "hook"
         case .usage: return "用量"
         case .about: return "关于"
@@ -94,6 +97,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .shelf: return "tray.full.fill"
         case .music: return "music.note"
         case .apps: return "xmark.app.fill"
+        case .displays: return "display.2"
+        case .wallpaper: return "photo.on.rectangle.angled"
         case .hooks: return "link"
         case .usage: return "chart.bar.fill"
         case .about: return "info"
@@ -109,6 +114,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .shelf: return .teal
         case .music: return .pink
         case .apps: return .cyan
+        case .displays: return .blue
+        case .wallpaper: return .mint
         case .hooks: return .purple
         case .usage: return .green
         case .about: return .secondary
@@ -116,10 +123,14 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     }
 
     /// 侧栏分组：标题为 nil 的组不画组头。
+    private static var aiSections: [SettingsSection] {
+        [.ai, .hooks, .usage]
+    }
+
     static let groups: [(title: String?, sections: [SettingsSection])] = [
         (nil, [.general, .panel]),
-        ("功能", [.alerts, .shelf, .music, .apps]),
-        ("AI", [.ai, .hooks, .usage]),
+        ("功能", [.alerts, .shelf, .music, .apps, .displays, .wallpaper]),
+        ("AI", aiSections),
         (nil, [.about]),
     ]
 }
@@ -151,7 +162,7 @@ struct SettingsWindowView: View {
         .navigationSplitViewStyle(.balanced)
         .toolbar(removing: .sidebarToggle)
         .formStyle(.grouped)
-        .frame(minWidth: 700, minHeight: 480)
+        .frame(minWidth: 780, minHeight: 600)
     }
 
     @ViewBuilder
@@ -164,6 +175,8 @@ struct SettingsWindowView: View {
         case .shelf: ShelfSettings()
         case .music: MusicSettings()
         case .apps: AppsSettings()
+        case .displays: DisplaySettings()
+        case .wallpaper: WallpaperSettings()
         case .hooks: HookSettings()
         case .usage: UsageSettings()
         case .about: HelpPage()

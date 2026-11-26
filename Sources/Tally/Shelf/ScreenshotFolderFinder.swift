@@ -27,11 +27,12 @@ final class ScreenshotFolderFinder {
     @ObservationIgnored private var stream: FSEventStreamRef?
     @ObservationIgnored private var timer: Timer?
 
-    func start() {
+    func start(watching directories: [URL]? = nil) {
         stop()
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         // `$TMPDIR` 的上一层（/var/folders/xx/yyy），T 和 C 都在里面；FSEvents 报的是 /private/var 开头的真实路径
         let temporaryRoot = FileManager.default.temporaryDirectory.deletingLastPathComponent().resolvingSymlinksInPath().path
+        let paths = directories?.map { $0.resolvingSymlinksInPath().path } ?? [home, temporaryRoot]
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
@@ -41,7 +42,7 @@ final class ScreenshotFolderFinder {
             MainActor.assumeIsolated { finder.handle(paths: list, flags: flagList) }
         }
         let options = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagNoDefer)
-        guard let stream = FSEventStreamCreate(nil, callback, &context, [home, temporaryRoot] as CFArray,
+        guard let stream = FSEventStreamCreate(nil, callback, &context, paths as CFArray,
                                                FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.2, options)
         else {
             Log.error("截图文件夹：FSEvents 流建不起来")

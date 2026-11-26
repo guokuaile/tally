@@ -22,6 +22,7 @@ final class SessionStore {
     /// 一个会话进入 done / 等审批 / 等输入时调一次，控制器拿它在闭合态弹提示。
     var sessionAlert: ((SessionRecord) -> Void)?
     var sessionsChanged: (([SessionRecord]) -> Void)?
+    var accountActionsSessionsChanged: (([SessionRecord]) -> Void)?
     var completionsChanged: (() -> Void)?
     var badgeSessionsChanged: (([SessionRecord]) -> Void)?
     /// 等你账本（docs/ai.md「等你账本」）；`todayWaits` 是当天那一行，每轮刷新按当天重算，没等过为 nil。
@@ -171,19 +172,23 @@ final class SessionStore {
     // MARK: 读取
 
     func reload() {
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil
-        )) ?? []
+        let found = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let files = found ?? []
+        var completeForAccountActions = found != nil
         let decoder = JSONDecoder()
         let now = Date()
         var recheck = false
         // 开始等的时刻只在内存：上一轮已经在等的沿用上一轮的值
         let previousBySession = Dictionary(sessions.map { ($0.sessionId, $0) }, uniquingKeysWith: { a, _ in a })
-        let decoded: [(URL, SessionRecord)] = files.filter { $0.pathExtension == "json" }.compactMap { file in
+        var decoded: [(URL, SessionRecord)] = []
+        for file in files where file.pathExtension == "json" {
             guard let data = try? Data(contentsOf: file),
-                  let record = try? decoder.decode(SessionRecord.self, from: data) else { return nil }
-            return (file, record)
+                  let record = try? decoder.decode(SessionRecord.self, from: data) else {
+                // A transient partial read must not look like a completed session to deferred account work.
+                completeForAccountActions = false
+                continue
+            }
+            decoded.append((file, record))
         }
         let table = processTable
         let entries = table.entries()
@@ -364,6 +369,9 @@ final class SessionStore {
         todayWaits = waits.summary(on: now)
         sessions = loaded.sorted { $0.updatedAt > $1.updatedAt }
         sessionsChanged?(sessions)
+        if completeForAccountActions {
+            accountActionsSessionsChanged?(sessions + closedForBadges)
+        }
         for record in alerts { sessionAlert?(record) }
     }
 

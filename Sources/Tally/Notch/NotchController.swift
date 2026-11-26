@@ -8,7 +8,8 @@ import Observation
 @Observable
 final class NotchState {
     var isOpen = false
-    /// `--open` 启动时为 true：不因鼠标离开或点外收起，直到再点一次刘海。
+    var expansion: CGFloat = 0
+    // Pinned panels stay open until the close button, notch center, or shortcut is used.
     var isPinned = false
     var page: LaunchOptions.Page = .ai
     /// 闭合态刘海宽高：标题行按宽在中间留空，提示条按高把内容排在刘海下面。
@@ -19,6 +20,7 @@ final class NotchState {
     var contentHeightChanged: (() -> Void)?
     /// 齿轮按钮和右键菜单的「设置…」都走这里，由 AppDelegate 接上设置窗口。
     var openSettings: (() -> Void)?
+    var closePanel: (() -> Void)?
     /// 有文件拖到面板上（闭合或展开都算），控制器据此展开 / 切到文件架。
     var dropEntered: (() -> Void)?
     /// 展开着切页签时通知控制器换采样对象。
@@ -241,6 +243,9 @@ final class NotchController {
     private let panel: NotchPanel
     private let hostView: NotchHostView
     private var metrics: ScreenMetrics?
+    private var frameMotion: NotchMotion?
+    private var frameTimer: Timer?
+    private var frameTime: TimeInterval = 0
     private var openTimer: Timer?
     private var closeTimer: Timer?
     /// 展开期间每 100 ms 看一次光标还在不在面板上。
@@ -252,13 +257,15 @@ final class NotchController {
     /// 点菜单栏小恐龙打开时，恐龙按钮到刘海正中这段菜单栏：光标从没进过面板，停在恐龙上或顺着菜单栏滑进面板都不算离开。
     /// 和 `shrunkFrom` 分开存：切到系统页面板变矮时 `applyFrame` 会拿当时的 frame 覆盖掉 `shrunkFrom`。
     private var openedFrom: CGRect?
+    /// 这次钉住是清洁锁干的：解锁时只放开它钉的，用户自己钉住的不动。
+    private var pinnedByInputLock = false
     private var pillQueue = PillQueue()
     private var pillTimer: Timer?
     private var pillPanels: [String: PillNotificationPanel] = [:]
     private var pillContent: [String: Peek] = [:]
     private var pillInteractivity: [String: Bool] = [:]
     /// 刘海两侧的项目小人（docs/crew.md）：它不认识面板，五个接入点都在这里调它
-    let crew = CrewController()
+    let crew = CrewController(menuEnd: MenuBarRoom.menuEnd)
     /// 翅膀的悬停撑开与点击分派（docs/crew.md「悬停撑开与点击」）
     private let crewExpand = CrewExpandController()
     /// 本进程见过的项目 id（工牌去重用）；nil 是还没拿到第一份名册——第一份整个记住不发牌，开关关掉再开也从头记
@@ -278,6 +285,8 @@ final class NotchController {
         state.openSettings = openSettings
         panel = NotchPanel(contentRect: CGRect(origin: .zero, size: CGSize(width: NotchGeometry.openWidth, height: NotchGeometry.minOpenHeight)))
         hostView = NotchHostView(rootView: NotchView(state: state))
+        // AppKit owns the animated frame; SwiftUI's content minimum must not widen it after each tick.
+        hostView.sizingOptions = []
         hostView.autoresizingMask = [.width, .height]
         panel.contentView = hostView
 
@@ -286,6 +295,7 @@ final class NotchController {
         hostView.onLeftClick = { [weak self] point in self?.clickedInside(at: point) }
         hostView.onRightClick = { [weak self] point in self?.showMenu(at: point) }
         hostView.isPanelOpen = { [weak self] in self?.state.isOpen ?? false }
+        state.closePanel = { [weak self] in self?.close() }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -353,7 +363,10 @@ final class NotchController {
         SessionStore.shared.completionsChanged = { [weak self] in
             self?.crew.refresh(SessionStore.shared.sessions, completionIDs: Set(SessionStore.shared.unseenCompletions.keys))
         }
-        SessionStore.shared.badgeSessionsChanged = { [weak self] records in self?.updateBadges(records) }
+        SessionStore.shared.badgeSessionsChanged = { [weak self] records in
+            self?.crew.observeClosures(records)
+            self?.updateBadges(records)
+        }
         UsageStore.shared.quotaAlert = { [weak self] event in
             guard PreferencesStore.shared.prefs.quotaPeek else { return }
             self?.showPeek(.quota(event))
@@ -391,6 +404,7 @@ final class NotchController {
         }
         HotKeyCenter.shared.setHandler { [weak self] in self?.toggle() }
         HotKeyCenter.shared.setEnabled(PreferencesStore.shared.prefs.hotKeyEnabled)
+        InputLock.shared.onChange = { [weak self] locked in self?.inputLockChanged(locked) }
         PreferencesStore.shared.onChange = { [weak self] in self?.applyPreferences() }
         applyPreferences()
 
@@ -411,7 +425,7 @@ final class NotchController {
     private func scheduleDemoPeeks(peekTest: Bool) {
         Task { @MainActor [weak self] in
             if peekTest {
-                // 第 0.5 秒先来一张工牌（直接注入，不经 newcomers 的 10 秒规则），它是首批可见三条之一
+                // The waiting prompts below interrupt this badge and take its place after the exit.
                 try? await Task.sleep(for: .seconds(0.5))
                 if let project = CrewRoster.projects(DemoData.sessions(now: Date()), now: Date()).first(where: { $0.name == "shop-web" }) {
                     self?.showPeek(.badge(project, cast: CrewCastStore.shared.member(for: project.sessions[0])))
@@ -455,7 +469,7 @@ final class NotchController {
             for id in badges { pillQueue.dismiss(id: id, at: Date()) }
         }
         crew.apply(enabled: prefs.crewEnabled, perSide: prefs.crewPerSide, skin: prefs.crewSkin == "gradient" ? .gradient : .glass,
-                   sharingType: panel.sharingType)
+                   sharingType: panel.sharingType, spillRight: prefs.crewSpillRight)
         crew.refresh(SessionStore.shared.sessions, completionIDs: Set(SessionStore.shared.unseenCompletions.keys))
         if prefs.badgeEnabled { updateBadges(SessionStore.shared.sessions) }
         if !pillQueue.visible.isEmpty || !pillQueue.pending.isEmpty || !pillPanels.isEmpty { refreshPills() }
@@ -537,6 +551,7 @@ final class NotchController {
         if full {
             // 用 orderOut 不用透明：透明的话追踪区和 ⌥⇧T 还能把它展开出来
             close()
+            stopFrameMotion()
             clearPeek()
             panel.orderOut(nil)
             syncCrewVisibility()
@@ -547,7 +562,7 @@ final class NotchController {
 
     /// 两翼只在面板收着、没被全屏藏起时上屏。
     private func syncCrewVisibility() {
-        crew.setHidden(state.isOpen || hiddenForFullScreen)
+        crew.setHidden(state.isOpen || frameMotion != nil || hiddenForFullScreen)
     }
 
     // MARK: 定位
@@ -599,18 +614,60 @@ final class NotchController {
         if state.isOpen, frame.height < panel.frame.height - 0.5 {
             shrunkFrom = panel.frame
         }
-        if animated {
-            // 开合用 expo-out（起步快、收尾软，接近 Atoll 的临界阻尼弹簧；NSAnimationContext 只吃 timing function）；
-            // 展开着只是换页或内容增减，高度小幅变化用短的 easeOut，长动画每帧重排 SwiftUI 会卡
-            let heightOnly = state.isOpen && abs(frame.width - panel.frame.width) < 0.5
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = heightOnly ? 0.2 : (state.isOpen ? 0.38 : 0.30)
-                context.timingFunction = heightOnly ? CAMediaTimingFunction(name: .easeOut) : CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
-                panel.animator().setFrame(frame, display: true)
-            }
-        } else {
-            panel.setFrame(frame, display: true)
+        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            stopFrameMotion()
+            renderFrame(size, metrics: metrics, closed: closed)
+            syncCrewVisibility()
+            return
         }
+        let now = ProcessInfo.processInfo.systemUptime
+        if frameMotion != nil { advanceFrame(at: now) }
+        var motion = frameMotion ?? NotchMotion(size: panel.frame.size)
+        let heightOnly = state.isOpen && abs(size.width - motion.size.width) < 0.5
+        motion.retarget(size, heightOnly: heightOnly)
+        frameMotion = motion
+        frameTime = now
+        guard frameTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                self.advanceFrame(at: ProcessInfo.processInfo.systemUptime)
+            }
+        }
+        frameTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func advanceFrame(at now: TimeInterval) {
+        guard var motion = frameMotion, let metrics, let closed = NotchGeometry.closedSize(metrics) else {
+            stopFrameMotion()
+            return
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            renderFrame(motion.target, metrics: metrics, closed: closed)
+            stopFrameMotion()
+            syncCrewVisibility()
+            return
+        }
+        motion.advance(by: now - frameTime)
+        frameTime = now
+        frameMotion = motion
+        renderFrame(motion.visibleSize(minimum: closed), metrics: metrics, closed: closed)
+        if motion.isSettled {
+            stopFrameMotion()
+            syncCrewVisibility()
+        }
+    }
+
+    private func renderFrame(_ size: CGSize, metrics: ScreenMetrics, closed: CGSize) {
+        panel.setFrame(NotchGeometry.frame(for: size, on: metrics), display: true)
+        state.expansion = min(1, max(0, (size.width - closed.width) / (NotchGeometry.openWidth - closed.width)))
+    }
+
+    private func stopFrameMotion() {
+        frameTimer?.invalidate()
+        frameTimer = nil
+        frameMotion = nil
     }
 
     // MARK: 展开 / 收起
@@ -645,10 +702,25 @@ final class NotchController {
         if state.isOpen { close() } else { open(pinned: true) }
     }
 
+    /// 清洁锁锁着时钉住面板：擦触控板时光标乱跑，不钉的话倒计时和解锁提示跟着面板一起收走。
+    /// 解锁后放开，光标不在面板上的话悬停轮询自己会收。
+    private func inputLockChanged(_ locked: Bool) {
+        if locked {
+            guard state.isOpen, !state.isPinned else { return }
+            state.isPinned = true
+            pinnedByInputLock = true
+        } else if pinnedByInputLock {
+            pinnedByInputLock = false
+            state.isPinned = false
+        }
+    }
+
     func close() {
         openTimer?.invalidate()
         closeTimer?.invalidate()
         state.isPinned = false
+        // 锁着时面板被收起，这次钉住就算结束了：之后用户自己再钉的，解锁时不该被放开
+        pinnedByInputLock = false
         guard state.isOpen else { return }
         state.isOpen = false
         closedAt = Date()
@@ -664,11 +736,6 @@ final class NotchController {
         // 之后打的字照样全进它，直到用户点一下别处。探针实测 resignKey 能把焦点还给原来的 app，再 makeKey 照常拿回
         if panel.isKeyWindow { panel.resignKey() }
         applyFrame(animated: true)
-        // 两翼等收起动画（0.30 s）走完再回来，不然缩回去的面板和冒出来的翅膀在半路撞上
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
-            guard let self, !self.state.isOpen else { return }
-            self.syncCrewVisibility()
-        }
         NetworkStore.shared.stop()
         SystemStore.shared.stop()
         RunningAppsStore.shared.stop()
@@ -705,9 +772,7 @@ final class NotchController {
     private func refreshPills() {
         pillTimer?.invalidate()
         pillTimer = nil
-        let items = pillQueue.visible.sorted { left, right in
-            (left.peek?.style == .badge ? 0 : 1) < (right.peek?.style == .badge ? 0 : 1)
-        }
+        let items = pillQueue.visible
         let ids = Set(items.map(\.id))
         for id in pillPanels.keys where !ids.contains(id) {
             pillPanels.removeValue(forKey: id)?.close()
@@ -717,6 +782,10 @@ final class NotchController {
         guard !hiddenForFullScreen, !state.isOpen, let screen = NotchGeometry.builtInNotchScreen() else { return }
         var verticalOffset: CGFloat = items.first?.peek?.style == .badge ? -PillNotificationPanel.gap : 0
         for item in items {
+            if item.isRetiring {
+                pillPanels[item.id]?.retireBadge(duration: max(0, item.expiresAt?.timeIntervalSinceNow ?? 0))
+                continue
+            }
             let peek: Peek
             let interactive: Bool
             switch item.content {
@@ -738,12 +807,13 @@ final class NotchController {
             }
             let action: () -> Void = { [weak self] in self?.pillTapped(id: item.id) }
             let pill: PillNotificationPanel
-            if let existing = pillPanels[item.id] {
+            if let existing = pillPanels[item.id], !existing.isRetiring {
                 pill = existing
                 if pillContent[item.id] != peek || pillInteractivity[item.id] != interactive {
                     pill.update(peek: peek, isInteractive: interactive, onTap: action)
                 }
             } else {
+                pillPanels[item.id]?.close()
                 pill = PillNotificationPanel(peek: peek, isInteractive: interactive, onTap: action)
                 pillPanels[item.id] = pill
             }
@@ -807,7 +877,7 @@ final class NotchController {
     }
 
     private func pillTapped(id: String) {
-        guard let item = pillQueue.visible.first(where: { $0.id == id }) else { return }
+        guard let item = pillQueue.visible.first(where: { $0.id == id && !$0.isRetiring }) else { return }
         pillQueue.dismiss(id: id, at: Date())
         refreshPills()
         switch item.content {
@@ -909,12 +979,16 @@ final class NotchController {
                 let verdict = HoverGrace.judge(mouse: mouse, frame: self.panel.frame, shrunkFrom: self.shrunkFrom, openedFrom: self.openedFrom)
                 self.shrunkFrom = verdict.keepGrace ? self.shrunkFrom : nil
                 self.openedFrom = verdict.keepOpenedFrom ? self.openedFrom : nil
-                if dragging || verdict.inside {
+                if dragging || verdict.inside || self.isEditingText {
                     self.closeTimer?.invalidate()
                     self.closeTimer = nil
                 } else if self.closeTimer == nil {
                     self.closeTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
-                        Task { @MainActor in self?.close() }
+                        Task { @MainActor in
+                            guard let self else { return }
+                            self.closeTimer = nil
+                            if !self.isEditingText { self.close() }
+                        }
                     }
                 }
             }
@@ -975,20 +1049,27 @@ final class NotchController {
 
     // MARK: 面板展开时的键盘
 
+    // Keep numeric shortcuts and hover dismissal from interrupting text entry.
+    private var isEditingText: Bool {
+        panel.isKeyWindow && (panel.firstResponder as? NSTextView)?.isEditable == true
+    }
+
     /// 面板是 key window 但 app 不激活，主菜单的 ⌘, 收不到；展开期间自己接，顺带接数字键切页签、⌘1–⌘9 / ⌘0 跳会话。
     private func installKeyMonitor() {
         removeKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self, event.window === self.panel else { return event }
             let prefs = PreferencesStore.shared.prefs
+            let editingText = self.isEditingText
             if event.type == .flagsChanged {
                 // 按住 ⌘ 时会话行尾浮出 ⌘1–⌘9 / ⌘0，松开消失；修饰键事件原样放行
-                SessionJump.shared.shortcutHints = prefs.sessionCommandKeys
+                SessionJump.shared.shortcutHints = prefs.sessionCommandKeys && !editingText
                     && event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command
                 return event
             }
             switch PanelKey.action(keyCode: event.keyCode, modifiers: event.modifierFlags,
-                                   pageKeys: prefs.pageNumberKeys, sessionKeys: prefs.sessionCommandKeys) {
+                                   pageKeys: prefs.pageNumberKeys, sessionKeys: prefs.sessionCommandKeys,
+                                   editingText: editingText) {
             case .settings:
                 self.state.openSettings?()
             case .page(let index):
@@ -1079,9 +1160,11 @@ enum PanelKey {
     static let sessionKeyCount = 10
 
     /// 修饰键只看 ⌘ ⌥ ⌃ ⇧：大写锁、小键盘、fn 不算按了修饰键。
-    static func action(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, pageKeys: Bool, sessionKeys: Bool) -> Action? {
+    static func action(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, pageKeys: Bool, sessionKeys: Bool,
+                       editingText: Bool = false) -> Action? {
         let mods = modifiers.intersection([.command, .option, .control, .shift])
         if keyCode == UInt16(kVK_ANSI_Comma), mods == .command { return .settings }
+        guard !editingText else { return nil }
         // 单按 0 不归面板：页签没有第 10 个
         if keyCode == zeroKeyCode { return mods == .command && sessionKeys ? .session(9) : nil }
         guard let index = digitKeyCodes.firstIndex(of: keyCode) else { return nil }

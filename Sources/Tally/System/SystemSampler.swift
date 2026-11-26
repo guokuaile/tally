@@ -9,6 +9,7 @@ struct SystemSample: Equatable {
     var swapTotal: UInt64?
     /// 0…1，第一次采样没有上一次的 tick 可比，为 nil。
     var cpuFraction: Double?
+    var gpuFraction: Double?
     /// 没电池为 nil。
     var battery: BatteryHealth?
     var diskAvailable: UInt64?
@@ -27,6 +28,10 @@ struct SystemSample: Equatable {
 
     var cpuLevel: Level? {
         cpuFraction.map { Self.level($0, warn: 0.70, critical: 0.90) }
+    }
+
+    var gpuLevel: Level? {
+        gpuFraction.map { Self.level($0, warn: 0.70, critical: 0.90) }
     }
 
     /// 看的是可用占比：不到 10% 红、不到 20% 黄。
@@ -240,6 +245,7 @@ struct SystemSampler {
             s.swapTotal = swap.total
         }
         s.cpuFraction = cpu()
+        s.gpuFraction = Self.gpu()
         s.battery = BatteryHealth.read()
         if let disk = Self.disk() {
             s.diskAvailable = disk.available
@@ -348,6 +354,24 @@ struct SystemSampler {
         }
         // CPU_STATE_USER=0, SYSTEM=1, IDLE=2, NICE=3，正好是 host 给的顺序
         return (0..<Int(infoCount)).map { UInt32(bitPattern: info[$0]) }
+    }
+
+    static func gpu() -> Double? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAccelerator"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        let statistics = IORegistryEntryCreateCFProperty(service, "PerformanceStatistics" as CFString, kCFAllocatorDefault, 0)
+        return gpuFraction(statistics: statistics?.takeRetainedValue())
+    }
+
+    static func gpuFraction(statistics: Any?) -> Double? {
+        // Driver statistics may disappear or change type; unknown load must not look idle.
+        guard let statistics = statistics as? [String: Any],
+              let number = statistics["Device Utilization %"] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let percent = number.doubleValue
+        guard percent.isFinite, (0...100).contains(percent) else { return nil }
+        return percent / 100
     }
 
     static func disk() -> (available: UInt64, total: UInt64)? {

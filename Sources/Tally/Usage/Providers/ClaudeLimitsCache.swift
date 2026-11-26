@@ -5,6 +5,9 @@ import Foundation
 struct ClaudeLimits: Equatable {
     var session: UsageLimit?
     var week: UsageLimit?
+    // A local statusline writer may attach the identity from its own authenticated CLI session.
+    var accountUUID: String? = nil
+    var organizationUUID: String? = nil
     /// 按模型分的周窗口（如 Fable）。只有官方接口给，statusline 缓存里没有，所以缓存读出来永远是空的。
     var scoped: [ScopedLimit] = []
     /// 缓存文件超过 10 分钟没更新。没有 Claude 会话在跑时就是这样，配额也没人消耗。
@@ -32,7 +35,10 @@ struct ClaudeLimitsCache {
         let session = Self.limit(from: object["five_hour"])
         let week = Self.limit(from: object["seven_day"])
         guard session != nil || week != nil else { return nil }
-        return ClaudeLimits(session: session, week: week, isStale: Self.isStale(fileURL, now: now))
+        let accountUUID = (object["account_uuid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let organizationUUID = (object["organization_uuid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return ClaudeLimits(session: session, week: week, accountUUID: accountUUID,
+                            organizationUUID: organizationUUID, isStale: Self.isStale(fileURL, now: now))
     }
 
     /// `used_percentage` 按 Double 解码，`88` 得 0.88；超限时可能大于 100，不截断，`fraction` 自己封顶。

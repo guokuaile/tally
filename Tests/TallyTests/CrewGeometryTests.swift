@@ -133,7 +133,8 @@ final class CrewGeometryTests: XCTestCase {
             let picked = try XCTUnwrap(CrewPlayback.pick(mood: mood, elapsed: now.timeIntervalSinceReferenceDate + phase, still: false, art: art))
             XCTAssertFalse(try XCTUnwrap(art.clips[picked.clip]).frames[picked.index].eyeSpecs.isEmpty)
             XCTAssertNil(StateIcon.rowMotion(mood: mood, art: art, now: now, startedAt: start, phase: phase, still: true))
-            XCTAssertNil(StateIcon.rowMotion(mood: mood, art: art, now: now.addingTimeInterval(10), startedAt: start, phase: phase, still: false))
+            XCTAssertNotEqual(StateIcon.rowMotion(mood: mood, art: art, now: now.addingTimeInterval(10), startedAt: start, phase: phase, still: false)?.kind,
+                              expected, "One-shot character motion must not replay; later idle motion may appear")
         }
     }
 

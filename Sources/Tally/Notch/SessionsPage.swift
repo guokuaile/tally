@@ -107,6 +107,7 @@ struct SessionRow: View {
     var jump = SessionJump.shared
     var store = SessionStore.shared
     @State private var hovered = false
+    @State private var clickedAt: Date? = nil
 
     private static let relative: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -136,7 +137,7 @@ struct SessionRow: View {
 
     private func content(stale: Bool, ended: Bool) -> some View {
             HStack(spacing: 8) {
-                StateIcon(session: session, stale: stale)
+                StateIcon(session: session, stale: stale, clickedAt: clickedAt)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 5) {
                         // 从中间截断：URL、文件名这种能区分两条会话的部分都在尾巴上
@@ -209,6 +210,7 @@ struct SessionRow: View {
     }
 
     private func focus() {
+        clickedAt = Date()
         // 脚本在后台跑，这里只等结果：第一次跳某个终端会弹自动化授权框，主线程不能卡在那儿
         Task { await jump.run(session) }
     }
@@ -314,20 +316,32 @@ struct RowTag: View {
 struct StateIcon: View {
     let session: SessionRecord
     let stale: Bool
+    var clickedAt: Date? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visible = false
     @State private var moodStartedAt = Date()
+    @State private var wokeAt: Date? = nil
 
     var body: some View {
         Group {
             if let mood {
                 // 同项目的行同一个角色、同一个相位：相位按项目键取（和翅膀同一个散列），时间用墙钟
                 TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !visible || reduceMotion)) { timeline in
-                    let motion = BloubArt.bundled.flatMap {
-                        Self.rowMotion(mood: mood, art: $0, now: timeline.date, startedAt: moodStartedAt, phase: phase, still: reduceMotion)
+                    let wake = wokeAt.flatMap { at in
+                        BloubArt.bundled.flatMap { art -> CastMotion? in
+                            guard let clip = art.clips[mood.clip(tier: tier)] else { return nil }
+                            return CrewPlayback.wakeMotion(mood: mood, tier: tier, elapsed: timeline.date.timeIntervalSince(at),
+                                phase: (at.timeIntervalSinceReferenceDate + phase).truncatingRemainder(dividingBy: clip.duration), still: reduceMotion, art: art)
+                        }
                     }
-                    CrewBadgeIcon(mood: mood, cast: CrewCastStore.shared.member(for: session), size: 34, unit: 316,
-                                  elapsed: reduceMotion ? nil : timeline.date.timeIntervalSinceReferenceDate + phase, motionOverride: motion)
+                    let click = clickedAt.flatMap { CastMotion.forClick(elapsed: timeline.date.timeIntervalSince($0), still: reduceMotion) }
+                    let motion = click ?? wake ?? BloubArt.bundled.flatMap {
+                        Self.rowMotion(mood: mood, art: $0, now: timeline.date, startedAt: moodStartedAt, phase: phase, still: reduceMotion,
+                                       tier: tier, seed: CrewRoster.bucket(projectKey, of: 997))
+                    }
+                    CrewBadgeIcon(mood: mood, tier: tier, cast: CrewCastStore.shared.member(for: session), size: 34, unit: 316,
+                                  elapsed: reduceMotion ? nil : timeline.date.timeIntervalSinceReferenceDate + phase,
+                                  motionOverride: motion, motionIsResolved: true)
                 }
                 .frame(width: 34, height: 34)
             } else {
@@ -345,13 +359,19 @@ struct StateIcon: View {
         .accessibilityLabel(label)
         .help(label)
         .onChange(of: mood) { _, _ in moodStartedAt = Date() }
+        .onChange(of: tier) { _, _ in moodStartedAt = Date() }
+        .onChange(of: sleeping) { old, asleep in
+            if old && !asleep && mood != nil { wokeAt = Date() }
+            else { wokeAt = nil }
+        }
         .onScrollVisibilityChange(threshold: 0.05) { visible = $0 }
     }
 
-    static func rowMotion(mood: CrewMood, art: BloubArt, now: Date, startedAt: Date, phase: Double, still: Bool) -> CastMotion? {
-        guard let clip = art.clips[mood.clip] else { return nil }
+    static func rowMotion(mood: CrewMood, art: BloubArt, now: Date, startedAt: Date, phase: Double, still: Bool,
+                          tier: CrewTier = .fresh, seed: Int = 0) -> CastMotion? {
+        guard let clip = art.clips[mood.clip(tier: tier)] else { return nil }
         let startPhase = (startedAt.timeIntervalSinceReferenceDate + phase).truncatingRemainder(dividingBy: clip.duration)
-        return CastMotion.forCrew(mood: mood, tier: .fresh, elapsed: max(0, now.timeIntervalSince(startedAt)), phase: startPhase, still: still)
+        return CastMotion.forCrew(mood: mood, tier: tier, elapsed: max(0, now.timeIntervalSince(startedAt)), phase: startPhase, still: still, seed: seed)
     }
 
     /// 名册同一条折叠规则（`CrewRoster.mood(of:)`）：失联判在最前，完成但后台还有活算在跑；已关闭没有 mood
@@ -369,8 +389,15 @@ struct StateIcon: View {
     }
 
     private var phase: Double {
-        Double(CrewRoster.bucket(CrewCastStore.shared.key(provider: session.provider, cwd: session.cwd) + "·phase", of: 6)) * 0.41
+        Double(CrewRoster.bucket(projectKey + "·phase", of: 6)) * 0.41
     }
+
+    private var projectKey: String { CrewCastStore.shared.key(provider: session.provider, cwd: session.cwd) }
+    private var tier: CrewTier {
+        guard mood?.isWaiting == true else { return .fresh }
+        return CrewTier.of(waited: session.waitingSince.map { Date().timeIntervalSince($0) })
+    }
+    private var sleeping: Bool { mood == .stale || (mood?.isWaiting == true && tier == .dusty) }
 
     private var label: String {
         if stale { return "失联" }

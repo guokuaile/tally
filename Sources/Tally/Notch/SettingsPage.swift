@@ -219,6 +219,9 @@ struct PanelSettings: View {
 
 /// AI 会话、角色、工牌与提示集中在同一页。
 struct AISettings: View {
+    /// 只借它那份「有没有辅助功能权限」：小人让开菜单和关窗自动退出是同一项授权
+    var watcher = AutoQuitWatcher.shared
+
     var body: some View {
         Form {
             Section {
@@ -250,6 +253,15 @@ struct AISettings: View {
             }
             Section {
                 Toggle("刘海两侧显示项目小人", isOn: preferenceToggle(\.crewEnabled))
+                if PreferencesStore.shared.prefs.crewEnabled, !watcher.trusted {
+                    HStack {
+                        Text("要辅助功能权限才能让开菜单，没勾时小人会压住前台 app 靠近刘海的菜单：系统设置 → 隐私与安全性 → 辅助功能，勾上 Tally")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("去授权") { watcher.requestTrust() }
+                    }
+                }
                 Picker("每侧最多", selection: Binding(
                     get: { PreferencesStore.shared.prefs.crewPerSide },
                     set: { PreferencesStore.shared.prefs.crewPerSide = CrewRoster.perSide($0) }
@@ -257,6 +269,8 @@ struct AISettings: View {
                     ForEach(1...4, id: \.self) { Text("\($0) 个").tag($0) }
                 }
                 .disabled(!PreferencesStore.shared.prefs.crewEnabled)
+                Toggle("左边放不下时挪到右边", isOn: preferenceToggle(\.crewSpillRight))
+                    .disabled(!PreferencesStore.shared.prefs.crewEnabled)
                 Picker("样式", selection: Binding(
                     get: { PreferencesStore.shared.prefs.crewSkin },
                     set: { PreferencesStore.shared.prefs.crewSkin = Preferences.crewSkin($0) }
@@ -268,7 +282,7 @@ struct AISettings: View {
             } header: {
                 Text("刘海小人")
             } footer: {
-                Text("面板收起时，刘海两侧按工具和启动目录聚合会话。小人的动作与颜色跟随最需要关注的会话；悬停展开会话列表，点击会话跳回终端。关闭后停止小人动画。")
+                Text("面板收起时，刘海两侧按工具和启动目录聚合会话。小人的动作与颜色跟随最需要关注的会话；悬停展开会话列表，点击会话跳回终端。前台 app 的菜单排到刘海附近时小人会让开，放不下的挪到另一侧或折进「+N」；只量菜单的位置，不读菜单内容。打开「左边放不下时挪到右边」后，右边可以超过「每侧最多」把左边挤掉的都接过去；菜单栏图标多的机器上可能压住最靠刘海的图标。关闭后停止小人动画。")
             }
             Section {
                 Toggle("显示会话工牌", isOn: preferenceToggle(\.badgeEnabled))
@@ -328,6 +342,7 @@ struct AISettings: View {
                 Text("每个配额窗口从 80% 以下涨到 80% 以上、涨到用完各提醒一次，用过 80% 的窗口重置了再说一声；开 Tally 时已经很高的不补报。提示条不可点，停留时长和 AI 会话提示一样。")
             }
         }
+        .onAppear { watcher.refreshTrust() }
     }
 }
 
@@ -729,7 +744,7 @@ struct UsageSettings: View {
                     Toggle(provider.displayName, isOn: providerBinding(provider))
                 }
             } footer: {
-                Text("关掉的提供方不读日志、不查接口。Claude 只读登录留下的 token，不刷新不回写。")
+                Text("关掉的提供方不读日志、不查接口。Claude 配额查询只读登录凭据；账号保存与切换在「Claude 账号」中操作，续期仍由 CLI 完成。")
             }
             if let saveError = credentials.saveError {
                 Section {

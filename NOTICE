@@ -1,5 +1,18 @@
 # NOTICE
 
+Claude 账号保存、切换事务与兼容锁设计参考 herdr-auth-picker
+（https://github.com/msiric/herdr-auth-picker，提交
+7c3fe8ead81f646bbf201d06bc9b779a47f4b80e，Copyright (c) 2026 Mario Širić，MIT）。
+Tally 以原生 Swift 实现，按本机 Claude Code 2.1.331 / 2.1.332 协议校验，
+不包含 Herdr、Python 运行时或第三方续期实现。许可全文随应用保留于
+Resources/account-licenses/MIT-LICENSE。
+
+显示模式枚举与配置事务参考 FineDisplay（ofbakirci/finedisplay，提交
+81d01038934d7ccbbf62fe066aa8e7b45661f967），HiDPI override 编码与备份流程参考 Crisp
+（didriksg/Crisp，提交 3b81e392cb1492df2fa20804153814c7d8060455）；
+Crisp 源于 FreeDisplay，保留其归属。Tally 的实现为 Swift 重写，仅使用公开 CoreGraphics API。
+三方 MIT 许可和归属见 Resources/display-licenses/MIT-LICENSE。
+
 以下文件移植自 Atoll（https://github.com/Ebullioscopic/Atoll），
 Copyright (C) 2024-2026 Atoll Contributors，GPL-3.0，见 LICENSE。
 带改动的文件在文件头第二行注明了改了什么；其余除文件头外逐字未动。

@@ -2,12 +2,22 @@ import SwiftUI
 // TallyKit 里的模型（SessionRecord、TranscriptTitle、HookDecision）在整个 app 目标里可见，其余文件不用各自 import
 @_exported import TallyKit
 
+@main
+enum TallyMain {
+    @MainActor static func main() {
+        if CommandLine.arguments.dropFirst().elementsEqual(["--build-edition"]) {
+            print("public")
+            return
+        }
+        TallyApp.main()
+    }
+}
+
 /// Tally —— 刘海里的 agent 会话状态与 LLM 用量。
 ///
 /// 界面全部由 AppKit 托管（贴刘海的 NSPanel + 设置窗口），SwiftUI 只负责画内容。
 /// 和 Watchdog 同一套理由：SwiftUI 的场景派窗口关掉后就拿不到 `openWindow`，
 /// 而刘海面板的生命周期完全由鼠标事件驱动，必须自己管窗口。
-@main
 struct TallyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
@@ -32,8 +42,8 @@ struct TallyApp: App {
 struct LaunchOptions: Equatable {
     enum Page: String, CaseIterable {
         case ai
-        case network
         case system
+        case network
         case apps
         case shelf
         case music
@@ -66,7 +76,7 @@ struct LaunchOptions: Equatable {
 
         /// 面板里有页签的页，顺序固定；设置不是面板页。文件架、音乐要看开关，见 `visible(shelf:music:)`。
         /// 音乐排最后：它会随播放出现、消失，排中间的话别的页签跟着挪位置，数字键对应的页也跟着变。
-        static let panelPages: [Page] = [.ai, .network, .system, .apps, .shelf, .music]
+        static let panelPages: [Page] = [.ai, .system, .network, .apps, .shelf, .music]
 
         /// 页签上实际画出来的页。`music` 是 `NowPlayingMonitor.pageVisible`（开关、常驻、有没有在播、助手起没起来）。
         static func visible(shelf: Bool, music: Bool) -> [Page] {

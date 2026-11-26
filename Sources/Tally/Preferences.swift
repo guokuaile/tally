@@ -9,7 +9,10 @@ struct Preferences: Codable, Equatable {
     var launchAtLogin = false
     /// 用量页的四个提供方开关。
     var enableClaude = true
+    /// 已保存 Claude 账号的后台配额查询间隔，分钟。
+    var claudeAccountRefreshMinutes = 10
     var enableCodex = true
+    var pendingCodexResetRequestID: String?
     var enableAntigravity = true
     var enableCursor = true
     /// 国内几家与 New API 中转站：默认关，打开才查（凭据见 `ProviderCredentialsStore`）。
@@ -89,6 +92,8 @@ struct Preferences: Codable, Equatable {
     var crewEnabled = true
     var crewPerSide = 3
     var crewSkin = "glass"
+    /// 左翼被前台 app 的菜单挤掉几格，右翼就多放几格（可超过 crewPerSide，docs/crew.md「让开菜单」）。默认关：右边的状态图标量不了，图标多的机器会被压住。
+    var crewSpillRight = false
     var badgeEnabled = true
     var badgeSeconds = 8
     var badgePosition = "right"
@@ -100,6 +105,8 @@ struct Preferences: Codable, Equatable {
     var updateNotifiedVersion: String?
     /// 首次启动指引看过没有。新建默认假；老文件缺这个键按真解码——有 preferences.json 就说明用过，升级不弹。
     var guideShown = false
+    var displayTargets: [String: DisplayModeSelection] = [:]
+    var displayUndo: [String: DisplayUndoRecord] = [:]
 
     init() {}
 
@@ -108,6 +115,8 @@ struct Preferences: Codable, Equatable {
 
     /// 已关闭的会话条数夹在 1 到 50 之间：手改成 0 等于关掉，关掉有单独的开关。
     static func closedLimit(_ value: Int) -> Int { min(max(value, 1), 50) }
+
+    static func accountRefreshMinutes(_ value: Int) -> Int { min(max(value, 1), 60) }
 
     /// 提示条秒数夹在 2 到 30 之间。
     static func peekSeconds(_ value: Int) -> Int { min(max(value, 2), 30) }
@@ -132,7 +141,9 @@ struct Preferences: Codable, Equatable {
         let d = Preferences()
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? d.launchAtLogin
         enableClaude = try c.decodeIfPresent(Bool.self, forKey: .enableClaude) ?? d.enableClaude
+        claudeAccountRefreshMinutes = Self.accountRefreshMinutes(try c.decodeIfPresent(Int.self, forKey: .claudeAccountRefreshMinutes) ?? d.claudeAccountRefreshMinutes)
         enableCodex = try c.decodeIfPresent(Bool.self, forKey: .enableCodex) ?? d.enableCodex
+        pendingCodexResetRequestID = try c.decodeIfPresent(String.self, forKey: .pendingCodexResetRequestID)
         enableAntigravity = try c.decodeIfPresent(Bool.self, forKey: .enableAntigravity) ?? d.enableAntigravity
         enableCursor = try c.decodeIfPresent(Bool.self, forKey: .enableCursor) ?? d.enableCursor
         enableDeepSeek = try c.decodeIfPresent(Bool.self, forKey: .enableDeepSeek) ?? d.enableDeepSeek
@@ -178,6 +189,7 @@ struct Preferences: Codable, Equatable {
         crewEnabled = try c.decodeIfPresent(Bool.self, forKey: .crewEnabled) ?? d.crewEnabled
         crewPerSide = CrewRoster.perSide(try c.decodeIfPresent(Int.self, forKey: .crewPerSide) ?? d.crewPerSide)
         crewSkin = Self.crewSkin(try c.decodeIfPresent(String.self, forKey: .crewSkin) ?? d.crewSkin)
+        crewSpillRight = try c.decodeIfPresent(Bool.self, forKey: .crewSpillRight) ?? d.crewSpillRight
         badgeEnabled = try c.decodeIfPresent(Bool.self, forKey: .badgeEnabled) ?? d.badgeEnabled
         badgeSeconds = Self.peekSeconds(try c.decodeIfPresent(Int.self, forKey: .badgeSeconds) ?? d.badgeSeconds)
         badgePosition = Self.badgeSide(try c.decodeIfPresent(String.self, forKey: .badgePosition) ?? d.badgePosition)
@@ -188,6 +200,8 @@ struct Preferences: Codable, Equatable {
         updateNotifiedVersion = try c.decodeIfPresent(String.self, forKey: .updateNotifiedVersion)
         // 唯一一个缺键不取新建默认的字段：能走到这里就有文件，用过的机器不弹指引
         guideShown = try c.decodeIfPresent(Bool.self, forKey: .guideShown) ?? true
+        displayTargets = try c.decodeIfPresent([String: DisplayModeSelection].self, forKey: .displayTargets) ?? [:]
+        displayUndo = try c.decodeIfPresent([String: DisplayUndoRecord].self, forKey: .displayUndo) ?? [:]
     }
 }
 
@@ -204,7 +218,7 @@ final class PreferencesStore {
 
     var prefs: Preferences {
         didSet {
-            save()
+            if !suppressSave { save() }
             onChange?()
         }
     }
@@ -214,9 +228,11 @@ final class PreferencesStore {
 
     /// 最近一次落盘失败的原因，设置页红字显示；成功后清空。内存里的值已经改了，重启会回到磁盘上的旧值。
     private(set) var saveError: String?
+    private(set) var loadError: String?
 
     /// nil 是只在内存里（演示模式）：不读也不写 preferences.json，录屏时拨的开关不该改掉真设置。
     private let url: URL?
+    private var suppressSave = false
 
     init(inMemory prefs: Preferences) {
         url = nil
@@ -231,12 +247,15 @@ final class PreferencesStore {
         do {
             prefs = try JSONDecoder().decode(Preferences.self, from: Data(contentsOf: url))
         } catch {
+            loadError = "设置文件无法读取，已暂停写入和重置卡兑换，请先修复原文件。"
+            saveError = loadError
             Log.error("设置读取失败，按默认值: \(url.path) \(error.localizedDescription)")
         }
     }
 
     private func save() {
         guard let url else { return }
+        guard loadError == nil else { saveError = loadError; return }
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
@@ -250,5 +269,34 @@ final class PreferencesStore {
             saveError = "设置没能写进 \(url.lastPathComponent)：\(error.localizedDescription)"
             Log.error("设置写入失败: \(error.localizedDescription)")
         }
+    }
+
+    /// Persist the undo transition before allowing a display commit.
+    func setDisplayUndo(_ records: [String: DisplayUndoRecord]) throws {
+        var next = prefs
+        next.displayUndo = records
+        try persistDisplayPreferences(next)
+    }
+
+    func setDisplayTarget(_ mode: DisplayModeSelection, for uuid: String) throws {
+        var next = prefs
+        next.displayTargets[uuid] = mode
+        try persistDisplayPreferences(next)
+    }
+
+    private func persistDisplayPreferences(_ next: Preferences) throws {
+        if let loadError {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [NSLocalizedDescriptionKey: loadError])
+        }
+        if let url {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(next).write(to: url, options: .atomic)
+        }
+        suppressSave = true
+        prefs = next
+        suppressSave = false
+        saveError = nil
     }
 }

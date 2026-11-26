@@ -23,13 +23,20 @@ final class ScreenshotFolderFinderTests: XCTestCase {
     @MainActor
     func testFindsTheFolderOfANewImage() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tally-finder-\(UUID().uuidString)", isDirectory: true)
+        let unrelatedImage = dir.appendingPathExtension("png")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        defer {
+            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.removeItem(at: unrelatedImage)
+        }
         let finder = ScreenshotFolderFinder()
         defer { finder.stop() }
-        finder.start()
+        finder.start(watching: [dir])
         XCTAssertEqual(finder.status, .waiting)
         try await Task.sleep(nanoseconds: 300_000_000)
+        try Data("png".utf8).write(to: unrelatedImage)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(finder.status, .waiting, "Images outside the fixture must not win the event race")
         try Data("png".utf8).write(to: dir.appendingPathComponent("shot.png"))
         for _ in 0..<30 where finder.status == .waiting {
             try await Task.sleep(nanoseconds: 100_000_000)

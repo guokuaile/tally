@@ -16,7 +16,8 @@ private struct FakeProvider: UsageProvider {
 }
 
 private final class PendingUsageProvider: UsageProvider, @unchecked Sendable {
-    let id: ProviderID = .glm
+    let id: ProviderID
+    init(id: ProviderID = .glm) { self.id = id }
     private let lock = NSLock()
     private var pending: [CheckedContinuation<UsageSnapshot, Never>] = []
     var count: Int { lock.withLock { pending.count } }
@@ -68,25 +69,6 @@ final class UsageStoreTests: XCTestCase {
         while h.store.isRefreshing { await Task.yield() }
     }
 
-    @MainActor
-    func testClaudeRefetchInvalidatesScopedRequestBeforeSlowScanStarts() async throws {
-        let box = ClaudeUsageProvider.ScopedLimitsBox()
-        var notifications = 0
-        box.setOnUpdate { _, _ in notifications += 1 }
-        let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let quota = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { nil }, credentialStamp: { nil })
-        let claude = ClaudeUsageProvider(root: missing, limits: ClaudeLimitsCache(directory: missing), quota: quota,
-                                         scopedBox: box, scan: UsageScanCache())
-        let h = Harness(providers: [claude])
-        h.store.providersChanged()
-        let oldRequest = try XCTUnwrap(box.beginRequest(owner: nil))
-        let newRequest = try XCTUnwrap(h.store.refetch(.claude))
-        let stale = [ScopedLimit(label: "Fable", limit: UsageLimit(used: 90, limit: 100))]
-        box.record(stale, now: Date(), request: oldRequest)
-        await newRequest.value
-        XCTAssertTrue(box.current.isEmpty)
-        XCTAssertEqual(notifications, 0)
-    }
 
     @MainActor
     private func waitFor(_ condition: () -> Bool) async throws {
@@ -340,6 +322,19 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertTrue(carried.balances.isEmpty, "沿用的旧余额会被当成刚查到的")
     }
 
+    func testCarryOverDropsOldCodexResetCreditsAfterQuotaFailure() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        var last = UsageSnapshot()
+        last.sessionLimit = UsageLimit(used: 30, limit: 100, resetsAt: now.addingTimeInterval(3600))
+        last.codexResetCredits = CodexResetCredits(availableCount: 2)
+        let live = UsageStore.LiveLimits(session: last.sessionLimit, week: nil, at: now.addingTimeInterval(-600))
+        guard case .success(let carried) = UsageStore.carryOver(.failure("Codex 配额不可用"), previous: .success(last), live: live, now: now)
+        else { return XCTFail() }
+        XCTAssertEqual(carried.sessionLimit?.used, 30)
+        XCTAssertTrue(carried.limitsStale)
+        XCTAssertNil(carried.codexResetCredits, "接口失败后旧卡数不可继续显示或消费")
+    }
+
     func testLongCarryOverSaysSoInTheRow() {
         let now = Date(timeIntervalSince1970: 2_000_000)
         func carried(ageMinutes: Double, result: UsageResult = .success(UsageSnapshot())) -> String? {
@@ -427,68 +422,3 @@ final class TokenFormatTests: XCTestCase {
     }
 }
 
-final class ClaudeTokenBoxTests: XCTestCase {
-    func testReadsKeychainOnceAndBacksOffOnFailure() {
-        var reads = 0
-        let missing = URL(fileURLWithPath: "/nonexistent/.credentials.json")
-        let payload = #"{"claudeAiOauth":{"accessToken":"abc","expiresAt":\#(Int(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000))}}"#
-        let client = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { reads += 1; return payload }, credentialStamp: { nil })
-        let now = Date()
-        XCTAssertEqual(client.loadToken(now: now)?.accessToken, "abc")
-        XCTAssertEqual(reads, 1)
-        _ = client.loadToken(now: now.addingTimeInterval(300))
-        _ = client.loadToken(now: now.addingTimeInterval(3000))
-        XCTAssertEqual(reads, 1, "凭据没被改写就不重读")
-
-        // token 过期：扔掉重读一次
-        client.tokenBox.clear()
-        _ = client.loadToken(now: now.addingTimeInterval(4000))
-        XCTAssertEqual(reads, 2)
-    }
-
-    /// 只有手动那一轮重读凭据；定时和展开面板的照旧用存着的。
-    @MainActor
-    func testOnlyManualRefreshRereadsCredentials() async throws {
-        var reads = 0
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tally-manual-\(UUID().uuidString)")
-        let root = dir.appendingPathComponent("projects")
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("p"), withIntermediateDirectories: true)
-        try Data().write(to: root.appendingPathComponent("p/a.jsonl"))
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [StubURLProtocol.self]
-        StubURLProtocol.status = 200
-        StubURLProtocol.body = Data("{}".utf8)
-        let client = ClaudeQuotaReadOnly(session: URLSession(configuration: config), credentialsFile: dir.appendingPathComponent("nope.json"),
-                                         keychainItem: { reads += 1; return #"{"claudeAiOauth":{"accessToken":"tok"}}"# }, credentialStamp: { nil })
-        let claude = ClaudeUsageProvider(root: root, limits: ClaudeLimitsCache(directory: dir.appendingPathComponent("no-cache")),
-                                         quota: client, scopedBox: .init(), scan: UsageScanCache())
-        let h = Harness(providers: [claude])
-        h.store.providersChanged()
-        _ = await h.store.refreshAndWait(reason: .timer)
-        h.now = h.now.addingTimeInterval(61)
-        _ = await h.store.refreshAndWait(reason: .panelOpened)
-        XCTAssertEqual(reads, 1)
-        h.now = h.now.addingTimeInterval(61)
-        _ = await h.store.refreshAndWait(reason: .manual)
-        XCTAssertEqual(reads, 2)
-        // 被 60 秒节流挡掉的手动刷新不动存着的 token
-        h.now = h.now.addingTimeInterval(5)
-        _ = await h.store.refreshAndWait(reason: .manual)
-        h.now = h.now.addingTimeInterval(61)
-        _ = await h.store.refreshAndWait(reason: .timer)
-        XCTAssertEqual(reads, 2)
-    }
-
-    func testFailedReadIsNotRetriedEveryRefresh() {
-        var reads = 0
-        let missing = URL(fileURLWithPath: "/nonexistent/.credentials.json")
-        let client = ClaudeQuotaReadOnly(credentialsFile: missing, keychainItem: { reads += 1; return nil }, credentialStamp: { nil })
-        let now = Date()
-        XCTAssertNil(client.loadToken(now: now))
-        XCTAssertEqual(reads, 1)
-        XCTAssertNil(client.loadToken(now: now.addingTimeInterval(300)))
-        XCTAssertEqual(reads, 1, "用户点了取消之后，10 分钟内不再弹")
-        XCTAssertNil(client.loadToken(now: now.addingTimeInterval(700)))
-        XCTAssertEqual(reads, 2, "过了冷却期再试一次")
-    }
-}

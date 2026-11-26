@@ -1,5 +1,5 @@
 // 移植自 Atoll（https://github.com/Ebullioscopic/Atoll），Copyright (C) 2024-2026 Atoll Contributors，GPL-3.0，见仓库 LICENSE 与 NOTICE。
-// Tally 改动：去掉 Defaults 与 NewAPI；enabledKey 指向 Preferences；加 limitLabels、logoName、limitsStale 与 scopedLimits；UsageLimit 加 isExpired(at:)；加 limitWindows（配速线用）；加国内几家与 New API 的 ProviderID、余额（Balance）与 reportsSpend。
+// Tally 改动：去掉 Defaults 与 NewAPI；enabledKey 指向 Preferences；加 limitLabels、logoName、limitsStale 与 scopedLimits；UsageLimit 加 isExpired(at:)；加 limitWindows（配速线用）；加国内几家与 New API 的 ProviderID、余额（Balance）与 reportsSpend；Codex 重置卡及确认数据。
 import Foundation
 
 enum ProviderID: String, CaseIterable, Identifiable {
@@ -97,6 +97,36 @@ struct ScopedLimit: Equatable {
     var limit: UsageLimit
 }
 
+struct CodexResetCredits: Equatable {
+    struct Confirmation: Equatable, Identifiable {
+        let id: UUID
+        let credits: CodexResetCredits
+        let card: Card
+    }
+    struct Card: Equatable, Identifiable {
+        let id: String
+        let expiresAt: Date?
+    }
+    var availableCount: Int
+    var expiresAt: [Date]?
+    var detailsNote: String?
+    var cards: [Card] = []
+    var credentialBinding: String = ""
+    var accountLabel: String = "当前 Codex 账号"
+    var fetchedAt: Date = .distantPast
+
+    func nextCard(at now: Date) -> Card? {
+        guard availableCount > 0, !credentialBinding.isEmpty,
+              now.timeIntervalSince(fetchedAt) >= 0, now.timeIntervalSince(fetchedAt) < 300 else { return nil }
+        return cards.filter { $0.expiresAt.map { $0 > now } ?? true }
+            .sorted {
+                let left = $0.expiresAt ?? .distantFuture
+                let right = $1.expiresAt ?? .distantFuture
+                return left == right ? $0.id < $1.id : left < right
+            }.first
+    }
+}
+
 struct UsageTotals: Equatable {
     var inputTokens: Int = 0
     var outputTokens: Int = 0
@@ -131,6 +161,8 @@ struct UsageLimit: Equatable {
 }
 
 struct UsageSnapshot: Equatable {
+    // A managed Claude quota must never be carried into another account's row.
+    var claudeAccountID: String? = nil
     var session: UsageTotals = .init()
     var today: UsageTotals = .init()
     var week: UsageTotals = .init()
@@ -146,6 +178,7 @@ struct UsageSnapshot: Equatable {
     var scopedLimits: [ScopedLimit] = []
     /// 账户余额，按币种各一笔（DeepSeek 一个账户可能人民币、美元都有，不能加在一起）。
     var balances: [Balance] = []
+    var codexResetCredits: CodexResetCredits?
     var lastUpdated: Date = .distantPast
 }
 

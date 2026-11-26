@@ -155,7 +155,7 @@ enum DemoData {
     }
 
     static let systemSample = SystemSample(
-        memoryUsed: 48 * gib * 58 / 100, memoryTotal: 48 * gib, cpuFraction: 0.23,
+        memoryUsed: 48 * gib * 58 / 100, memoryTotal: 48 * gib, cpuFraction: 0.23, gpuFraction: 0.37,
         battery: BatteryHealth(percent: 87, state: .discharging, healthPercent: 96, cycleCount: 142),
         diskAvailable: 412 * gib, diskTotal: 926 * gib, pressure: .normal,
         topProcesses: [

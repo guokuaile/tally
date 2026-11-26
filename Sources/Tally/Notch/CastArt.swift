@@ -191,47 +191,6 @@ extension CastArt.Character {
     }
 }
 
-/// Quantized overlays keep one-shot animation frames bounded in the wing cache.
-struct CastMotion: Hashable {
-    enum Kind: Hashable { case think, unsure, sleep, surprise, happy, farewell, greet }
-    let kind: Kind
-    let step: Int
-    var strength: Double { sin(.pi * Double(step) / 20) }
-
-    private static func window(_ kind: Kind, time: Double, start: Double, duration: Double) -> CastMotion? {
-        guard time.isFinite, time >= start, time < start + duration else { return nil }
-        return CastMotion(kind: kind, step: min(19, Int((time - start) / duration * 20)))
-    }
-
-    static func forCrew(mood: CrewMood, tier: CrewTier, elapsed: Double, phase: Double, still: Bool) -> CastMotion? {
-        guard !still, elapsed.isFinite, elapsed >= 0 else { return nil }
-        if tier == .dusty && mood.isWaiting {
-            return window(.sleep, time: (elapsed + phase).truncatingRemainder(dividingBy: 5), start: 1, duration: 2.5)
-        }
-        switch mood {
-        case .run: return window(.think, time: (elapsed + phase).truncatingRemainder(dividingBy: 4.3), start: 2.4, duration: 1.5)
-        case .input: return window(.unsure, time: (elapsed + phase).truncatingRemainder(dividingBy: 4), start: 0.4, duration: 2.2)
-        case .stale: return window(.sleep, time: (elapsed + phase).truncatingRemainder(dividingBy: 5), start: 1, duration: 2.5)
-        case .permission:
-            let start = (2.5 - phase).truncatingRemainder(dividingBy: 4)
-            return window(.surprise, time: elapsed, start: start < 0 ? start + 4 : start, duration: 1)
-        case .done:
-            let start = (2.15 - phase).truncatingRemainder(dividingBy: 6)
-            return window(.happy, time: elapsed, start: start < 0 ? start + 6 : start, duration: 1)
-        case .compacting: return nil
-        }
-    }
-
-    static func forBadge(_ kind: BadgeLifecycle.Kind, elapsed: Double?) -> CastMotion? {
-        guard let elapsed else { return nil }
-        return window(kind == .departed ? .farewell : .happy, time: elapsed, start: 0.9, duration: 1)
-    }
-
-    static func forHover(elapsed: Double) -> CastMotion? {
-        window(.greet, time: elapsed, start: 0, duration: 0.8)
-    }
-}
-
 /// 一帧要画的角色：角色数据 + 位图 + 步态幅度 + 片段里的相位。`BloubArt.Frame.draw(actor:)` 用；ball 造不出来（nil）。
 struct CastActor {
     let member: CastMember
@@ -269,15 +228,107 @@ struct CastActor {
         let extra: CGAffineTransform
         switch motion?.kind {
         case .happy: extra = CGAffineTransform(translationX: 0, y: -14 * s).scaledBy(x: 1 - 0.04 * s, y: 1 + 0.04 * s)
-        case .sleep: extra = CGAffineTransform(translationX: 0, y: 3 * s).scaledBy(x: 1 + 0.03 * s, y: 1 - 0.08 * s)
-        case .think: extra = CGAffineTransform(rotationAngle: -0.09 * s)
-        case .unsure: extra = CGAffineTransform(rotationAngle: 0.08 * sin(2 * .pi * Double(motion?.step ?? 0) / 20))
+        case .sleep:
+            let move = motion?.variant == 1 ? CGAffineTransform(scaleX: 1 + 0.04 * s, y: 1 + 0.04 * s) :
+                motion?.variant == 2 ? CGAffineTransform(rotationAngle: 0.04 * s) :
+                CGAffineTransform(translationX: 0, y: 3 * s).scaledBy(x: 1 + 0.03 * s, y: 1 - 0.08 * s)
+            extra = move
+        case .think:
+            switch motion?.variant ?? 0 {
+            case 1:
+                let tap = abs(sin(2 * .pi * Double(motion?.step ?? 0) / 20)) * s
+                extra = CGAffineTransform(translationX: 0, y: 7 * tap).scaledBy(x: 1 + 0.04 * tap, y: 1 - 0.06 * tap)
+            case 2: extra = CGAffineTransform(rotationAngle: 0.11 * s)
+            case 3: extra = CGAffineTransform(rotationAngle: 0.07 * sin(2 * .pi * Double(motion?.step ?? 0) / 20))
+            case 4: extra = CGAffineTransform(translationX: 0, y: -4 * s)
+            default: extra = CGAffineTransform(rotationAngle: -0.09 * s)
+            }
+        case .unsure:
+            switch motion?.variant ?? 0 {
+            case 1: extra = CGAffineTransform(translationX: 0, y: -7 * s)
+            case 2: extra = CGAffineTransform(scaleX: 1 + 0.035 * s, y: 1 - 0.06 * s)
+            case 3: extra = CGAffineTransform(translationX: 6 * s, y: 0).rotated(by: -0.05 * s)
+            case 4: extra = CGAffineTransform(translationX: 0, y: 3 * s)
+            case 5:
+                let step = motion?.step ?? 0
+                if step < 10 {
+                    extra = CGAffineTransform(translationX: 0, y: 8 * sin(.pi * Double(step) / 20))
+                } else {
+                    let rise = 1 - Double(step - 10) / 10
+                    extra = CGAffineTransform(translationX: 0, y: -12 * rise).scaledBy(x: 1 - 0.04 * rise, y: 1 + 0.1 * rise)
+                }
+            default: extra = CGAffineTransform(rotationAngle: 0.08 * sin(2 * .pi * Double(motion?.step ?? 0) / 20))
+            }
+        case .hold:
+            extra = motion?.variant == 2 ? CGAffineTransform(rotationAngle: 0.05 * s) : .identity
         case .surprise: extra = CGAffineTransform(scaleX: 1 + 0.05 * s, y: 1 + 0.08 * s)
         case .farewell: extra = CGAffineTransform(translationX: 0, y: 5 * s).rotated(by: 0.09 * s)
         case .greet: extra = CGAffineTransform(translationX: 0, y: -5 * s)
+        case .wake: extra = CGAffineTransform(translationX: 0, y: -9 * s).scaledBy(x: 1 - 0.04 * s, y: 1 + 0.09 * s)
+        case .click: extra = CGAffineTransform(translationX: 0, y: -6 * s).scaledBy(x: 1 + 0.06 * s, y: 1 - 0.05 * s)
         case nil: extra = .identity
         }
         return CastArt.gait(kind: character.gait, phase: phase, amp: amp).concatenating(extra).concatenating(body)
+    }
+
+    /// Deform ear, horn, and spike tips locally while keeping the face aligned with its bitmap and eyes.
+    func localShape(_ frame: BloubArt.Frame) -> Path {
+        guard localBend != 0 else { return character.outline.applying(matrix(frame)) }
+        let contour = character.outline.cgPath
+        let shape = CGMutablePath()
+        let strength = localBend
+        contour.applyWithBlock { elementPointer in
+            let element = elementPointer.pointee
+            func warped(_ point: CGPoint) -> CGPoint {
+                var p = point
+                switch member.name {
+                case "cat", "devil":
+                    let tip = min(1, max(0, (-8 - p.y) / 88))
+                    let bend = tip * tip * strength
+                    let side = min(1, max(-1, p.x / 40))
+                    p.x += side * 16 * bend
+                    p.y += tip * (strength < 0 ? (member.name == "cat" ? 27 : 17) * -strength : 7 * strength)
+                case "soot":
+                    let distance = hypot(p.x, p.y)
+                    if distance > 58 {
+                        let pulse = 1 + 0.07 * strength * (0.7 + 0.3 * sin(atan2(p.y, p.x) * 9))
+                        p.x *= pulse
+                        p.y *= pulse
+                    }
+                default: break
+                }
+                return p
+            }
+            switch element.type {
+            case .moveToPoint: shape.move(to: warped(element.points[0]))
+            case .addLineToPoint: shape.addLine(to: warped(element.points[0]))
+            case .addQuadCurveToPoint: shape.addQuadCurve(to: warped(element.points[1]), control: warped(element.points[0]))
+            case .addCurveToPoint: shape.addCurve(to: warped(element.points[2]), control1: warped(element.points[0]), control2: warped(element.points[1]))
+            case .closeSubpath: shape.closeSubpath()
+            @unknown default: break
+            }
+        }
+        return Path(shape).applying(matrix(frame))
+    }
+
+    private var localBend: Double {
+        guard let motion else { return 0 }
+        let s = motion.strength
+        switch motion.kind {
+        case .sleep, .farewell: return -s
+        case .surprise, .wake, .click: return s
+        case .think, .unsure, .hold: return 0.4 * s
+        default: return 0
+        }
+    }
+
+    private var sheepFaceYOffset: Double {
+        guard member.name == "sheep", let motion else { return 0 }
+        switch motion.kind {
+        case .sleep: return 5 * motion.strength
+        case .wake: return -6 * motion.strength
+        default: return 0
+        }
     }
 
     /// 两只眼相对静止位的位移（身体坐标系），给测试看
@@ -289,16 +340,22 @@ struct CastActor {
         }
     }
 
+    func gazeDrift(for index: Int) -> CGPoint {
+        guard member.name == "gamepad", amp > 0 else { return .zero }
+        return CGPoint(x: amp * 5 * sin(2 * .pi * phase + Double(index) * 2.1),
+                       y: amp * 3 * cos(2 * .pi * phase + Double(index) * 1.7))
+    }
+
     /// 黑身（原黑身、白身反相）用 lighten 让玻璃渐变透出来；白身原色正常盖住
     private var usesLighten: Bool { !(character.whiteBodied && !member.inverted) }
 
-    func drawSurprise(in context: GraphicsContext, frame: BloubArt.Frame, style: BloubArt.Style) {
-        guard motion?.kind == .surprise, let motion else { return }
+    func drawBackDetails(in context: GraphicsContext, frame: BloubArt.Frame, style: BloubArt.Style) {
+        guard let motion else { return }
         var layer = context
         layer.opacity *= motion.strength
         layer.concatenate(matrix(frame))
         let box = character.outline.boundingRect
-        switch member.name {
+        if motion.kind == .surprise { switch member.name {
         case "cat":
             var spikes = Path()
             for side in [-1.0, 1.0] {
@@ -326,6 +383,22 @@ struct CastActor {
             }
             layer.stroke(rays, with: .color(style.rim[0]), style: StrokeStyle(lineWidth: 5, lineCap: .round))
         default: break
+        } }
+        if member.name == "folder", motion.kind == .think || motion.kind == .unsure || motion.kind == .wake {
+            for (index, x) in [-25.0, 0, 25].enumerated() {
+                let rise = 13 + Double(index % 2) * 5 + 12 * motion.strength
+                let paper = Path(roundedRect: CGRect(x: x - 14, y: box.minY - rise, width: 29, height: 35), cornerRadius: 2)
+                layer.fill(paper, with: .color(member.inverted ? .black : .white))
+                layer.stroke(paper, with: .color(member.inverted ? .white : .black), lineWidth: 2)
+            }
+        }
+        if member.name == "bulb", motion.kind == .think || motion.kind == .surprise || motion.kind == .wake || motion.kind == .happy {
+            var rays = Path()
+            for x in [-60.0, -30, 0, 30, 60] {
+                rays.move(to: CGPoint(x: x, y: box.minY - 2))
+                rays.addLine(to: CGPoint(x: x * 1.1, y: box.minY - 12 - 10 * motion.strength))
+            }
+            layer.stroke(rays, with: .color(style.rim[0]), style: StrokeStyle(lineWidth: 5, lineCap: .round))
         }
     }
 
@@ -335,23 +408,152 @@ struct CastActor {
         paint.clip(to: clip)
         paint.concatenate(matrix)
         if let bitmap {
-            var sprite = paint
-            if usesLighten { sprite.blendMode = .lighten }
-            sprite.draw(Image(decorative: bitmap, scale: 1).resizable(), in: character.bitmapRect)
+            let image = Image(decorative: bitmap, scale: 1).resizable()
+            if (member.name == "cat" || member.name == "devil"), localBend != 0 {
+                // Clip source regions after moving their coordinate system, so the original tips never remain under the new outline.
+                var lower = paint
+                lower.clip(to: Path(CGRect(x: -170, y: -8, width: 340, height: 230)))
+                if usesLighten { lower.blendMode = .lighten }
+                lower.draw(image, in: character.bitmapRect)
+                let columns = [-170.0, -40, 0, 40, 170]
+                for band in 0..<8 {
+                    let top = -112.0 + Double(band) * 13
+                    let tip = min(1, max(0, (-8 - (top + 6.5)) / 88))
+                    let rise = tip * (localBend < 0 ? (member.name == "cat" ? 27 : 17) * -localBend : 7 * localBend)
+                    for column in 0..<4 {
+                        let mid = (columns[column] + columns[column + 1]) / 2
+                        let side = min(1, max(-1, mid / 40))
+                        var piece = paint
+                        piece.translateBy(x: side * 16 * tip * tip * localBend, y: rise)
+                        piece.clip(to: Path(CGRect(x: columns[column], y: top, width: columns[column + 1] - columns[column] + 1, height: 14)))
+                        if usesLighten { piece.blendMode = .lighten }
+                        piece.draw(image, in: character.bitmapRect)
+                    }
+                }
+            } else {
+                var sprite = paint
+                if usesLighten { sprite.blendMode = .lighten }
+                sprite.draw(image, in: character.bitmapRect)
+            }
         }
-        if let face = character.face { paint.fill(face.path, with: .color(face.color.color(inverted: member.inverted))) }
+        if let face = character.face {
+            paint.fill(face.path.applying(CGAffineTransform(translationX: 0, y: sheepFaceYOffset)), with: .color(face.color.color(inverted: member.inverted)))
+        }
+        if (member.name == "mac" || member.name == "monitor"), let motion {
+            let pulse = motion.kind == .sleep ? 0.25 : 0.7
+            var scan = Path()
+            if member.name == "mac" {
+                for index in 0..<3 {
+                    let y = -45.0 + Double(index * 14) + Double(motion.step) * 0.55
+                    scan.move(to: CGPoint(x: -48, y: y))
+                    scan.addLine(to: CGPoint(x: 56, y: y))
+                }
+            } else {
+                for index in 0..<4 {
+                    let x = -40.0 + Double(index * 29) + Double(motion.step % 3)
+                    scan.move(to: CGPoint(x: x, y: -54))
+                    scan.addLine(to: CGPoint(x: x + 5, y: 24))
+                }
+            }
+            paint.stroke(scan, with: .color(member.inverted ? Color.black.opacity(pulse) : Color.white.opacity(pulse)), lineWidth: 2)
+        }
+        if member.name == "bulb", let motion, motion.kind == .think || motion.kind == .wake || motion.kind == .surprise {
+            paint.fill(Path(ellipseIn: CGRect(x: -68, y: -99, width: 136, height: 126)),
+                       with: .color(member.inverted ? Color.black.opacity(0.12 * motion.strength) : Color.white.opacity(0.17 * motion.strength)))
+        }
+    }
+
+    func drawFrontDetails(in context: GraphicsContext, frame: BloubArt.Frame) {
+        guard let motion else { return }
+        var layer = context
+        layer.opacity *= motion.strength
+        layer.concatenate(matrix(frame))
+        if member.name == "cloud", motion.kind == .sleep || motion.kind == .farewell {
+            // The 22 pt slot ends at the cloud's feet, so place rain in its lower half to keep it visible.
+            var rain = Path()
+            for x in [-53.0, -15, 22, 54] {
+                let y = 57.0 + Double((motion.step * 3 + Int(x) + 120) % 11)
+                rain.move(to: CGPoint(x: x, y: y))
+                rain.addLine(to: CGPoint(x: x - 3, y: y + 10))
+            }
+            layer.stroke(rain, with: .color(member.inverted ? .white : .black), style: StrokeStyle(lineWidth: 4, lineCap: .round))
+        }
+        if member.name == "sheep", motion.kind == .sleep || motion.kind == .wake || motion.kind == .unsure {
+            // Wool moves at the face edge while the face patch shifts separately from the whole body.
+            let color: Color = member.inverted ? .black : .white
+            for x in [-55.0, -20, 16, 51] {
+                layer.fill(Path(ellipseIn: CGRect(x: x - 12, y: -12 - 5 * motion.strength, width: 24, height: 15)), with: .color(color))
+            }
+        }
+        if member.name == "mac" || member.name == "monitor", motion.kind == .sleep || motion.kind == .unsure {
+            // Brief screen interference appears during sleepy or uncertain motions without hiding the eyes throughout.
+            let color: Color = member.inverted ? .black : .white
+            var glitch = Path()
+            for index in 0..<3 {
+                let y = -47.0 + Double(index * 18) + Double((motion.step + index * 3) % 5)
+                glitch.move(to: CGPoint(x: -44 + Double(index * 12), y: y))
+                glitch.addLine(to: CGPoint(x: 21 + Double(index * 8), y: y))
+            }
+            layer.stroke(glitch, with: .color(color.opacity(0.52)), lineWidth: 3)
+        }
+    }
+
+    func lidCoverage(_ frame: BloubArt.Frame) -> Double {
+        let extraLids: Double
+        switch motion?.kind {
+        case .sleep: extraLids = (motion?.variant == 1 ? 0.12 : 0.45) * (motion?.strength ?? 0)
+        case .think: extraLids = (motion?.variant == 4 ? 0 : 0.2) * (motion?.strength ?? 0)
+        case .unsure:
+            if motion?.variant == 5, let motion {
+                extraLids = motion.step < 10 ? 0.7 * sin(.pi * Double(motion.step) / 20) : 0
+            } else {
+                extraLids = motion?.variant == 4 ? 0.55 * (motion?.strength ?? 0) : 0
+            }
+        case .hold: extraLids = motion?.variant == 1 ? min(1, max(0, sin(Double(motion?.step ?? 0) * .pi / 5))) : 0
+        case .wake:
+            // Open the added sleepy lid during the first third of waking, then keep it open.
+            extraLids = 0.4 * max(0, 1 - Double(motion?.step ?? 0) / 7)
+        default: extraLids = 0
+        }
+        return min(1, max(frame.lids, extraLids))
     }
 
     /// 眼睛：bloub 这一帧两只眼相对静止位的位移 / 缩放 / 旋转，换到身体坐标系后套在角色自己的眼睛上。`context` 已裁在身体里
     func drawEyes(in context: GraphicsContext, frame: BloubArt.Frame) {
         guard character.eyes.count == 2, frame.eyeSpecs.count == 2 else { return }
         let m = matrix(frame), inverse = m.inverted(), fit = frame.fit
+        let lidAmount = lidCoverage(frame)
         for (i, eye) in character.eyes.enumerated() {
             let spec = frame.eyeSpecs[i], rest = CastArt.restEyes[i]
             let p = spec.center.applying(inverse)
             var d = CGPoint(x: p.x - rest.center.x, y: p.y - rest.center.y)
-            if motion?.kind == .unsure {
-                d.x += 12 * sin(2 * .pi * Double(motion?.step ?? 0) / 20)
+            // Gamepad eyes drift out of phase; still frames have zero amplitude.
+            let drift = gazeDrift(for: i)
+            d.x += drift.x
+            d.y += drift.y
+            if let motion {
+                let s = motion.strength
+                switch motion.kind {
+                case .unsure:
+                    switch motion.variant {
+                    case 1: d.y -= 13 * s
+                    case 4: d.y += 8 * s
+                    case 5:
+                        if motion.step < 10 { d.y += 8 * sin(.pi * Double(motion.step) / 20) }
+                        else { d.y -= 12 * (1 - Double(motion.step - 10) / 10) }
+                    default: d.x += 12 * sin(2 * .pi * Double(motion.step) / 20)
+                    }
+                case .think:
+                    if motion.variant == 4 { d.y -= 10 * s }
+                    if motion.variant == 2 { d.x += (i == 0 ? -6 : 6) * s }
+                case .hold:
+                    if motion.variant == 0 { d.y -= 9 * s }
+                    if motion.variant == 3 { d.x += 9 * s }
+                case .wake: d.y -= 11 * s
+                case .greet: d.y -= 6 * s
+                case .click: d.y -= 5 * s
+                default: break
+                }
             }
             let sx = (spec.size.width / rest.size.width) / fit.sx, sy = (spec.size.height / rest.size.height) / fit.sy
             // 有瞳孔的眼白只跟一半位移，剩下的给瞳孔，眼珠才像在转；没瞳孔的整只眼跟 0.8
@@ -359,7 +561,7 @@ struct CastActor {
             var layer = context
             layer.opacity *= spec.alpha
             layer.concatenate(m)
-            layer.translateBy(x: eye.center.x + d.x * gw, y: eye.center.y + d.y * gw)
+            layer.translateBy(x: eye.center.x + d.x * gw, y: eye.center.y + sheepFaceYOffset + d.y * gw)
             layer.rotate(by: .radians(spec.rotation - fit.theta))
             layer.scaleBy(x: sx * eye.scale, y: sy * eye.scale)
             layer.translateBy(x: -eye.center.x, y: -eye.center.y)
@@ -380,8 +582,6 @@ struct CastActor {
                 inner.translateBy(x: d.x * (1 - gw), y: d.y * (1 - gw))
                 inner.fill(pupil, with: .color(eye.pupilColor.color(inverted: member.inverted)))
             }
-            let extraLids = motion?.kind == .sleep ? 0.35 * (motion?.strength ?? 0) : motion?.kind == .think ? 0.2 * (motion?.strength ?? 0) : 0
-            let lidAmount = min(1, max(frame.lids, extraLids))
             if lidAmount > 0 {
                 var lid = layer
                 lid.clip(to: eye.white)

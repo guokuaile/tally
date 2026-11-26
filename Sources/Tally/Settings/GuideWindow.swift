@@ -82,7 +82,7 @@ struct GuideView: View {
 
         @MainActor var detail: String {
             switch self {
-            case .notch: "鼠标停上去就展开面板，按 \(HotKeyCenter.label) 也行。展开后左边是 AI、网络、系统、应用、文件架、音乐的页签，右上角齿轮进设置。"
+            case .notch: "鼠标停上去就展开面板，按 \(HotKeyCenter.label) 也行。展开后左边是 AI、系统、网络、应用、文件架、音乐的页签，右上角齿轮进设置。"
             case .pill: "会话跑完、等你审批或输入、配额过线时从刘海垂下来，几秒后自己收；点它跳回那个终端。"
             case .crew: "一个项目一个，表情就是状态：悬停看会话；单会话点小人跳终端，多会话点小人打开 AI 页。"
             }

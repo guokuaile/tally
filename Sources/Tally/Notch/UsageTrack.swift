@@ -16,12 +16,17 @@ struct UsageTrackLayout {
     }
 }
 
-struct UsageTrack: View {
-    let fraction: Double
+struct UsageTrack: View, Animatable {
+    var fraction: Double
     let elapsed: Double?
     let paused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visible = false
+
+    var animatableData: Double {
+        get { fraction }
+        set { fraction = newValue }
+    }
 
     var body: some View {
         let layout = UsageTrackLayout(fraction: fraction)

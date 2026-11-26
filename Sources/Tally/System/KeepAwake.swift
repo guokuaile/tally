@@ -15,15 +15,22 @@ final class KeepAwake {
     static let shared = KeepAwake()
 
     /// 可选时长（分钟）；nil 是「一直」。另有一档自定义，值在 `Preferences.keepAwakeCustomMinutes`。
-    static let durations: [Int] = [15, 30, 60, 120, 240]
+    static let durations: [Int] = [15, 30, 60, 120, 240, 480, 540]
 
-    /// 自定义档：15 分钟一步，15 分钟到 24 小时。面板不抢激活，指望不上输入框，所以是步进。
+    /// Buttons adjust by 15 minutes; typed durations retain minute precision.
     static let customStep = 15
     static let customDefault = 90
 
-    /// 步进落到合法值上：先对齐到 15 分钟，再夹进范围。
+    /// Clamp button adjustments without rounding a typed duration.
     static func clampCustom(_ minutes: Int) -> Int {
-        min(max(minutes / customStep * customStep, customStep), 24 * 60)
+        min(max(minutes, customStep), 24 * 60)
+    }
+
+    /// Reject incomplete or invalid input instead of starting the previous duration.
+    static func customMinutes(from input: String) -> Int? {
+        guard let minutes = Int(input.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (customStep...24 * 60).contains(minutes) else { return nil }
+        return minutes
     }
 
     /// 档位文案，标题行右键菜单与系统页卡片共用。自定义档可能带零头，所以要能写出「1 小时 30 分」。

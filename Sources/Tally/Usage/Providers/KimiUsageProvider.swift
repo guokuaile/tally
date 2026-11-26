@@ -329,7 +329,12 @@ struct KimiUsageProvider: UsageProvider {
         guard let detail = raw as? [String: Any], let total = number(detail["limit"]), total > 0 else { return nil }
         let derived = number(detail["remaining"]).map { max(total - $0, 0) }
         guard let used = number(detail["used"]) ?? derived else { return nil }
-        return UsageLimit(used: used, limit: total, resetsAt: (detail["resetTime"] as? String).flatMap(ClaudeQuotaReadOnly.parseDate))
+        let reset = (detail["resetTime"] as? String).flatMap { value -> Date? in
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        }
+        return UsageLimit(used: used, limit: total, resetsAt: reset)
     }
 
     /// 实测是字符串；也收数字，接口哪天改回数字不至于整块取不到。

@@ -57,7 +57,7 @@ struct BloubArt {
             // 有角色且这一帧有眼睛：身体换成「角色轮廓 × 这一帧的拟合 × 步态」；没眼睛的帧（等审批的「!」、压缩炸开、完成的彗星）角色变回玻璃球
             let cast = eyeSpecs.isEmpty ? nil : actor
             let castMatrix = cast.map { $0.matrix(self) } ?? .identity
-            let shape = cast.map { $0.character.outline.applying(castMatrix) } ?? body
+            let shape = cast.map { $0.localShape(self) } ?? body
             context.opacity *= style.opacity
             if symbol != nil && !style.compactSymbol {
                 context.translateBy(x: -8, y: 8)
@@ -119,7 +119,7 @@ struct BloubArt {
             }
             for arc in arcs { strokeArc(arc.back, arc) }
             if dotsBehind { drawDots() }
-            cast?.drawSurprise(in: context, frame: self, style: style)
+            cast?.drawBackDetails(in: context, frame: self, style: style)
             var face = context
             face.opacity *= alpha
             glass(shape, center: .zero, radius: 100, in: face, sprite: cast)
@@ -138,6 +138,7 @@ struct BloubArt {
             if let cast {
                 // bloub 的眼睛和缺口不画，角色自己的眼睛按 bloub 眼睛的位移 / 缩放 / 旋转动
                 cast.drawEyes(in: face, frame: self)
+                cast.drawFrontDetails(in: context, frame: self)
             } else {
                 for eye in eyes {
                     var layer = face

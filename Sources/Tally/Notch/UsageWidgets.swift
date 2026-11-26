@@ -58,6 +58,7 @@ struct QuotaBar: View {
                 }
             }
             UsageTrack(fraction: limit.fraction, elapsed: elapsed, paused: stale || reduceMotion)
+                .animation(stale || reduceMotion ? nil : .easeOut(duration: 0.28), value: limit.fraction)
                 .accessibilityHidden(true)
         }
         .help("已用量从左向右增长，100% 填满后停止流光。刻线是时间配速。" + (stale ? "当前为缓存读数。" : ""))
@@ -76,6 +77,8 @@ struct QuotaBar: View {
     private var amountLabel: some View {
         Text("已用 " + percent)
             .font(.metric(10, .medium))
+            .contentTransition(reduceMotion || stale ? .identity : .numericText(value: limit.fraction * 100))
+            .animation(reduceMotion || stale ? nil : .easeOut(duration: 0.28), value: percent)
             .foregroundStyle(quotaColor(limit.fraction))
             .fixedSize()
     }

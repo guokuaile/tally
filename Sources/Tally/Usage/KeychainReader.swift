@@ -10,40 +10,6 @@ enum KeychainReader {
         secretViaSecurityCLI(service: service, account: account)
     }
 
-    // Read the secret of the most-recently-modified generic password whose service starts
-    // with `servicePrefix`. Claude Code namespaces its credential item by a per-install hash
-    // ("Claude Code-credentials-<hash>") and rotates it, leaving the un-suffixed item stale;
-    // following the freshest item keeps quota working across that migration without hardcoding
-    // a hash. The enumeration requests attributes only (no kSecReturnData), so nothing is
-    // decrypted here; the chosen item's secret is read by `secretViaSecurityCLI`.
-    static func freshestGenericPassword(servicePrefix: String) -> (service: String, account: String?, secret: String)? {
-        guard let freshest = freshestGenericPasswordItem(servicePrefix: servicePrefix),
-              let secret = secretViaSecurityCLI(service: freshest.service, account: freshest.account) else { return nil }
-        return (freshest.service, freshest.account, secret)
-    }
-
-    /// 只挑出那条项和它的修改时间，不取值：不解密、不弹框、不起子进程。
-    /// 修改时间拿来判「凭据换过没有」（切账号、重新登录、刷新 token 都会重写这条项）。
-    static func freshestGenericPasswordItem(servicePrefix: String) -> (service: String, account: String?, modified: Date)? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let items = result as? [[String: Any]] else { return nil }
-
-        return items
-            .compactMap { attrs -> (service: String, account: String?, modified: Date)? in
-                guard let service = attrs[kSecAttrService as String] as? String,
-                      service.hasPrefix(servicePrefix),
-                      let modified = attrs[kSecAttrModificationDate as String] as? Date
-                else { return nil }
-                return (service, attrs[kSecAttrAccount as String] as? String, modified)
-            }
-            .max { $0.modified < $1.modified }
-    }
 
     /// 取值借 Apple 自己的 `security`，不用 `SecItemCopyMatching`：后者要 Tally 的 cdhash 在那条项的
     /// `partition_id` 里，而 Claude Code 每次刷新 token 都用 `add-generic-password -U` 整条重写那项，
@@ -87,5 +53,5 @@ enum KeychainReader {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    // Tally 改动：删掉了 Atoll 原有的 updateGenericPassword。这个 app 永远不写钥匙串。
+    // Tally 改动：删掉了 Atoll 原有的 updateGenericPassword。这个读取模块永远不写钥匙串。
 }

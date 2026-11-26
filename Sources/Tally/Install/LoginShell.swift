@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 /// 问用户的 shell。app 自己只有 launchd 给的那点环境，用户的 PATH、CODEX_HOME 都得问出来。
@@ -117,12 +116,4 @@ enum ClaudeHome {
         return SessionRecord.claudeHome(configDir: raw).appendingPathComponent(".claude.json")
     }
 
-    /// 钥匙串里 OAuth 凭据那条的服务名：没设是「Claude Code-credentials」；设了接「-」加原值（NFC）sha256 的前 8 位十六进制，
-    /// 设成 `~/.claude` 本身也加（Claude Code 2.1.270 的算法）。
-    static func keychainService(_ raw: String?) -> String {
-        let base = "Claude Code-credentials"
-        guard let raw else { return base }
-        let digest = SHA256.hash(data: Data(raw.precomposedStringWithCanonicalMapping.utf8))
-        return base + "-" + digest.map { String(format: "%02x", $0) }.joined().prefix(8)
-    }
 }

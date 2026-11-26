@@ -123,7 +123,7 @@ Open Settings (gear icon on the panel, or ⌘, while expanded) → "hook" → cl
 
 | Usage | Quota | Spend / balance |
 |---|---|---|
-| Claude | 5-hour, 7-day, per-model weekly (with pace line) | Today / week spend |
+| Claude | CLI status-line limits with verified account ownership | Today / week spend |
 | Codex | 5-hour, 7-day (with pace line) | Today / week spend |
 | Cursor | "Cursor models" and "other models" pools | — |
 | Antigravity | Gemini and Claude pools | — |
@@ -131,6 +131,8 @@ Open Settings (gear icon on the panel, or ⌘, while expanded) → "hook" → cl
 | Kimi | Kimi Code membership 5-hour, 7-day (with pace line) | Open platform balance |
 | Zhipu GLM Coding Plan | 5-hour, 7-day (with pace line) | — |
 | New API relay | — | Balance |
+
+A standard Claude status-line cache with only `rate_limits` has no account or organization identifier. The public app shows quota as unavailable in that case. Local usage totals still work.
 
 The last four are off by default; turn them on in Settings → 用量 (Usage). Keys are picked up from Claude Code settings, Kimi Code, zcode or opencode when present, otherwise enter them by hand. Zhipu's quota endpoint is undocumented and may break.
 
@@ -176,7 +178,7 @@ Other terminals show a "window not found" message. Resume opens a new window in 
 
 | Connection | Where | What it carries | Turn off |
 |---|---|---|---|
-| Claude quota | api.anthropic.com | the access token Claude Code's login left behind; read-only, never refreshed | Settings → 用量, turn off Claude |
+| Claude quota | on device | CLI status-line quota with verified account ownership, plus usage from local logs | Settings → 用量, turn off Claude |
 | Codex quota | chatgpt.com | the access token in Codex's `auth.json`; read-only, never refreshed | Settings → 用量, turn off Codex |
 | Cursor quota | cursor.com, api2.cursor.sh | Cursor's login access token | Settings → 用量, turn off Cursor |
 | Antigravity quota | the local Antigravity language server first (127.0.0.1, never leaves the Mac); cloudcode-pa.googleapis.com only when it isn't running | the cloud step carries Antigravity's login token from the Keychain | Settings → 用量, turn off Antigravity |

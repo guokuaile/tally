@@ -27,8 +27,8 @@ final class PillQueuePeekTests: XCTestCase {
         CrewProject(id: "claude:" + id, provider: "claude", path: id, name: String(id.split(separator: "/").last ?? "/"), sessions: sessions, mood: .run)
     }
 
-    /// 工牌：通用版式的字段、按项目去重、不和同一会话的状态提示互相替换、展开面板清掉。
-    func testBadgeDeduplicatesByProjectNotBySession() {
+    /// Badges retain their own identity while session notifications wait for the handoff.
+    func testBadgeDeduplicatesSeparatelyFromSessionNotifications() {
         let session = record("s1")
         let badge = Peek.badge(project("/code/repo", [session]), cast: .ball)
         XCTAssertEqual(badge.style, .badge)
@@ -45,13 +45,13 @@ final class PillQueuePeekTests: XCTestCase {
         queue.enqueue(badge, at: origin, sessionSeconds: 5, batterySeconds: 3)
         queue.enqueue(badge, at: origin.addingTimeInterval(1), sessionSeconds: 5, batterySeconds: 3)
         XCTAssertEqual(queue.visible.map(\.id), ["badge-claude:s1"], "同一会话只一张")
-        queue.enqueue(Peek.session(session, cast: .ball), at: origin.addingTimeInterval(2), sessionSeconds: 5, batterySeconds: 3)
-        XCTAssertEqual(queue.visible.count, 2, "同一会话的完成提示不替换工牌")
-        queue.enqueue(badge, at: origin.addingTimeInterval(3), sessionSeconds: 5, batterySeconds: 3)
-        XCTAssertEqual(queue.visible.count, 2, "工牌也不替换会话提示")
-        queue.enqueue(Peek.badge(project("/code/other", [record("s2")]), cast: .ball), at: origin.addingTimeInterval(3), sessionSeconds: 5, batterySeconds: 3)
-        XCTAssertEqual(queue.visible.count, 2)
-        XCTAssertEqual(queue.pending.count, 1)
+        let completion = Peek.session(session, cast: .ball)
+        queue.enqueue(completion, at: origin.addingTimeInterval(1.1), sessionSeconds: 5, batterySeconds: 3)
+        XCTAssertEqual(queue.visible.map(\.id), [badge.id])
+        XCTAssertEqual(queue.pending.map(\.id), [completion.id])
+        queue.enqueue(Peek.badge(project("/code/other", [record("s2")]), cast: .ball), at: origin.addingTimeInterval(1.2), sessionSeconds: 5, batterySeconds: 3)
+        XCTAssertEqual(queue.visible.count, 1)
+        XCTAssertEqual(queue.pending.count, 2)
         queue.clear()
         XCTAssertTrue(queue.visible.isEmpty)
         XCTAssertTrue(queue.pending.isEmpty)
@@ -278,17 +278,158 @@ final class PillQueuePeekTests: XCTestCase {
         }
         XCTAssertEqual(queue.visible.count, 1, "工牌依次悬挂，其他工牌排队")
         XCTAssertEqual(queue.pending.count, 2)
-        add("short", to: &queue, style: .session, sessionID: "short")
-        XCTAssertEqual(queue.visible.count, 2, "短提示可以利用工牌留下的空间")
         queue.dismiss(id: "badge-claude:a", at: origin.addingTimeInterval(1))
         XCTAssertTrue(queue.visible.contains { $0.id == "badge-claude:b" }, "上一张工牌消失后显示下一张")
-        queue.setHeightLimit(400, at: origin.addingTimeInterval(2))
-        XCTAssertLessThanOrEqual(queue.visible.count, 2, "屏幕变矮时放不下的提示回队列")
-        XCTAssertFalse(queue.pending.isEmpty)
+        queue.setHeightLimit(300, at: origin.addingTimeInterval(2))
+        XCTAssertTrue(queue.visible.isEmpty)
+        XCTAssertEqual(queue.pending.count, 2)
         queue.setHeightLimit(900, at: origin.addingTimeInterval(3))
         let restored = queue.visible.first { $0.id == "badge-claude:b" }
         XCTAssertEqual(restored?.shownAt, origin.addingTimeInterval(3))
         XCTAssertEqual(restored?.expiresAt, origin.addingTimeInterval(8), "重新展示后从头计算停留时间")
+    }
+
+    func testCompletionWaitsForBadgeEntranceAndExitBeforeStartingItsClock() {
+        var queue = PillQueue()
+        add("badge", to: &queue, style: .badge)
+        add("done", to: &queue, at: 0.2)
+        XCTAssertEqual(queue.visible.map(\.id), ["badge"])
+        XCTAssertEqual(queue.pending.map(\.id), ["done"])
+        XCTAssertNil(queue.pending.first?.shownAt)
+        XCTAssertEqual(queue.nextDeadline, origin.addingTimeInterval(1.6))
+        queue.advance(to: origin.addingTimeInterval(1.6))
+        XCTAssertEqual(queue.visible.map(\.id), ["badge"])
+        XCTAssertEqual(queue.nextDeadline!.timeIntervalSince(origin), 1.78, accuracy: 0.001)
+        queue.advance(to: origin.addingTimeInterval(1.8))
+        XCTAssertEqual(queue.visible.map(\.id), ["done"])
+        XCTAssertEqual(queue.visible.first?.shownAt, origin.addingTimeInterval(1.8))
+        XCTAssertEqual(queue.visible.first?.expiresAt, origin.addingTimeInterval(6.8))
+        XCTAssertTrue(queue.pending.isEmpty)
+    }
+
+    func testWaitingPromptInterruptsBadgeEntranceWithoutReplayingBadge() {
+        for state in [SessionRecord.State.waitingPermission, .waitingInput] {
+            var queue = PillQueue()
+            add("badge", to: &queue, style: .badge)
+            var session = record("waiting")
+            session.state = state
+            let ask = Peek.session(session, cast: .ball)
+            queue.enqueue(ask, at: origin.addingTimeInterval(0.2), sessionSeconds: 5, batterySeconds: 3)
+            XCTAssertEqual(queue.visible.map(\.id), ["badge"])
+            XCTAssertEqual(queue.nextDeadline!.timeIntervalSince(origin), 0.38, accuracy: 0.001)
+            queue.advance(to: origin.addingTimeInterval(0.4))
+            XCTAssertEqual(queue.visible.map(\.id), [ask.id])
+            XCTAssertEqual(queue.visible.first?.expiresAt, origin.addingTimeInterval(8.4))
+            queue.advance(to: origin.addingTimeInterval(9))
+            XCTAssertTrue(queue.visible.isEmpty)
+            XCTAssertTrue(queue.pending.isEmpty)
+        }
+    }
+
+    func testSettledBadgeYieldsImmediatelyToOrdinaryPill() {
+        var queue = PillQueue()
+        add("badge", to: &queue, style: .badge)
+        add("done", to: &queue, at: 4)
+        XCTAssertEqual(queue.visible.map(\.id), ["badge"])
+        XCTAssertEqual(queue.nextDeadline!.timeIntervalSince(origin), 4.18, accuracy: 0.001)
+        queue.advance(to: origin.addingTimeInterval(4.2))
+        XCTAssertEqual(queue.visible.map(\.id), ["done"])
+    }
+
+    func testBadgeWaitsBehindEvenOnePillAndLowerPriorityPills() {
+        var queue = PillQueue()
+        add("done", to: &queue)
+        add("badge", to: &queue, at: 1, style: .badge)
+        XCTAssertEqual(queue.visible.map(\.id), ["done"])
+        XCTAssertEqual(queue.pending.map(\.id), ["badge"])
+        add("battery", to: &queue, at: 5, style: .low)
+        XCTAssertEqual(queue.visible.map(\.id), ["battery"])
+        queue.advance(to: origin.addingTimeInterval(8))
+        XCTAssertEqual(queue.visible.map(\.id), ["badge"])
+        XCTAssertEqual(queue.visible.first?.expiresAt, origin.addingTimeInterval(13))
+    }
+
+    func testPendingBadgeKeepsLatestLifecycleWithoutLosingCompletion() {
+        var queue = PillQueue()
+        add("done", to: &queue, sessionID: "s1")
+        let group = project("/repo", [record("s1")])
+        for (index, kind) in [BadgeLifecycle.Kind.joined, .departed, .returned, .departed].enumerated() {
+            queue.enqueue(.badge(group, kind: kind, cast: .ball), at: origin.addingTimeInterval(Double(index)), sessionSeconds: 5, batterySeconds: 3)
+            XCTAssertEqual(queue.visible.map(\.id), ["done"])
+            XCTAssertEqual(queue.pending.count, 1)
+            XCTAssertEqual(queue.pending.first?.peek?.badgeKind, kind)
+        }
+        queue.advance(to: origin.addingTimeInterval(5))
+        XCTAssertEqual(queue.visible.first?.peek?.badgeKind, .departed)
+        XCTAssertTrue(queue.pending.isEmpty)
+    }
+
+    func testClearCancelsBadgeHandoff() {
+        var queue = PillQueue()
+        add("badge", to: &queue, style: .badge)
+        add("done", to: &queue, at: 0.2)
+        queue.clear()
+        XCTAssertNil(queue.nextDeadline)
+        queue.advance(to: origin.addingTimeInterval(2))
+        XCTAssertTrue(queue.visible.isEmpty)
+        XCTAssertTrue(queue.pending.isEmpty)
+    }
+
+    func testUrgentArrivalShortensScheduledGraceAndRefreshCannotRestartExit() {
+        var queue = PillQueue()
+        add("badge", to: &queue, style: .badge)
+        add("done", to: &queue, at: 0.2)
+        add("ask", to: &queue, at: 0.5, style: .ask, sessionID: "waiting")
+        XCTAssertTrue(queue.visible.first?.isRetiring == true)
+        XCTAssertEqual(queue.nextDeadline!.timeIntervalSince(origin), 0.68, accuracy: 0.001)
+        add("badge", to: &queue, at: 0.6, style: .badge)
+        queue.reconcileWaiting(activeSessionIDs: ["waiting"], at: origin.addingTimeInterval(0.65))
+        XCTAssertEqual(queue.nextDeadline!.timeIntervalSince(origin), 0.68, accuracy: 0.001)
+        queue.advance(to: origin.addingTimeInterval(0.7))
+        XCTAssertEqual(queue.visible.map(\.id), ["ask", "done"])
+        XCTAssertTrue(queue.pending.isEmpty)
+    }
+
+    func testLifecycleUpdateDuringExitQueuesLatestStateWithoutRevivingOutgoingBadge() {
+        var queue = PillQueue()
+        let group = project("/repo", [record("s1")])
+        queue.enqueue(.badge(group, kind: .returned, cast: .ball), at: origin, sessionSeconds: 5, batterySeconds: 3)
+        add("ask", to: &queue, at: 0.2, style: .ask, sessionID: "waiting")
+        queue.enqueue(.badge(group, kind: .departed, cast: .ball), at: origin.addingTimeInterval(0.25), sessionSeconds: 5, batterySeconds: 3)
+        queue.enqueue(.badge(group, kind: .returned, cast: .ball), at: origin.addingTimeInterval(0.3), sessionSeconds: 5, batterySeconds: 3)
+        XCTAssertTrue(queue.visible.first?.isRetiring == true)
+        XCTAssertEqual(queue.pending.filter { $0.peek?.style == .badge }.map { $0.peek?.badgeKind }, [.returned])
+        queue.reconcileWaiting(activeSessionIDs: [], at: origin.addingTimeInterval(0.35))
+        queue.advance(to: origin.addingTimeInterval(0.4))
+        XCTAssertEqual(queue.visible.count, 1)
+        XCTAssertEqual(queue.visible.first?.peek?.badgeKind, .returned)
+        XCTAssertFalse(queue.visible.first?.isRetiring ?? true)
+        XCTAssertEqual(queue.visible.first?.shownAt, origin.addingTimeInterval(0.4))
+    }
+
+    func testShrinkingScreenDuringExitDoesNotReplayBadge() {
+        var queue = PillQueue()
+        add("badge", to: &queue, style: .badge)
+        add("ask", to: &queue, at: 0.2, style: .ask, sessionID: "waiting")
+        queue.setHeightLimit(100, at: origin.addingTimeInterval(0.25))
+        XCTAssertEqual(queue.visible.map(\.id), ["ask"])
+        XCTAssertTrue(queue.pending.isEmpty)
+        queue.setHeightLimit(900, at: origin.addingTimeInterval(0.3))
+        XCTAssertEqual(queue.visible.map(\.id), ["ask"])
+        XCTAssertEqual(queue.visible.first?.expiresAt, origin.addingTimeInterval(8.25))
+    }
+
+    func testReplacingBadgeCannotExtendCompletionGrace() {
+        var queue = PillQueue()
+        let group = project("/repo", [record("s1")])
+        queue.enqueue(.badge(group, cast: .ball), at: origin, sessionSeconds: 5, batterySeconds: 3)
+        add("done", to: &queue, at: 0.2)
+        queue.enqueue(.badge(group, kind: .departed, cast: .ball), at: origin.addingTimeInterval(1), sessionSeconds: 5, batterySeconds: 3)
+        XCTAssertEqual(queue.nextDeadline!.timeIntervalSince(origin), 1.8, accuracy: 0.001)
+        queue.advance(to: queue.nextDeadline!)
+        XCTAssertTrue(queue.visible.first?.isRetiring == true)
+        queue.advance(to: origin.addingTimeInterval(2))
+        XCTAssertEqual(queue.visible.map(\.id), ["done"])
     }
 
     func testBadgeSubtitleFallsBackToProviderWhenModelUnknown() {

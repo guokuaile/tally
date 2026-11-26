@@ -32,6 +32,12 @@ struct CrewLayout: Equatable {
     var leftSlots: Int { left.count + (overflow > 0 && overflowSide == .left ? 1 : 0) }
 }
 
+/// 菜单栏给两翼各留了几格（docs/crew.md「让开菜单」）：翼压在菜单栏上面，前台 app 的菜单排到哪儿，那一侧就只能放到哪儿。
+struct CrewRoom: Equatable {
+    var left: Int
+    var right: Int
+}
+
 struct BadgeLifecycle {
     enum Kind: Equatable { case joined, departed, returned }
     private var previous: [String: SessionRecord]?
@@ -149,36 +155,45 @@ enum CrewRoster {
     /// 每侧最多几个，夹在 1–4：0 等于关掉（开关另有），5 以上就压到菜单栏项目了。
     static func perSide(_ value: Int) -> Int { min(max(value, 1), 4) }
 
-    /// 浮动交界：Claude 一块在左、Codex 一块在右，两块相邻；各家都不超过 perSide 时交界就是刘海，一家超过就把交界往对面推，
+    /// 浮动交界：Claude 一块在左、Codex 一块在右，两块相邻；各家都不超过自己那侧的容量时交界就是刘海，一家超过就把交界往对面推，
     /// 多出来的占对面翼贴刘海的格。每块里按离刘海由近到远放最急到最闲（同距先放自己那边）。只用一家时不分边，围着刘海左右交替。
-    /// 放不下时按急缓砍最闲的（不分工具），只显示前 `2 × perSide − 1` 个，空出的最外一格给「+N」胶囊。
-    static func layout(_ projects: [CrewProject], perSide: Int) -> CrewLayout {
+    /// 每侧容量是 perSide 和 `room`（菜单栏留的格数，nil 是没量到、不限）里小的那个，两侧可以不一样。
+    /// `spillRight` 开着时左翼被菜单挤掉几格、右翼的上限就抬高几格，总数不变；菜单折过刘海（右翼 0 格）照样不放。
+    /// 放不下时按急缓砍最闲的（不分工具），只显示前「容量之和 − 1」个，空出的最外一格给「+N」胶囊。
+    static func layout(_ projects: [CrewProject], perSide: Int, room: CrewRoom? = nil, spillRight: Bool = false) -> CrewLayout {
         let perSide = Self.perSide(perSide)
-        let capacity = 2 * perSide
+        let leftCap = min(perSide, max(room?.left ?? perSide, 0))
+        let rightCap = min(spillRight ? 2 * perSide - leftCap : perSide, max(room?.right ?? perSide, 0))
+        let capacity = leftCap + rightCap
+        // 菜单把两侧都占了：一格都不画，胶囊也不画（它自己就要一格）
+        guard capacity > 0 else { return CrewLayout(right: [], left: [], overflow: 0) }
         let overflow = projects.count > capacity ? projects.count - (capacity - 1) : 0
         let shown = Array(projects.prefix(overflow > 0 ? capacity - 1 : projects.count))
         let warm = shown.filter { $0.provider != "codex" }, cool = shown.filter { $0.provider == "codex" }
         if warm.isEmpty || cool.isEmpty {
             var right: [CrewProject] = [], left: [CrewProject] = []
-            for (index, project) in shown.enumerated() {
-                if index.isMultiple(of: 2) { right.append(project) } else { left.append(project) }
+            for project in shown {
+                // 右、左、右、左；轮到的那侧满了就放另一侧（shown 不超过容量之和，另一侧一定有空）
+                if right.count < rightCap, right.count <= left.count || left.count == leftCap { right.append(project) } else { left.append(project) }
             }
-            return CrewLayout(right: right, left: left, overflow: overflow, overflowSide: .left)
+            return CrewLayout(right: right, left: left, overflow: overflow, overflowSide: left.count < leftCap ? .left : .right)
         }
-        // 一排 capacity 个位置：0 ..< perSide 是左翼（0 最外），perSide ..< capacity 是右翼（perSide 贴刘海）
-        let divider = warm.count > perSide ? warm.count : (cool.count > perSide ? capacity - cool.count : perSide)
+        // 一排 capacity 个位置：0 ..< leftCap 是左翼（0 最外），leftCap ..< capacity 是右翼（leftCap 贴刘海）
+        let divider = warm.count > leftCap ? warm.count : (cool.count > rightCap ? capacity - cool.count : leftCap)
         var row = [CrewProject?](repeating: nil, count: capacity)
+        func fromNotch(_ position: Int) -> Int { position < leftCap ? leftCap - 1 - position : position - leftCap }
         func place(_ block: [CrewProject], at positions: Range<Int>, ownSide: Range<Int>) {
             let nearestFirst = positions.sorted { a, b in
-                let da = abs(2 * a + 1 - capacity), db = abs(2 * b + 1 - capacity)
+                let da = fromNotch(a), db = fromNotch(b)
                 return da != db ? da < db : ownSide.contains(a)
             }
             for (project, position) in zip(block, nearestFirst) { row[position] = project }
         }
-        place(warm, at: (divider - warm.count)..<divider, ownSide: 0..<perSide)
-        place(cool, at: divider..<(divider + cool.count), ownSide: perSide..<capacity)
-        let left = (0..<perSide).compactMap { row[perSide - 1 - $0] }
-        let right = (0..<perSide).compactMap { row[perSide + $0] }
+        place(warm, at: (divider - warm.count)..<divider, ownSide: 0..<leftCap)
+        place(cool, at: divider..<(divider + cool.count), ownSide: leftCap..<capacity)
+        let left = (0..<leftCap).compactMap { row[leftCap - 1 - $0] }
+        let right = (0..<rightCap).compactMap { row[leftCap + $0] }
+        // 溢出时只空一格，不在最左就在最右：左翼一格没有时位置 0 是右翼贴刘海那格，那儿必有暖块，落到 .right
         return CrewLayout(right: right, left: left, overflow: overflow, overflowSide: row[0] == nil ? .left : .right)
     }
 

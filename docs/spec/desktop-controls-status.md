@@ -1,0 +1,17 @@
+# 桌面控制实施状态
+
+- 授权：B 完整显示器管理＋壁纸管理；退出 Tally 后继续播放；本机安装与可恢复验收已包含在范围中。
+- 基线：e96a8be；原有未跟踪文件 docs/spec/display-presets.md 为本任务草案。
+- 当前：两个设置分区、系统页两列独立控制卡片、原生显示服务、HiDPI 授权脚本、独立播放器和安装恢复流程已通过 `./scripts/install.sh --build` 安装到 `/Applications/Tally.app`，安装日志 `/tmp/tally-header-controls-install.log`。旧壁纸入口已接管，新播放器正在运行。
+- 验证：基线 `swift test` 退出 0，742 项通过、0 失败，日志 `/tmp/tally-desktop-baseline-tests.log`。功能集完整测试为 Tally 774 项、WallpaperKit 8 项，共 782 项，已有成功记录 `/tmp/tally-desktop-refinement-final-tests.log`。两列布局的完整验收命令为 `swift test`、`codesign --verify --deep --strict --verbose=2 /Applications/Tally.app`、`git diff --check`，结果与真实退出码统一记录在 `/tmp/tally-two-column-verification.log`。安装隔离测试 `python3 -m unittest discover -s Tests/ScriptTests -v` 7 项通过，日志 `/tmp/tally-install-tests.log`；覆盖复制、签名、播放器重启和 Tally 登录任务恢复。
+- 验收隔离：截图目录发现的真实 FSEvents 测试曾抢先收到其他项目生成的 `AppIcon.icns`，原始失败日志 `/tmp/tally-two-column-verification-fsevents-failure.log`。用例现只监听专属临时目录，另外写入目录外图片并断言不会抢先命中，原目标目录与文件断言保留；应用默认监听范围不变。修复后的定向测试退出 0，证据 `/tmp/tally-fsevents-regression.log`。
+- 显示器实测：真实设置页保存常用不切屏；无需先保存，直接应用所选 2752×1152 HiDPI/100 Hz 后由公开 API 读回，撤销回到 2580×1080 HiDPI/100 Hz；最终保存目标同为 2580×1080，渲染 5160×2160。同档位应用明确提示无需切换，刷新显示可用档位数量。自定义档位预览及安装确认取消已验证，系统 override 与原备份哈希均保持不变。
+- 壁纸实测：两个原素材目录共 23 个文件（16 张图片、7 个视频），间隔 300 秒，登录后播放已开启，当前未暂停。真实设置页验证暂停、继续、下一张、恢复旧入口和再次接管。素材改为目录/文件列表，真实 UI 已验证移除草稿不写配置、原生选择器重新添加目录并保存，最终仍使用两个原目录。视频播放时两帧像素不同，暂停后相同；退出主 App 后播放器 pid 不变且视频帧继续变化，正常打开 App 可再次进入设置。
+- 升级实测：暂停状态下重装，新播放器 pid 已更换且暂停状态保留；主 App 与播放器分别登记为 `com.aiden.tally` 和 `com.aiden.tally.wallpaper`。最终恢复两个目录混播。安装日志 `/tmp/tally-desktop-refinement-final-install.log`，暂停升级日志 `/tmp/tally-desktop-upgrade.log`，退出播放证据 `/tmp/tally-after-quit-evidence.json`。
+- UI 与包验证：系统页顶部为硬件 / 电池，中间两行左右卡片为显示器 / 壁纸、保持唤醒 / 清洁锁，压力信息位于最下方。主状态 13 点、辅助文字 11 点，标题、状态、操作分层；设置入口放在各卡片右上角。真实安装截图 `/tmp/tally-system-two-column.png` 为 620×589 点窗口，默认状态所有卡片底边均完整显示。唤醒卡直接提供「一直唤醒」「1 小时」「更多」，开启后追加「关闭」；四个按钮同时出现时没有截断，证据 `/tmp/tally-system-awake-active.png`。实际点击一直唤醒后读到 `Tally keep awake` 电源断言；切至 1 小时后配置读回 60 分钟及对应到期时间；关闭后配置回到未开启且电源断言消失。更多菜单的时长、自定义展开与取消已验证，截图 `/tmp/tally-system-custom-duration.png`，状态树 `/tmp/tally-two-column-awake-tree.txt`、`/tmp/tally-two-column-custom-tree.txt`、`/tmp/tally-two-column-final-tree.txt`。自定义展开后压力卡继续随页面滚动。设置页截图 `/tmp/tally-refinement-display.png`、`/tmp/tally-refinement-wallpaper.png`；显示器操作证据 `/tmp/tally-refinement-display-same.txt`、`/tmp/tally-refinement-display-applied.txt`、`/tmp/tally-refinement-display-undone.txt`。显示器与壁纸控制沿用既有点击验收，本次未重新完成整套点击回归。资源和安装脚本已有 `plutil -lint Resources/Wallpaper-Info.plist`、`bash -n scripts/install.sh scripts/build-app.sh` 成功记录。
+- 未验证边界：未通过 Tally 在真实 `/Library` 路径安装新的 HiDPI 配置，也未执行物理重连、整机重启或休眠唤醒验收；生成的安装/恢复脚本已在隔离临时目录执行验证，原生管理员密码只能由用户在系统弹窗输入。未进行长时间播放压力测试或视频就绪后的解码中断验收。无待批准的实施项。
+- 本机边界：`scripts/`、`AGENTS.md` 与 `.claude/CLAUDE.md` 按仓库原有忽略规则保留本地，不强制加入 Git；构建/安装脚本已在本地修改，包资源与恢复流程写在 `docs/panel.md`。本任务源码、测试与文档按明确路径提交；本机打包脚本遵循上述忽略规则。
+
+复审证据：`/tmp/tally-desktop-final-review.md`（显示器与迁移修复）、`/tmp/tally-integration-fix-review.md`（入口与安装健康检查）、`/tmp/tally-wallpaper-async-fix-review.md`（素材读取与暂停记录失败）、`/tmp/tally-bundle-fix-review.md`（独立 App 身份）、`/tmp/tally-video-fix-review.md`（视频异步入队），均通过定向源码复核。界面细化的复审在 `/tmp/tally-refinement-review.md` 和 `/tmp/tally-refinement-errors.md`；指出的显式刷新历史错误、壁纸操作错误遮挡及忙碌反馈顺序均已修复。两列卡片与默认间距兼容性定向复审记录在 `/tmp/tally-two-column-review.md`，结论为 APPROVE；实际底边与对齐以安装截图为证据。未验证边界单独保留。
+
+风险与回退：显示器选择的应用入口已改为直接应用下拉框选择，常用目标继续独立保存；可用撤销恢复刚才档位。素材列表移除只影响待保存配置，不删除文件。安装脚本保留上一版 App，可据安装日志中的备份路径恢复；发布前保留旧包供本机回退。壁纸服务原有刷新把控制错误统一显示为未运行的局限未在本轮扩大修改，后台实际状态以 IPC 健康读回为准。

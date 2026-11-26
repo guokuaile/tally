@@ -42,4 +42,53 @@ final class SubprocessTests: XCTestCase {
         XCTAssertFalse(result.timedOut)
         XCTAssertLessThan(elapsed, 3)
     }
+
+    func testInputReachesEOFWithoutExtraBytes() throws {
+        let payload = Data("a\u{0}b\n".utf8)
+        let result = try Subprocess.run(sh, ["-c", "cat"], deadline: 2, input: payload)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertEqual(result.stdout, payload)
+    }
+
+    func testBlockedInputHonorsDeadline() throws {
+        let payload = Data(repeating: 65, count: 4 * 1024 * 1024)
+        let (result, elapsed) = try timed {
+            try Subprocess.run(sh, ["-c", "sleep 5"], deadline: 0.3, input: payload)
+        }
+        XCTAssertTrue(result.timedOut)
+        XCTAssertLessThan(elapsed, 2.5)
+    }
+
+    func testEarlyChildExitDuringInputDoesNotSignalParent() throws {
+        let payload = Data(repeating: 65, count: 4 * 1024 * 1024)
+        let result = try Subprocess.run(sh, ["-c", "exit 7"], deadline: 2, input: payload)
+        XCTAssertEqual(result.status, 7)
+        XCTAssertFalse(result.timedOut)
+    }
+
+    func testConcurrentUnrelatedCallerIsUnaffectedByInputFailure() throws {
+        let group = DispatchGroup()
+        var unrelated: Subprocess.Result?
+        group.enter()
+        DispatchQueue.global().async {
+            unrelated = try? Subprocess.run(self.sh, ["-c", "echo healthy"], deadline: 2)
+            group.leave()
+        }
+        let failed = try Subprocess.run(sh, ["-c", "exit 7"], deadline: 2,
+                                        input: Data(repeating: 65, count: 1024 * 1024))
+        XCTAssertEqual(failed.status, 7)
+        XCTAssertEqual(group.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(String(decoding: unrelated?.stdout ?? Data(), as: UTF8.self), "healthy\n")
+    }
+
+    func testBackgroundChildHoldingStdinDoesNotRetainWriter() throws {
+        let input = Data(repeating: 65, count: 4 * 1024 * 1024)
+        let (result, elapsed) = try timed {
+            try Subprocess.run(sh, ["-c", "sleep 5 <&0 & exit 0"], deadline: 2, input: input)
+        }
+        XCTAssertEqual(result.status, 0)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertLessThan(elapsed, 2)
+    }
 }

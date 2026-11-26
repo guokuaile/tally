@@ -1,18 +1,41 @@
 // 移植自 Atoll（https://github.com/Ebullioscopic/Atoll），Copyright (C) 2024-2026 Atoll Contributors，GPL-3.0，见仓库 LICENSE 与 NOTICE。
-// Tally 改动：按 limit_window_seconds 把窗口分到 5 小时 / 7 天两个槽，而不是按 primary / secondary 的次序硬套（头部兜底同样按 window-minutes 分）；401 / 403 带回一句给界面看的提示，不然登录过期时只是静默少两条配额；请求超时 10 秒；429 按接口退避（QuotaBackoff）。
+// Tally 改动：按窗口长度分槽；认证失败带提示；10 秒超时与独立 429 退避；只读重置卡汇总和明细、确认后单次兑换（docs/ai.md「Codex 重置卡」）。
 import Foundation
+import CryptoKit
 import os
 
 // Codex/ChatGPT rate-limit usage from chatgpt.com/backend-api/wham/usage; request+response shape per OpenUsage.
 struct CodexQuotaClient {
     private static let log = os.Logger(subsystem: "com.aiden.tally", category: "CodexQuota")
     static let backoffKey = "codex-wham-usage"
+    static let detailsBackoffKey = "codex-wham-reset-credits"
     let session: URLSession
     /// 429 之后按接口退避；真 app 传落盘的 `QuotaBackoff.shared`。
     let backoff: QuotaBackoff
-    init(session: URLSession = URLSession(configuration: .ephemeral), backoff: QuotaBackoff = QuotaBackoff()) {
+    struct Credentials {
+        let accessToken: String
+        let accountId: String?
+    }
+    enum ResetOutcome: Equatable {
+        case reset(windows: Int)
+        case nothingToReset
+        case noCredit
+        case alreadyRedeemed
+        case rejected(String)
+        case unknown
+    }
+    private let credentialLoader: (() -> Credentials?)?
+    private let noRedirects = NoRedirects()
+    init(session: URLSession = URLSession(configuration: .ephemeral), backoff: QuotaBackoff = QuotaBackoff(), credentialLoader: (() -> Credentials?)? = nil) {
         self.session = session
         self.backoff = backoff
+        self.credentialLoader = credentialLoader
+    }
+
+    private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
     }
 
     private struct AuthFile: Decodable {
@@ -40,53 +63,184 @@ struct CodexQuotaClient {
     }
 
     // Never throws: any credential/network/parse failure yields (nil, nil, note).
-    func fetchLimits() async -> (session: UsageLimit?, week: UsageLimit?, note: String?) {
+    struct Quota {
+        let session: UsageLimit?
+        let week: UsageLimit?
+        let note: String?
+        let resetCredits: CodexResetCredits?
+    }
+
+    func fetchLimits() async -> Quota {
         guard let creds = loadCredentials() else {
             Self.log.notice("no credentials: auth.json/Keychain missing or unparseable")
-            return (nil, nil, nil)
+            return Quota(session: nil, week: nil, note: nil, resetCredits: nil)
         }
         // 429 退避期间不打接口
-        guard backoff.allows(Self.backoffKey, now: Date()) else { return (nil, nil, nil) }
+        guard backoff.allows(Self.backoffKey, now: Date()) else { return Quota(session: nil, week: nil, note: nil, resetCredits: nil) }
         var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
         // 默认 60 秒：代理卡住时这一行要「加载中」一分钟，和 Claude 那边一样钉 10 秒
         request.timeoutInterval = 10
-        request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Tally", forHTTPHeaderField: "User-Agent")
-        if let accountId = creds.accountId, !accountId.isEmpty {
-            request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
-        }
+        authorize(&request, credentials: creds)
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request, delegate: noRedirects)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
                 if code == 429, let http = response as? HTTPURLResponse {
                     backoff.throttled(Self.backoffKey, now: Date(), retryAfter: QuotaBackoff.retryAfter(http))
                 }
                 Self.log.error("wham/usage HTTP \(code) — \(code == 401 || code == 403 ? "auth/credential" : "request") failure")
-                return (nil, nil, Self.authNote(status: code))
+                return Quota(session: nil, week: nil, note: Self.authNote(status: code), resetCredits: nil)
             }
             backoff.succeeded(Self.backoffKey)
+            let now = Date()
+            let resetCredits = await creditsSummary(from: data, credentials: creds, now: now)
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
-            let now = Date()
             if let decoded = try? decoder.decode(UsageResponse.self, from: data) {
                 let windows = [decoded.rateLimit?.primaryWindow, decoded.rateLimit?.secondaryWindow]
                     .compactMap { $0 }
                     .map { (seconds: $0.limitWindowSeconds, limit: limit(from: $0, now: now)) }
                 let assigned = Self.assign(windows: windows)
-                if assigned.session != nil || assigned.week != nil { return (assigned.session, assigned.week, nil) }
+                if assigned.session != nil || assigned.week != nil { return Quota(session: assigned.session, week: assigned.week, note: nil, resetCredits: resetCredits) }
             }
             // 头部兜底也按窗口长分槽：只有 7 天窗口的账号，primary 就是那个 7 天窗口，按次序硬套又会贴成「5 小时」
             let fallback = Self.assign(windows: ["primary", "secondary"].compactMap { headerWindow(http, name: $0) })
             if fallback.session == nil && fallback.week == nil {
                 Self.log.error("wham/usage 200 but no usage found — response shape may have changed (\(data.count) bytes)")
             }
-            return (fallback.session, fallback.week, nil)
+            return Quota(session: fallback.session, week: fallback.week, note: nil, resetCredits: resetCredits)
         } catch {
-            Self.log.error("wham/usage request errored: \(error.localizedDescription, privacy: .public)")
-            return (nil, nil, nil)
+            Self.log.error("wham/usage request failed")
+            return Quota(session: nil, week: nil, note: nil, resetCredits: nil)
         }
+    }
+
+    private func creditsSummary(from data: Data, credentials: Credentials, now: Date) async -> CodexResetCredits? {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let summary = root["rate_limit_reset_credits"] as? [String: Any],
+              let count = Self.validCount(summary["available_count"]) else { return nil }
+        var credits = CodexResetCredits(availableCount: count)
+        // 账号标识缺失时仍显示次数，但不能把确认绑定到一个无法确认身份的登录。
+        if let accountId = credentials.accountId, !accountId.isEmpty, !credentials.accessToken.isEmpty {
+            credits.credentialBinding = Self.binding(for: credentials)
+        }
+        credits.accountLabel = credentials.accountId.map { "Codex 账号 · \(String($0.suffix(8)))" } ?? "当前 Codex 账号"
+        credits.fetchedAt = now
+        guard credits.availableCount > 0 else { return credits }
+        guard backoff.allows(Self.detailsBackoffKey, now: now) else {
+            credits.detailsNote = "卡片到期时间暂未取得"
+            return credits
+        }
+        var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!)
+        request.timeoutInterval = 10
+        authorize(&request, credentials: credentials)
+        do {
+            let (data, response) = try await session.data(for: request, delegate: noRedirects)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                if let http = response as? HTTPURLResponse, http.statusCode == 429 {
+                    backoff.throttled(Self.detailsBackoffKey, now: Date(), retryAfter: QuotaBackoff.retryAfter(http))
+                }
+                credits.detailsNote = "卡片到期时间暂未取得"
+                return credits
+            }
+            guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                credits.detailsNote = "卡片到期时间暂未取得"
+                return credits
+            }
+            if let count = Self.validCount(root["available_count"]) { credits.availableCount = count }
+            guard let items = root["credits"] as? [[String: Any]] else {
+                credits.detailsNote = "卡片到期时间暂未取得"
+                return credits
+            }
+            backoff.succeeded(Self.detailsBackoffKey)
+            credits.cards = items.compactMap { item in
+                guard item["status"] as? String == "available",
+                      item["reset_type"] as? String == "codex_rate_limits",
+                      let id = item["id"] as? String, !id.isEmpty else { return nil }
+                let expiry: Date?
+                if let raw = item["expires_at"] as? String {
+                    guard let parsed = Self.parseDate(raw) else { return nil }
+                    expiry = parsed
+                } else if let value = item["expires_at"], !(value is NSNull) {
+                    return nil
+                } else { expiry = nil }
+                guard expiry.map({ $0 > now }) ?? true else { return nil }
+                return CodexResetCredits.Card(id: id, expiresAt: expiry)
+            }
+            credits.expiresAt = credits.cards.compactMap(\.expiresAt).sorted()
+            return credits
+        } catch {
+            credits.detailsNote = "卡片到期时间暂未取得"
+            return credits
+        }
+    }
+
+    private static func validCount(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.intValue >= 0, number.doubleValue == Double(number.intValue) else { return nil }
+        return number.intValue
+    }
+
+    func consumeResetCredit(credits: CodexResetCredits, card: CodexResetCredits.Card, requestID: String, now: Date) async -> ResetOutcome {
+        guard UUID(uuidString: requestID) != nil,
+              credits.availableCount > 0,
+              credits.cards.contains(where: { $0.id == card.id && $0.expiresAt == card.expiresAt }),
+              !card.id.isEmpty, card.expiresAt.map({ $0 > now }) ?? true,
+              now.timeIntervalSince(credits.fetchedAt) >= 0,
+              now.timeIntervalSince(credits.fetchedAt) < 300,
+              !credits.credentialBinding.isEmpty,
+              let credentials = loadCredentials(),
+              let accountId = credentials.accountId, !accountId.isEmpty, !credentials.accessToken.isEmpty,
+              Self.binding(for: credentials) == credits.credentialBinding else {
+            return .rejected("卡片或登录状态已改变，请刷新后重试")
+        }
+        var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        authorize(&request, credentials: credentials)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["redeem_request_id": requestID, "credit_id": card.id])
+        guard request.httpBody != nil else { return .rejected("请求参数无效") }
+        do {
+            let (data, response) = try await session.data(for: request, delegate: noRedirects)
+            guard let http = response as? HTTPURLResponse else { return .unknown }
+            // 只有登录失效能断定没有兑换；其他 4xx 的服务端语义未核实，保留待核对状态。
+            if http.statusCode == 401 || http.statusCode == 403 { return .rejected("Codex 登录已过期，请重新登录后刷新") }
+            guard (200..<300).contains(http.statusCode),
+                  let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let code = root["code"] as? String else { return .unknown }
+            switch code {
+            case "reset":
+                let windows = root["windows_reset"] as? Int ?? 0
+                return .reset(windows: windows)
+            case "nothing_to_reset": return .nothingToReset
+            case "no_credit": return .noCredit
+            case "already_redeemed": return .alreadyRedeemed
+            default: return .unknown
+            }
+        } catch { return .unknown }
+    }
+
+    private func authorize(_ request: inout URLRequest, credentials: Credentials) {
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Tally", forHTTPHeaderField: "User-Agent")
+        if let accountId = credentials.accountId, !accountId.isEmpty {
+            request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+    }
+
+    private static func binding(for credentials: Credentials) -> String {
+        let data = Data((credentials.accessToken + "\0" + (credentials.accountId ?? "")).utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func parseDate(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 
     /// 401 / 403 是凭据问题，界面要说人话（Codex 的 access_token 有效期 10 天，Tally 只读不刷新）。
@@ -124,7 +278,8 @@ struct CodexQuotaClient {
     }
 
     // auth.json ($CODEX_HOME, ~/.codex, ~/.config/codex), then Keychain "Codex Auth" holding the same JSON payload.
-    private func loadCredentials() -> (accessToken: String, accountId: String?)? {
+    private func loadCredentials() -> Credentials? {
+        if let credentialLoader { return credentialLoader() }
         for path in authPaths() {
             if let data = try? Data(contentsOf: path), let creds = parseAuth(data) { return creds }
         }
@@ -141,10 +296,10 @@ struct CodexQuotaClient {
         ]
     }
 
-    private func parseAuth(_ data: Data) -> (accessToken: String, accountId: String?)? {
+    private func parseAuth(_ data: Data) -> Credentials? {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         guard let parsed = try? decoder.decode(AuthFile.self, from: data) else { return nil }
-        return (parsed.tokens.accessToken, parsed.tokens.accountId)
+        return Credentials(accessToken: parsed.tokens.accessToken, accountId: parsed.tokens.accountId)
     }
 }

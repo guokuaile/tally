@@ -26,6 +26,10 @@ struct QuotaAlertTracker {
 
     private var last: [String: UsageLimit] = [:]
 
+    mutating func reset(provider: ProviderID) {
+        last = last.filter { !$0.key.hasPrefix(provider.rawValue + "|") }
+    }
+
     /// 喂一条新鲜读数，返回该提醒的事件；每个窗口第一次喂只记不报（开 app 时已经 90% 不该弹）。
     mutating func feed(provider: ProviderID, window: String, limit: UsageLimit) -> QuotaEvent? {
         let key = "\(provider.rawValue)|\(window)"

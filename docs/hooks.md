@@ -57,7 +57,7 @@ Claude 侧同理（`ClaudeHome`）：`CLAUDE_CONFIG_DIR` 设了，Claude Code �
 
 Codex 侧删掉后，同一事件里排在 Tally 组后面的 hook 序号前移，而信任状态是按序号记的。所以接着改 `config.toml`：先删 Tally 组自己那几块 `[hooks.state.…]`，再按序号从小到大把后面的块改名到新序号，块里的 `trusted_hash`、`enabled` 原样跟过去。哈希不含序号，挪过去照样对得上；用户没信任过的本来就没有块，挪完也还是没有，不替用户做主。从小到大挪不会撞键：新序号上原来要么是刚删掉的 Tally 组，要么是已经挪走的块。Tally 的块必须删：留着的话，后面的 hook 挪到这个序号上就会和它重名，`config.toml` 里出现两个同名表，Codex 整份读不进去。后半步失败就把 JSON 退回备份。
 
-卸载 Tally = 设置里点两个「移除」，再把 Tally.app 拖进废纸篓。macOS 不让 app 在被删除时自己跑清理，所以分两步。
+卸载前在 hook 设置里点两个「移除」；使用壁纸时还须在壁纸设置关闭登录播放并停止独立播放器（需要回到旧播放器则恢复旧服务），最后把 Tally.app 拖进废纸篓。macOS 不让 app 在被删除时自己跑清理；直接删除 app 不会自动清掉用户 LaunchAgent。
 
 ## 自检（设置 → hook）
 
@@ -68,13 +68,13 @@ Codex 侧删掉后，同一事件里排在 Tally 组后面的 hook 序号前移�
 
 ## 发版与更新
 
-发版（脚本只留在维护者本地）一次做完：版本号只在 `Resources/Info.plist` 一处，当前版本已经发过就自动抬一级（默认 patch，可传 `minor` / `major` / 具体版本号）并提交「版本抬到 x.y.z」，手动抬过还没发的直接用 → 推私有仓库 → 把 HEAD 的文件树以快照提交同步到公开仓库 main（不带私有历史）→ 编 app → 打 DMG → 以 `Tally.dmg` 为名传到公开仓库的 Release（tag `v<版本>`，打在公开仓库 main 最新的提交上）→ 算 sha256，写进 `guokuaile/homebrew-tally` 的 `Casks/tally.rb` 推上去（仓库不存在就建）→ 重装本机，不然本机跑的还是旧版本号，「检查新版本」会对着刚发的这版提示升级。只发已提交的代码，工作区不干净就退出；指定的版本已经发过也退出。
+公开构建是默认值。发版脚本从已提交的版本生成公开源码快照，在干净目录编译、测试、打包并挂载核验 DMG；确认是公开版才推送快照与标签、上传镜像、更新 Homebrew。Release 使用固定资产名 Tally.dmg。日用增强版通过 TALLY_BUILD_EDITION=local 显式构建，单独部署；发版不会重装日用机。
 
 - **资源名固定 `Tally.dmg`**：README 的下载按钮指着 `releases/latest/download/Tally.dmg`，GitHub 按资源名 302 到最新那个 Release。cask 的 url 却按 tag 钉死：指 latest 的话，下一次发版 sha256 就对不上。
 - **cask 装完清隔离标记**（`postflight_steps` 跑 `xattr -dr com.apple.quarantine`）：DMG 是 ad-hoc 签名、没公证，不清的话每次装、每次升级都要去系统设置点「仍要打开」（macOS 15 起右键打开那条路没了）。Homebrew 官方仓库不收这样的 cask（要求过 Gatekeeper），第三方 tap 可以，boring.notch 同样这么做；`--no-quarantine` 参数 Homebrew 6 起已经没有。
 - **开机自启放 `zap` 不放 `uninstall`**：`brew upgrade` 也会跑 `uninstall`，放那儿每次升级都会把 LaunchAgent 删掉。hook 注册 Homebrew 管不到（改的是用户自己的配置文件），caveats 里提醒先在设置里点「移除」。
 
-DMG 本身：Tally.app + Applications 快捷方式 + 「首次打开必读.txt」，强制重签成 ad-hoc（理由见 [panel.md](panel.md)「打包与安装」）。装好后在设置里点两个「安装」；首次点会话行弹终端自动化授权；查配额不弹钥匙串框（取值走 `/usr/bin/security`，理由见 `ai.md`）。GPL-3：发 DMG 的同时源码要能拿到，仓库公开即可。
+DMG 本身：Tally.app + Applications 快捷方式 + 「首次打开必读.txt」，强制重签成 ad-hoc（理由见 [panel.md](panel.md)「打包与安装」）。装好后在设置里点两个「安装」；首次点会话行弹终端自动化授权；当前 CLI 配额凭据取值走 `/usr/bin/security`；读取 Tally 保存的 Claude 登录副本时，首次或更换构建后可能出现钥匙串授权（见 `ai.md`）。GPL-3：发 DMG 的同时源码要能拿到，仓库公开即可。
 
 **新版本提示**（`UpdateChecker`，设置「通用 → 检查新版本」，默认开）：启动时和之后每 24 小时 `GET https://api.github.com/repos/guokuaile/tally/releases/latest`（不带 token，匿名额度一小时 60 次，远用不完），`tag_name` 去掉开头的 `v` 和 `-` / `+` 后缀、按点拆成整数补零逐段比，比 `CFBundleShortVersionString` 新就在设置「通用」显示一行、刘海垂一条「有新版本」（同一个版本只垂一次，记在 `Preferences.updateNotifiedVersion`）。有 `/opt/homebrew/Caskroom/tally`（或 `/usr/local/…`）就说 `brew upgrade --cask tally`，否则给 Release 页的「去下载」。404（还没发过版）不算失败；403 / 429 说限流；别的失败原因显示在设置里。只提示不替换：DMG 是 ad-hoc 签名，下载下来验不了真假，自动换掉等于替人跑一个没法验证的程序。
 

@@ -1,5 +1,5 @@
 // 移植自 Atoll（https://github.com/Ebullioscopic/Atoll），Copyright (C) 2024-2026 Atoll Contributors，GPL-3.0，见仓库 LICENSE 与 NOTICE。
-// Tally 改动：日志走 UsageScanCache 增量扫描（~/.codex/sessions 有 1.4 GB，每轮全量重扫太贵）；找不到目录、没有日志的提示改成中文并写明下一步。
+// Tally 改动：日志走 UsageScanCache 增量扫描（~/.codex/sessions 有 1.4 GB，每轮全量重扫太贵）；找不到目录、没有日志的提示改成中文并写明下一步；快照附带重置卡状态。
 import Foundation
 
 struct CodexUsageProvider: UsageProvider {
@@ -31,6 +31,7 @@ struct CodexUsageProvider: UsageProvider {
         snapshot.sessionLimit = quota.session
         snapshot.weekLimit = quota.week
         snapshot.limitsNote = quota.note
+        snapshot.codexResetCredits = quota.resetCredits
         return snapshot
     }
 }

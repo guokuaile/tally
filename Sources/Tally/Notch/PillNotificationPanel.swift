@@ -506,6 +506,7 @@ final class PillNotificationPanel: NSPanel {
     private var mouseMonitors: [Any] = []
     private var badgeStartedAt: Date?
     private var badgeEntranceTimer: Timer?
+    private(set) var isRetiring = false
 
     init(peek: Peek, isInteractive: Bool, onTap: @escaping () -> Void) {
         pillHost = PillHostingView(rootView: PillNotificationView(peek: peek, isInteractive: isInteractive, onTap: onTap))
@@ -550,6 +551,22 @@ final class PillNotificationPanel: NSPanel {
         }
         setFrame(frame, display: true)
         updateBadgeHitTesting()
+    }
+
+    func retireBadge(duration: TimeInterval, reduceMotion: Bool = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion) {
+        guard !isRetiring else { return }
+        isRetiring = true
+        configureHitTesting(peek: pillHost.rootView.peek, isInteractive: false)
+        pillHost.onTap = {}
+        pillHost.setAccessibilityHidden(true)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            animator().alphaValue = 0
+            if !reduceMotion {
+                animator().setFrameOrigin(CGPoint(x: frame.minX, y: frame.minY + 22))
+            }
+        }
     }
 
     override func close() {

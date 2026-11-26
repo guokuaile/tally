@@ -3,6 +3,31 @@ import XCTest
 
 final class SystemSamplerTests: XCTestCase {
 
+    func testGPUFractionFromDriverStatistics() throws {
+        for percent in [0.0, 1.0, 37.5, 70.0, 90.0, 100.0] {
+            let fraction = try XCTUnwrap(SystemSampler.gpuFraction(statistics: ["Device Utilization %": NSNumber(value: percent)]))
+            XCTAssertEqual(fraction, percent / 100, accuracy: 0.0001)
+        }
+    }
+
+    func testGPUFractionRejectsMissingAndInvalidStatistics() {
+        XCTAssertNil(SystemSampler.gpuFraction(statistics: nil))
+        XCTAssertNil(SystemSampler.gpuFraction(statistics: "invalid"))
+        XCTAssertNil(SystemSampler.gpuFraction(statistics: [:]))
+        for value: Any in ["37", true, NSNull(), -1, 101, Double.nan, Double.infinity] {
+            XCTAssertNil(SystemSampler.gpuFraction(statistics: ["Device Utilization %": value]))
+        }
+    }
+
+    func testGPULevels() {
+        var sample = SystemSample()
+        XCTAssertNil(sample.gpuLevel)
+        for (fraction, level): (Double, SystemSample.Level) in [(0, .ok), (0.699, .ok), (0.7, .warn), (0.899, .warn), (0.9, .critical), (1, .critical)] {
+            sample.gpuFraction = fraction
+            XCTAssertEqual(sample.gpuLevel, level)
+        }
+    }
+
     func testCPUFractionFromTickDeltas() {
         // 两个核：忙 (100+50+50) + (0+0+0) = 200，闲 500 + 300 = 800 → 200 / 1000
         let previous: [UInt32] = [100, 50, 800, 50, 10, 10, 100, 0]

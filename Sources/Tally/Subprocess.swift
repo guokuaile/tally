@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// 跑一个子进程，截止时间对每条路径都生效。
@@ -18,9 +19,9 @@ enum Subprocess {
         var status: Int32?
     }
 
-    /// 同步跑完再返回，别在主线程上调用长的。不接管 stdin。
+    /// 同步跑完再返回，别在主线程上调用长的。输入只经管道传递。
     static func run(_ executable: URL, _ arguments: [String], environment: [String: String]? = nil,
-                    deadline: TimeInterval) throws -> Result {
+                    deadline: TimeInterval, input: Data? = nil) throws -> Result {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -29,6 +30,8 @@ enum Subprocess {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        let stdinPipe = input.map { _ in Pipe() }
+        if let stdinPipe { process.standardInput = stdinPipe }
 
         let lock = NSLock()
         var out = Data()
@@ -61,6 +64,42 @@ enum Subprocess {
 
         try process.run()
 
+        let inputFinished = DispatchSemaphore(value: 0)
+        let inputLock = NSLock()
+        var inputCancelled = false
+        if let input, let stdinPipe {
+            let handle = stdinPipe.fileHandleForWriting
+            let fd = handle.fileDescriptor
+            let flags = fcntl(fd, F_GETFL)
+            guard fcntl(fd, F_SETNOSIGPIPE, 1) == 0, flags >= 0,
+                  fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+                let failure = errno
+                try? handle.close()
+                process.terminate()
+                throw NSError(domain: "Subprocess.stdin", code: Int(failure))
+            }
+            let inputDeadline = DispatchTime.now() + deadline
+            DispatchQueue.global(qos: .utility).async {
+                input.withUnsafeBytes { bytes in
+                    var offset = 0
+                    while offset < bytes.count {
+                        if inputLock.withLock({ inputCancelled }) || DispatchTime.now() >= inputDeadline { break }
+                        let count = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                        if count > 0 { offset += count; continue }
+                        if count < 0 && errno == EINTR { continue }
+                        if count < 0 && errno == EAGAIN {
+                            var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                            _ = Darwin.poll(&descriptor, 1, 20)
+                            continue
+                        }
+                        break // The child closed stdin or the pipe became unusable.
+                    }
+                }
+                try? handle.close()
+                inputFinished.signal()
+            }
+        }
+
         var end = DispatchTime.now() + deadline
         var timedOut = false
         while true {
@@ -87,6 +126,10 @@ enum Subprocess {
                 kill(process.processIdentifier, SIGKILL)
                 _ = waitForExit(1)
             }
+        }
+        if stdinPipe != nil {
+            inputLock.withLock { inputCancelled = true }
+            _ = inputFinished.wait(timeout: .distantFuture)
         }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil

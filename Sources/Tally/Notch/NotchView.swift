@@ -8,20 +8,19 @@ struct NotchView: View {
     var privacy = PrivacyWatcher.shared
     var preferences = PreferencesStore.shared
     @State private var dropTargeted = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let waiting = store.waitingCount()
         ZStack(alignment: .top) {
-            NotchShape(top: state.isOpen ? NotchGeometry.shoulder : 0,
-                       bottom: state.isOpen ? NotchGeometry.openBottomRadius : NotchGeometry.closedBottomRadius)
+            NotchShape(top: NotchGeometry.shoulder * state.expansion,
+                       bottom: NotchGeometry.closedBottomRadius +
+                           (NotchGeometry.openBottomRadius - NotchGeometry.closedBottomRadius) * state.expansion)
                 .fill(.black)
+                .transaction { $0.animation = nil }
             if state.isOpen {
                 openContent(waiting: waiting)
-                    // 壳先撑开，内容晚 0.1 s 从模糊里浮出来；收起时直接淡掉，别在缩小的壳外面拖影
-                    .transition(AsymmetricTransition(
-                        insertion: BlurReplaceTransition(configuration: .downUp).animation(.smooth(duration: 0.3).delay(0.1)),
-                        removal: OpacityTransition().animation(.easeOut(duration: 0.12))
-                    ))
+                    .transition(.opacity)
             }
             // 闭合态什么都不画：刘海正下方是摄像头外壳，没有像素，画了也看不见（截图却拍得到）
         }
@@ -31,8 +30,7 @@ struct NotchView: View {
         .onChange(of: dropTargeted) { _, targeted in
             if targeted { state.dropEntered?() }
         }
-        // 圆角和窗口 frame 用同一条曲线、同一个时长，看起来才是一体的
-        .animation(.timingCurve(0.16, 1, 0.3, 1, duration: state.isOpen ? 0.38 : 0.30), value: state.isOpen)
+        .animation(.easeOut(duration: reduceMotion ? 0.12 : 0.18), value: state.isOpen)
     }
 
     // MARK: 展开态
@@ -47,24 +45,43 @@ struct NotchView: View {
                 Color.clear
                     .frame(width: NotchGeometry.headerGap(closedWidth: state.notchWidth), height: 1)
                 HStack(spacing: 6) {
-                    if waiting > 0 {
-                        WaitingBadge(count: waiting)
-                    }
-                    PrivacyDots(privacy: privacy)
                     if PreferencesStore.shared.prefs.keepAwakeButton {
                         KeepAwakeButton()
                     }
                     RefreshControl(page: state.page, usage: usage)
                     HeaderButton(symbol: "gearshape", help: "设置") { state.openSettings?() }
+                    Button {
+                        state.closePanel?()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .frame(width: 28, height: 28)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.10)))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("收起刘海窗")
+                    .help("收起刘海窗（⌥⇧T）")
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
             }
             // 内容比面板高时（代理组多）让它滚，不然 VStack 居中会把顶部裁掉。
             // 切页不做滑动过渡：窗口高度动画和页面滑动同时跑，每帧都要把新旧两页重新布局，曲线还不一样，看着卡。
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 6) {
-                    PageTitle(page: state.page)
-                    pageContent
+                LazyVStack(alignment: .leading, spacing: 6, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        pageContent
+                    } header: {
+                        HStack(spacing: 8) {
+                            PageTitle(page: state.page)
+                            if waiting > 0 {
+                                WaitingBadge(count: waiting)
+                            }
+                            PrivacyDots(privacy: privacy)
+                        }
+                        .background(.black)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .top)
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { state.reportContentHeight($0) }
@@ -183,6 +200,7 @@ enum PageSummary {
 struct KeepAwakeButton: View {
     var keepAwake = KeepAwake.shared
     var preferences = PreferencesStore.shared
+    @State private var hovered = false
 
     private static let clock: DateFormatter = {
         let f = DateFormatter()
@@ -192,13 +210,25 @@ struct KeepAwakeButton: View {
 
     var body: some View {
         let keepDisplay = preferences.prefs.keepAwakeDisplay
-        HeaderButton(symbol: keepAwake.isActive ? "cup.and.saucer.fill" : "cup.and.saucer", help: help,
-                     tint: keepAwake.isActive ? .orange : nil) {
+        Button {
             if keepAwake.isActive { keepAwake.stop() } else { keepAwake.start(minutes: nil, keepDisplay: keepDisplay) }
+        } label: {
+            Label(keepAwake.isActive ? "唤醒中" : "唤醒", systemImage: keepAwake.isActive ? "cup.and.saucer.fill" : "cup.and.saucer")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(keepAwake.isActive ? .orange : .white.opacity(0.85))
+                .frame(width: 72, height: 28)
+                .background(Capsule().fill(keepAwake.isActive ? .orange.opacity(hovered ? 0.26 : 0.18) : .white.opacity(hovered ? 0.16 : 0.09)))
+                .overlay(Capsule().stroke(keepAwake.isActive ? .orange.opacity(0.3) : .white.opacity(0.12), lineWidth: 1))
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .accessibilityLabel("保持唤醒")
+        .accessibilityValue(keepAwake.isActive ? "已开启" : "已关闭")
+        .help(help)
         .contextMenu {
             // 时长项做成带勾的：Button 天生不显示状态，杯子亮着菜单里也一个勾都没有，看不出开没开、开的是哪档
-            Toggle("一直保持唤醒", isOn: Binding(
+            Toggle("不限", isOn: Binding(
                 get: { keepAwake.isActive && keepAwake.until == nil },
                 set: { on in
                     if on { keepAwake.start(minutes: nil, keepDisplay: keepDisplay) } else { keepAwake.stop() }
@@ -244,11 +274,15 @@ struct KeepAwakeButton: View {
     }
 }
 
-/// 刷新当前页：AI 页刷用量（「更新于 HH:mm」放在按钮的提示里，60 秒内刚刷过就在旁边提示两秒），其他页立刻重采一次。
+// A skipped refresh is neutral; only an actual request can produce a success message.
 struct RefreshControl: View {
     let page: LaunchOptions.Page
     var usage: UsageStore
     @State private var throttled = false
+
+    private var isRefreshingUsage: Bool {
+        usage.isRefreshing
+    }
 
     private static let clock: DateFormatter = {
         let f = DateFormatter()
@@ -257,19 +291,23 @@ struct RefreshControl: View {
     }()
 
     var body: some View {
-        HStack(spacing: 4) {
-            if page == .ai, throttled {
-                Text("60 秒内刚刷过")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.orange)
+        let skipped = page == .ai && throttled
+        let refreshing = page == .ai && isRefreshingUsage
+        ZStack {
+            HeaderButton(symbol: skipped ? "clock" : "arrow.clockwise", help: help, action: refresh)
+                .opacity(refreshing ? 0 : 1)
+            if refreshing {
+                ProgressView().controlSize(.mini).tint(.white)
+                    .accessibilityLabel("正在刷新 AI 用量及账号配额")
             }
-            HeaderButton(symbol: "arrow.clockwise", help: help, dimmed: page == .ai && usage.isRefreshing, action: refresh)
-                .disabled(page == .ai && usage.isRefreshing)
         }
+        .disabled(refreshing)
+        .accessibilityLabel(refreshing ? "正在刷新" : (skipped ? "本次未刷新，请稍后重试" : "刷新当前页"))
     }
 
     private var help: String {
         guard page == .ai else { return "刷新这一页" }
+        if throttled { return "本次未刷新，请稍后重试" }
         return usage.lastRefreshed.map { "刷新用量（更新于 " + Self.clock.string(from: $0) + "）" } ?? "刷新用量"
     }
 
@@ -278,7 +316,7 @@ struct RefreshControl: View {
         case .ai, .settings:
             if usage.refresh(reason: .manual) {
                 throttled = false
-            } else if !usage.isRefreshing {
+            } else if !isRefreshingUsage {
                 throttled = true
                 Task { @MainActor in
                     try? await Task.sleep(for: .seconds(2))
@@ -314,19 +352,25 @@ struct CrewBadgeIcon: View {
     var elapsed: Double? = nil
     var badgeKind: BadgeLifecycle.Kind? = nil
     var motionOverride: CastMotion? = nil
+    var motionIsResolved = false
+    var motionSeed = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var prefs = PreferencesStore.shared
 
     var body: some View {
         Canvas { context, size in
-            guard let art = BloubArt.bundled, let picked = CrewPlayback.pick(mood: mood, tier: tier, elapsed: elapsed ?? 0, still: elapsed == nil, art: art),
+            let still = reduceMotion || elapsed == nil
+            guard let art = BloubArt.bundled, let picked = CrewPlayback.pick(mood: mood, tier: tier, elapsed: elapsed ?? 0, still: still, art: art),
                   let clip = art.clips[picked.clip] else { return }
             context.translateBy(x: size.width / 2, y: size.height / 2)
             context.scaleBy(x: size.width * (1 - inset * 2) / unit, y: size.height * (1 - inset * 2) / unit)
             let motion: CastMotion?
-            if let badgeKind { motion = CastMotion.forBadge(badgeKind, elapsed: elapsed) }
+            if reduceMotion { motion = nil }
+            else if motionIsResolved { motion = motionOverride }
+            else if let badgeKind { motion = CastMotion.forBadge(badgeKind, elapsed: elapsed) }
             else if let motionOverride { motion = motionOverride }
-            else { motion = CastMotion.forCrew(mood: mood, tier: tier, elapsed: elapsed ?? 0, phase: 0, still: elapsed == nil) }
-            let actor = CastActor(art: CrewCastStore.shared.art, member: cast, amp: elapsed == nil ? 0 : CastActor.amp(for: mood), frameIndex: picked.index, frameCount: clip.frames.count, motion: motion)
+            else { motion = CastMotion.forCrew(mood: mood, tier: tier, elapsed: elapsed ?? 0, phase: 0, still: still, seed: motionSeed) }
+            let actor = CastActor(art: CrewCastStore.shared.art, member: cast, amp: still ? 0 : CastActor.amp(for: mood), frameIndex: picked.index, frameCount: clip.frames.count, motion: motion)
             clip.frames[picked.index].draw(in: context, time: Double(picked.index) / clip.fps,
                                            style: CrewStyle.style(mood: mood, skin: prefs.prefs.crewSkin == "gradient" ? .gradient : .glass, tier: tier), actor: actor)
         }

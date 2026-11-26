@@ -12,6 +12,7 @@ struct CrewSlot: Equatable {
     /// 这个项目分到的角色（`CrewCastStore`）；「+N」胶囊是球
     var cast: CastMember = .ball
     var hasNewCompletion = false
+    var wokeAt: Date? = nil
 }
 
 /// 光标停在或点在哪一格。
@@ -43,6 +44,26 @@ enum CrewPlayback {
         return (choice.clip, clip.index(at: choice.time, loop: choice.loop))
     }
 
+    /// A wake gesture needs a whole visible face, even when the new clip starts as a symbol.
+    static func wakeMotion(mood: CrewMood, tier: CrewTier, elapsed: Double, phase: Double, still: Bool, art: BloubArt) -> CastMotion? {
+        guard !still, elapsed.isFinite, phase.isFinite, elapsed >= 0,
+              let clip = art.clips[mood.clip(tier: tier)], elapsed <= clip.duration + 0.8 else { return nil }
+        let span = Int(ceil(0.8 * clip.fps))
+        for offset in 0..<clip.frames.count {
+            let start = Double(offset) / clip.fps
+            let visibleCount = (0...span).prefix { step in
+                let frame = clip.frames[clip.index(at: phase + start + Double(step) / clip.fps, loop: true)]
+                return frame.eyeSpecs.count == 2 && frame.fit.sx > 0.6 && frame.fit.sy > 0.6
+            }.count
+            // Compacting only exposes a whole face briefly; finish before it splits again.
+            if visibleCount >= 6 {
+                let duration = Double(visibleCount - 1) / clip.fps
+                return CastMotion.forWake(elapsed: (elapsed - start) * 0.8 / duration)
+            }
+        }
+        return nil
+    }
+
 }
 
 /// 一帧一张位图：画一次存起来，之后每个时钟 tick 只换图层内容。
@@ -72,6 +93,9 @@ final class CrewFrameCache {
     let art: BloubArt
     let cast: CastArt
     private var images: [Key: CGImage] = [:]
+    static let capacity = 1024
+    private var insertionOrder: [Key] = []
+    private var evictionIndex = 0
 
     /// `cast` 不传就用进程内那份分配表的素材（默认参数在隔离外求值会报警，所以在体内兜底）
     init(art: BloubArt, cast: CastArt? = nil) {
@@ -96,6 +120,13 @@ final class CrewFrameCache {
         }.frame(width: Self.box.width, height: Self.box.height))
         renderer.scale = scale
         guard let image = renderer.cgImage else { return nil }
+        if insertionOrder.count == Self.capacity {
+            images.removeValue(forKey: insertionOrder[evictionIndex])
+            insertionOrder[evictionIndex] = key
+            evictionIndex = (evictionIndex + 1) % Self.capacity
+        } else {
+            insertionOrder.append(key)
+        }
         images[key] = image
         return image
     }
@@ -103,6 +134,8 @@ final class CrewFrameCache {
     /// 名册变了：不在屏上的那几套扔掉，内存只留当前角色的片段。
     func keep(_ looks: Set<Look>) {
         images = images.filter { looks.contains($0.key.look) }
+        insertionOrder = insertionOrder.filter { images[$0] != nil }
+        evictionIndex = 0
     }
 }
 
@@ -127,6 +160,8 @@ final class CrewStripView: NSView {
     var onHover: ((Int?) -> Void)?
     var onClick: ((Int) -> Void)?
     private var hovered: Int?
+    private var reduceMotion = false
+    private var clickedAt: [String: Date] = [:]
 
     init(side: CrewGeometry.Side) {
         self.side = side
@@ -141,10 +176,14 @@ final class CrewStripView: NSView {
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    func configure(slots: [CrewSlot], skin: BloubArt.Style.Skin, size: CGSize) {
+    func configure(slots: [CrewSlot], skin: BloubArt.Style.Skin, size: CGSize, reduceMotion: Bool = false, entering: Set<String> = []) {
+        let oldCells = Dictionary(uniqueKeysWithValues: zip(self.slots, cells).compactMap { slot, cell in slot.project.map { ($0.id, cell) } })
         let identitiesChanged = self.slots.map { $0.project?.id } != slots.map { $0.project?.id }
         self.slots = slots
         self.skin = skin
+        self.reduceMotion = reduceMotion
+        let activeIDs = Set(slots.compactMap { $0.project?.id })
+        clickedAt = clickedAt.filter { activeIDs.contains($0.key) }
         // 翼撤下再回来 AppKit 不补 mouseExited，槽重排后旧编号也不作数：忘掉上次报过的格，下一次移动照常报
         hovered = nil
         let scale = window?.backingScaleFactor ?? 2
@@ -160,12 +199,28 @@ final class CrewStripView: NSView {
         shown = Array(repeating: nil, count: slots.count)
         for (index, slot) in slots.enumerated() {
             let center = CrewGeometry.slotCenterX(side: side, index: index, slots: slots.count)
-            let cell = CALayer()
+            let cell = slot.project.flatMap { oldCells[$0.id] } ?? CALayer()
+            if reduceMotion { cell.removeAllAnimations() }
             cell.frame = CGRect(x: center - CrewFrameCache.anchor.x, y: 0, width: CrewFrameCache.box.width, height: CrewFrameCache.box.height)
             cell.contentsScale = scale
             cell.contentsGravity = .resize
             layer?.addSublayer(cell)
             cells.append(cell)
+            if let id = slot.project?.id, entering.contains(id), !reduceMotion {
+                let lift = CAKeyframeAnimation(keyPath: "transform.translation.y")
+                lift.values = [8, -1.5, 0]
+                lift.keyTimes = [0, 0.7, 1]
+                let scale = CAKeyframeAnimation(keyPath: "transform.scale")
+                scale.values = [0.65, 1.06, 1]
+                scale.keyTimes = [0, 0.7, 1]
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 0; fade.toValue = 1
+                let group = CAAnimationGroup()
+                group.animations = [lift, scale, fade]
+                group.duration = 0.35
+                group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                cell.add(group, forKey: "arrival")
+            }
             if slot.hasNewCompletion {
                 let dot = CAShapeLayer()
                 dot.frame = CGRect(x: center + 7, y: 4, width: 6, height: 6)
@@ -215,7 +270,11 @@ final class CrewStripView: NSView {
             let age = max(0, now.timeIntervalSince(slot.startedAt))
             let elapsed = age + slot.phase
             guard let picked = CrewPlayback.pick(mood: project.mood, tier: project.tier, elapsed: elapsed, still: still, art: cache.art) else { continue }
-            let motion = CastMotion.forCrew(mood: project.mood, tier: project.tier, elapsed: age, phase: slot.phase, still: still)
+            let wake = slot.wokeAt.flatMap { CrewPlayback.wakeMotion(mood: project.mood, tier: project.tier,
+                elapsed: now.timeIntervalSince($0), phase: slot.phase, still: still, art: cache.art) }
+            let click = clickedAt[project.id].flatMap { CastMotion.forClick(elapsed: now.timeIntervalSince($0), still: still) }
+            let motion = click ?? wake ?? CastMotion.forCrew(mood: project.mood, tier: project.tier, elapsed: age, phase: slot.phase, still: still,
+                seed: CrewRoster.bucket(project.id, of: 997))
             let key = CrewFrameCache.Key(clip: picked.clip, index: picked.index, look: .init(mood: project.mood, tier: project.tier, skin: skin, cast: slot.cast), still: still, motion: motion)
             guard shown[index] != key, let image = cache.image(key, scale: scale) else { continue }
             cells[index].contents = image
@@ -232,6 +291,37 @@ final class CrewStripView: NSView {
         CATransaction.commit()
     }
 
+    func image(at index: Int) -> CGImage? {
+        guard cells.indices.contains(index) else { return nil }
+        return cells[index].contents as! CGImage?
+    }
+
+    func coverForClick(_ index: Int) {
+        guard cells.indices.contains(index), !reduceMotion else { return }
+        let cover = CABasicAnimation(keyPath: "opacity")
+        cover.fromValue = 0; cover.toValue = 0
+        cover.duration = CrewFeedbackPanel.duration
+        cells[index].add(cover, forKey: "click-cover")
+    }
+
+    func clickFeedback(_ index: Int) {
+        guard slots.indices.contains(index) else { return }
+        if let id = slots[index].project?.id { clickedAt[id] = Date() }
+        if !reduceMotion {
+            let bounce = CAKeyframeAnimation(keyPath: "transform.scale")
+            bounce.values = [1, 0.84, 1.12, 1]
+            bounce.keyTimes = [0, 0.2, 0.55, 1]
+            bounce.duration = 0.32
+            cells[index].add(bounce, forKey: "click")
+        }
+    }
+
+    func click(_ index: Int) {
+        guard slots.indices.contains(index) else { return }
+        clickFeedback(index)
+        onClick?(index)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for area in trackingAreas { removeTrackingArea(area) }
@@ -245,7 +335,14 @@ final class CrewStripView: NSView {
 
     private func report(_ slot: Int?) {
         guard slot != hovered else { return }
+        if let previous = hovered, cells.indices.contains(previous) { cells[previous].removeAnimation(forKey: "attention") }
         hovered = slot
+        if let slot, cells.indices.contains(slot), !reduceMotion {
+            let lift = CAKeyframeAnimation(keyPath: "transform.translation.y")
+            lift.values = [0, -1.5, 0]
+            lift.duration = 0.35
+            cells[slot].add(lift, forKey: "attention")
+        }
         onHover?(slot)
     }
 
@@ -253,7 +350,7 @@ final class CrewStripView: NSView {
     override func mouseMoved(with event: NSEvent) { report(slot(for: event)) }
     override func mouseExited(with event: NSEvent) { report(nil) }
     override func mouseDown(with event: NSEvent) {
-        if let slot = slot(for: event) { onClick?(slot) }
+        if let slot = slot(for: event) { click(slot) }
     }
     override func rightMouseDown(with event: NSEvent) {}
 
@@ -270,8 +367,8 @@ final class CrewStripView: NSView {
             element.setAccessibilityFrame(window.convertToScreen(convert(rect, to: nil)))
             let projectID = slot.project?.id
             element.activate = { [weak self] in
-                guard let self, let current = self.slots.firstIndex(where: { $0.project?.id == projectID }), let onClick = self.onClick else { return false }
-                onClick(current)
+                guard let self, let current = self.slots.firstIndex(where: { $0.project?.id == projectID }), self.onClick != nil else { return false }
+                self.click(current)
                 return true
             }
             return element
@@ -320,7 +417,12 @@ final class CrewController {
     private(set) var layout = CrewLayout(right: [], left: [], overflow: 0)
     private var sessions: [SessionRecord] = []
     private var completionIDs: Set<String> = []
-    private var playback: [String: (mood: CrewMood, tier: CrewTier, startedAt: Date)] = [:]
+    private var playback: [String: (mood: CrewMood, tier: CrewTier, startedAt: Date, wokeAt: Date?)] = [:]
+    private var arrivals: Set<String> = []
+    private var departures: [String: CrewFeedbackPanel] = [:]
+    private var clickPanel: CrewFeedbackPanel?
+    private var confirmedClosures: Set<String> = []
+    private var missingProjects: [String: Set<String>] = [:]
     private var wings: [CrewGeometry.Side: CrewPanel] = [:]
     private var dropdown: CrewDropdownPanel?
     private var avatar: CrewAvatarPanel?
@@ -329,6 +431,7 @@ final class CrewController {
     private var metrics: ScreenMetrics?
     private var enabled = false
     private var perSide = 3
+    private var spillRight = false
     private var skin: BloubArt.Style.Skin = .glass
     private var sharingType: NSWindow.SharingType = .readOnly
     /// 面板展开或全屏隐藏期间两翼整个不上屏
@@ -339,18 +442,34 @@ final class CrewController {
     private var observers: [NSObjectProtocol] = []
     private var staleTimer: Timer?
     private var clock: Timer?
+    /// 量到的菜单右缘（相对菜单栏左缘）和它是哪个 app 的；nil 是还没量到或读不到
+    private var menuBarEnd: CGFloat?
+    private var menuBarPid: pid_t?
+    private var roomTimer: Timer?
+    private var roomReading = false
+    /// 量一个 app 的菜单排到哪儿。测试不注入就不量：xctest 从授权过辅助功能的终端里跑时，量到的是当时前台那个 app 的菜单
+    private let readMenuEnd: (@Sendable (pid_t) -> CGFloat?)?
     private let cache: CrewFrameCache?
     /// 角色分配表和目录规范化缓存都在它那儿，AI 页、药丸、工牌查的是同一张表
     private let cast: CrewCastStore
 
     var frameCache: CrewFrameCache? { cache }
+    /// 菜单栏给两翼留的格数（docs/crew.md「让开菜单」）：按量到的菜单右缘和当前屏幕现算，屏幕变了不用重量；nil 照 perSide 排
+    var room: CrewRoom? {
+        guard let menuBarEnd, let metrics else { return nil }
+        return MenuBarRoom.room(menuEnd: menuBarEnd, on: metrics)
+    }
     var clockInterval: Double? { clock?.timeInterval }
     var dropdownWindow: NSPanel? { dropdown }
     var avatarWindow: NSPanel? { avatar }
+    var departureWindows: [NSPanel] { Array(departures.values) }
+    var clickWindow: NSPanel? { clickPanel }
 
-    init(art: BloubArt? = .bundled, cast: CrewCastStore? = nil) {
+    init(art: BloubArt? = .bundled, cast: CrewCastStore? = nil, menuEnd: (@Sendable (pid_t) -> CGFloat?)? = nil, motionReduced: Bool? = nil) {
         let cast = cast ?? .shared
         self.cast = cast
+        if let motionReduced { reduceMotion = motionReduced }
+        readMenuEnd = menuEnd
         if let art {
             cache = CrewFrameCache(art: art, cast: cast.art)
         } else {
@@ -363,12 +482,15 @@ final class CrewController {
     func wing(_ side: CrewGeometry.Side) -> NSPanel? { wings[side] }
 
     /// 设置变了：关掉就撤窗口、停时钟、摘观察者。
-    func apply(enabled: Bool, perSide: Int, skin: BloubArt.Style.Skin, sharingType: NSWindow.SharingType) {
+    func apply(enabled: Bool, perSide: Int, skin: BloubArt.Style.Skin, sharingType: NSWindow.SharingType, spillRight: Bool = false) {
         self.enabled = enabled && cache != nil
         self.perSide = CrewRoster.perSide(perSide)
+        self.spillRight = spillRight
         self.skin = skin
         self.sharingType = sharingType
         for wing in wings.values { wing.sharingType = sharingType }
+        for panel in departures.values { panel.sharingType = sharingType }
+        clickPanel?.sharingType = sharingType
         dropdown?.sharingType = sharingType
         avatar?.sharingType = sharingType
         if self.enabled {
@@ -385,9 +507,15 @@ final class CrewController {
             avatarID = nil
             avatarTarget = nil
             playback.removeAll()
+            confirmedClosures.removeAll()
+            missingProjects.removeAll()
+            arrivals.removeAll()
+            clearFeedback()
             projects.removeAll()
             layout = CrewLayout(right: [], left: [], overflow: 0)
             expanded = nil
+            menuBarEnd = nil
+            menuBarPid = nil
             cache?.keep([])
         }
         refresh(sessions)
@@ -395,10 +523,13 @@ final class CrewController {
 
     func relayout(metrics: ScreenMetrics?) {
         if self.metrics != metrics {
+            clearFeedback()
             onDismiss?()
             expanded = nil
         }
         self.metrics = metrics
+        // 每侧能放几格是按刘海位置算的：屏幕变了当场按新的重排，不等下一次量
+        if enabled { layout = CrewRoster.layout(projects, perSide: perSide, room: room, spillRight: spillRight) }
         render()
     }
 
@@ -428,19 +559,52 @@ final class CrewController {
     }
 
     /// 会话变了（或过了一分钟，失联要按时间翻）：重算名册，mood 变了的槽重置时间原点。
+    func observeClosures(_ records: [SessionRecord]) {
+        confirmedClosures = Set(records.filter { $0.state == .ended }.map { "\(CrewRoster.tool(of: $0)):\($0.sessionId)" })
+    }
+
     func refresh(_ sessions: [SessionRecord], now: Date = Date(), completionIDs: Set<String>? = nil) {
         self.sessions = sessions
         if let completionIDs { self.completionIDs = completionIDs }
         guard enabled else { return }
+        let previous = projects
+        let previousIDs = Set(previous.map(\.id))
         projects = CrewRoster.projects(sessions, now: now, canonicalize: cast.canonicalize)
-        var next: [String: (mood: CrewMood, tier: CrewTier, startedAt: Date)] = [:]
+        let currentIDs = Set(projects.map(\.id))
+        for id in currentIDs { departures.removeValue(forKey: id)?.close() }
+        // Missing files are not evidence of a closed session; the loader also supplies one-shot end records.
+        let ended = confirmedClosures.union(sessions.filter { $0.state == .ended }.map { "\(CrewRoster.tool(of: $0)):\($0.sessionId)" })
+        let hasEnded: (CrewProject) -> Bool = { project in
+            project.sessions.allSatisfy { ended.contains("\(CrewRoster.tool(of: $0)):\($0.sessionId)") }
+        }
+        let retired = Set(previous.filter { !currentIDs.contains($0.id) && hasEnded($0) }.map(\.id))
+        // A recovered snapshot is not a new hire. Keep bounded identity memory, like badge lifecycle tracking.
+        missingProjects = missingProjects.compactMapValues { identities in
+            let remaining = identities.subtracting(ended)
+            return remaining.isEmpty ? nil : remaining
+        }
+        arrivals = currentIDs.subtracting(previousIDs).subtracting(missingProjects.keys)
+        missingProjects = missingProjects.filter { !currentIDs.contains($0.key) }
+        for project in previous where !currentIDs.contains(project.id) && !retired.contains(project.id) {
+            if missingProjects.count >= 500, let evicted = missingProjects.keys.first { missingProjects.removeValue(forKey: evicted) }
+            missingProjects[project.id] = Set(project.sessions.map { "\(CrewRoster.tool(of: $0)):\($0.sessionId)" }).subtracting(ended)
+        }
+        confirmedClosures.removeAll()
+        retire(retired)
+        var next: [String: (mood: CrewMood, tier: CrewTier, startedAt: Date, wokeAt: Date?)] = [:]
         for project in projects {
             // 变档和变 mood 一样换片段，从头播
-            next[project.id] = playback[project.id].flatMap { $0.mood == project.mood && $0.tier == project.tier ? $0 : nil } ?? (project.mood, project.tier, now)
+            if let old = playback[project.id], old.mood == project.mood && old.tier == project.tier {
+                next[project.id] = old
+            } else {
+                let wake = playback[project.id].map { CastMotion.shouldWake(from: $0.mood, tier: $0.tier, to: project.mood, tier: project.tier) } ?? false
+                next[project.id] = (project.mood, project.tier, now, wake ? now : nil)
+            }
         }
         playback = next
-        layout = CrewRoster.layout(projects, perSide: perSide)
+        layout = CrewRoster.layout(projects, perSide: perSide, room: room, spillRight: spillRight)
         render()
+        arrivals.removeAll()
         rosterChanged?(projects)
     }
 
@@ -449,7 +613,8 @@ final class CrewController {
         var slots = shown.map { project in
             let startedAt = playback[project.id]?.startedAt ?? Date()
             return CrewSlot(project: project, overflow: 0, startedAt: startedAt, phase: Double(CrewRoster.bucket(project.id + "·phase", of: 6)) * 0.41,
-                            cast: cast.member(forKey: project.id), hasNewCompletion: project.sessions.contains { completionIDs.contains($0.sessionId) })
+                            cast: cast.member(forKey: project.id), hasNewCompletion: project.sessions.contains { completionIDs.contains($0.sessionId) },
+                            wokeAt: playback[project.id]?.wokeAt)
         }
         if side == layout.overflowSide, layout.overflow > 0 {
             let visibleIDs = Set((layout.left + layout.right).map(\.id))
@@ -459,8 +624,78 @@ final class CrewController {
         return slots
     }
 
+    private func clearFeedback() {
+        clickPanel?.close()
+        clickPanel = nil
+        for panel in departures.values { panel.close() }
+        departures.removeAll()
+    }
+
+    private func retire(_ ids: Set<String>) {
+        guard enabled, !hidden, !asleep, !reduceMotion, metrics != nil, let cache else { return }
+        for wing in wings.values where wing.isVisible {
+            for (index, slot) in wing.strip.slots.enumerated() {
+                guard let project = slot.project, ids.contains(project.id) else { continue }
+                let clipName = project.mood.clip(tier: project.tier)
+                let portrait = cache.art.clips[clipName].flatMap { clip -> CGImage? in
+                    guard let frame = clip.frames.firstIndex(where: { $0.eyeSpecs.count == 2 && $0.fit.sx > 0.8 && $0.fit.sy > 0.8 }) else { return nil }
+                    return cache.image(.init(clip: clipName, index: frame,
+                        look: .init(mood: project.mood, tier: project.tier, skin: skin, cast: slot.cast), still: true,
+                        motion: CastMotion(kind: .farewell, step: 10)), scale: wing.backingScaleFactor)
+                } ?? wing.strip.image(at: index)
+                guard let portrait else { continue }
+                let center = CrewGeometry.slotCenterX(side: wing.strip.side, index: index, slots: wing.strip.slots.count)
+                let rect = CGRect(x: center - CrewFrameCache.anchor.x, y: 0, width: CrewFrameCache.box.width, height: CrewFrameCache.box.height)
+                let frame = wing.convertToScreen(wing.strip.convert(rect, to: nil))
+                departures.removeValue(forKey: project.id)?.close()
+                if departures.count >= 8, let oldest = departures.keys.first { departures.removeValue(forKey: oldest)?.close() }
+                let panel = CrewFeedbackPanel(frame: frame, image: portrait, sharingType: sharingType)
+                departures[project.id] = panel
+                panel.animate(.departure) { [weak self, weak panel] in
+                    panel?.close()
+                    if self?.departures[project.id] === panel { self?.departures.removeValue(forKey: project.id) }
+                }
+            }
+        }
+    }
+
+    func select(_ session: SessionRecord, from hover: CrewHover) {
+        respondToClick(hover) { onSessionClick?(session) }
+    }
+
+    private func respondToClick(_ hover: CrewHover, action: () -> Void) {
+        // Capture before navigation dismisses the source, then let the response outlive that dismissal.
+        let response: CrewFeedbackPanel? = {
+            guard enabled, !hidden, !asleep, !reduceMotion, let wing = wings[hover.side], wing.isVisible else { return nil }
+            if expanded?.sameSlot(as: hover) == true, let avatar, avatar.isVisible,
+               let view = avatar.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                if let image = bitmap.cgImage { return CrewFeedbackPanel(frame: avatar.frame, image: image, sharingType: sharingType) }
+            }
+            let center = CrewGeometry.slotCenterX(side: hover.side, index: hover.index, slots: wing.strip.slots.count)
+            let rect = CGRect(x: center - CrewFrameCache.anchor.x, y: 0, width: CrewFrameCache.box.width, height: CrewFrameCache.box.height)
+            var image = wing.strip.image(at: hover.index)
+            if image == nil, let bitmap = wing.strip.bitmapImageRepForCachingDisplay(in: rect) {
+                wing.strip.cacheDisplay(in: rect, to: bitmap)
+                image = bitmap.cgImage
+            }
+            guard let image else { return nil }
+            return CrewFeedbackPanel(frame: wing.convertToScreen(wing.strip.convert(rect, to: nil)), image: image, sharingType: sharingType)
+        }()
+        action()
+        guard let response, enabled, !asleep, !reduceMotion, metrics != nil else { return }
+        wings[hover.side]?.strip.coverForClick(hover.index)
+        clickPanel?.close()
+        clickPanel = response
+        response.animate(.click) { [weak self, weak response] in
+            response?.close()
+            if self?.clickPanel === response { self?.clickPanel = nil }
+        }
+    }
+
     private func render() {
         guard enabled, !hidden, let metrics, let cache else {
+            clearFeedback()
             for wing in wings.values { wing.orderOut(nil) }
             dropdown?.orderOut(nil)
             avatar?.orderOut(nil)
@@ -484,13 +719,13 @@ final class CrewController {
                 wing.strip.onHover = { [weak self] index in self?.hovered(side: side, index: index) }
                 wing.strip.onClick = { [weak self] index in
                     guard let self, let hover = self.hover(side: side, index: index) else { return }
-                    self.onClick?(hover)
+                    self.respondToClick(hover) { self.onClick?(hover) }
                 }
                 wings[side] = wing
             }
             wing.sharingType = sharingType
             wing.setFrame(frame, display: false)
-            wing.strip.configure(slots: slots, skin: skin, size: frame.size)
+            wing.strip.configure(slots: slots, skin: skin, size: frame.size, reduceMotion: reduceMotion, entering: arrivals)
             for slot in slots { if let project = slot.project { looks.insert(.init(mood: project.mood, tier: project.tier, skin: skin, cast: slot.cast)) } }
             if !wing.isVisible { wing.orderFrontRegardless() }
         }
@@ -510,7 +745,9 @@ final class CrewController {
             avatarTarget = nil
             return
         }
-        let select: (SessionRecord) -> Void = { [weak self] session in self?.onSessionClick?(session) }
+        let select: (SessionRecord) -> Void = { [weak self] session in
+            self?.select(session, from: hover)
+        }
         let panel: CrewDropdownPanel
         if let existing = dropdown {
             panel = existing
@@ -536,7 +773,9 @@ final class CrewController {
         avatar = moving
         moving.sharingType = sharingType
         let restart = avatarID != project.id || !moving.isVisible
-        moving.update(mood: project.mood, tier: project.tier, cast: portrait, restart: restart)
+        moving.update(mood: project.mood, tier: project.tier, cast: portrait, restart: restart,
+                      startedAt: hover.slot.startedAt, phase: hover.slot.phase, seed: CrewRoster.bucket(project.id, of: 997), wokeAt: hover.slot.wokeAt,
+                      animating: !asleep)
         if restart {
             let start = CGRect(x: anchorX - 11, y: wing.frame.maxY - CrewGeometry.bodyCenterY - 11, width: 22, height: 22)
             moving.setFrame(reduceMotion ? target : start, display: true)
@@ -555,8 +794,63 @@ final class CrewController {
         avatarTarget = target
     }
 
-    /// 时钟只在两翼真的在屏上、而且该动的时候走；减少动态效果时停表、只画静态帧。
+    /// 读了一次 `pid` 的菜单：`end` 是菜单右缘（相对菜单栏左缘），nil 是没读到。每侧能放几格变了就重排。
+    /// 没读到时，同一个 app 沿用上一次的（对方一时没响应，这一轮不算）；换了 app 就不能接着用上一个 app 的——
+    /// 它要是把两翼挤没了，小人会一直不见——回到不限。关掉开关后才回来的那一次不算。
+    func menuBarRead(pid: pid_t, end: CGFloat?) {
+        guard enabled, end != nil || pid != menuBarPid else { return }
+        let before = room
+        menuBarPid = pid
+        menuBarEnd = end
+        // 「小人怎么少了 / 怎么又压菜单了」只能靠这两行查：容量是跟着前台 app 变的，事后看不出来
+        if end == nil { Log.debug("读不到 pid \(pid) 的菜单排到哪儿（没给辅助功能权限、对方没响应或没有菜单栏），两翼不让") }
+        guard room != before else { return }
+        clearFeedback()
+        if let end, let room { Log.debug("菜单排到 \(Int(end))pt：两翼容量 左 \(room.left) 右 \(room.right == .max ? "不限" : String(room.right))") }
+        // 走 refresh：悬停着的那格可能挪了位，跟名册变了是同一套收尾
+        refresh(sessions)
+    }
+
+    /// 问一次菜单栏属主的菜单排到哪儿。在后台队列问：对方卡住时要等满超时，不能堵主线程；上一次还没回来就不再问。
+    private func measureRoom() {
+        guard let readMenuEnd, enabled, metrics != nil, !roomReading,
+              let pid = NSWorkspace.shared.menuBarOwningApplication?.processIdentifier else { return }
+        roomReading = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let end = readMenuEnd(pid)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.roomReading = false
+                    // 问的这会儿菜单栏换了属主：这个结果是上一个 app 的，丢掉重问
+                    guard NSWorkspace.shared.menuBarOwningApplication?.processIdentifier == pid else { return self.measureRoom() }
+                    self.menuBarRead(pid: pid, end: end)
+                }
+            }
+        }
+    }
+
+    /// 有项目可画、两翼没被藏起时每 2 秒量一次：切 app 有通知，但 app 刚启动时菜单晚几秒才齐、有的 app 运行中增减菜单，没有通知可听。
+    /// 不看翼在不在屏上：被菜单挤到一格不剩时也得接着量，不然菜单变短了回不来。
+    private func scheduleRoomPoll() {
+        guard readMenuEnd != nil, enabled, !hidden, !asleep, metrics != nil, !projects.isEmpty else {
+            roomTimer?.invalidate()
+            roomTimer = nil
+            return
+        }
+        guard roomTimer == nil else { return }
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.measureRoom() }
+        }
+        timer.tolerance = 0.5
+        RunLoop.main.add(timer, forMode: .common)
+        roomTimer = timer
+        measureRoom()
+    }
+
+    /// 时钟只在两翼真的在屏上、而且该动的时候走；减少动态效果时停表、只画静态帧。量菜单的定时器跟它同一批时机起停。
     private func scheduleClock() {
+        scheduleRoomPoll()
         let running = enabled && !hidden && !asleep && !reduceMotion && wings.values.contains { $0.isVisible }
         guard running else {
             clock?.invalidate()
@@ -605,6 +899,8 @@ final class CrewController {
                 Task { @MainActor in
                     guard let self, self.asleep != pause else { return }
                     self.asleep = pause
+                    if pause { self.clearFeedback() }
+                    self.avatar?.setAnimating(!pause && self.avatar?.isVisible == true)
                     self.scheduleClock()
                 }
             }
@@ -613,11 +909,21 @@ final class CrewController {
             Task { @MainActor in
                 guard let self else { return }
                 self.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                if self.reduceMotion { self.clearFeedback() }
                 self.render()
             }
         })
         observers.append(NotificationCenter.default.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.scheduleClock() }
+        })
+        // 切 app 菜单栏当场换，不等 2 秒那一轮；两翼藏着（面板展开）时也量，收起回来就是准的。
+        // 通知到的那一刻菜单栏可能还没换属主、刚启动的 app 也可能还答不上来（实测切过去 1.4 秒翼还是上一个 app 的排法），半秒后补量一次
+        observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.measureRoom()
+                try? await Task.sleep(for: .seconds(0.5))
+                self?.measureRoom()
+            }
         })
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh(self?.sessions ?? []) }
@@ -639,5 +945,7 @@ final class CrewController {
         staleTimer = nil
         clock?.invalidate()
         clock = nil
+        roomTimer?.invalidate()
+        roomTimer = nil
     }
 }

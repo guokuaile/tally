@@ -1,4 +1,5 @@
 import AppKit
+import os
 import XCTest
 @testable import Tally
 
@@ -53,6 +54,28 @@ final class NotchPanelTests: XCTestCase {
         let original = pill.level
         NotchPanel.steppingAside { XCTAssertLessThan(pill.level.rawValue, NSWindow.Level.modalPanel.rawValue) }
         XCTAssertEqual(pill.level, original)
+    }
+
+    @MainActor
+    func testRetiringBadgeStopsAcceptingClicksAndOnlyFadesWithReducedMotion() throws {
+        _ = NSApplication.shared
+        var clicks = 0
+        let peek = Peek(id: "badge", style: .badge, tint: .green, label: "入职", title: "test", subtitle: nil, sessionId: "s")
+        let pill = PillNotificationPanel(peek: peek, isInteractive: true) { clicks += 1 }
+        defer { pill.close() }
+        let frame = CGRect(x: 400, y: 300, width: 300, height: 370)
+        pill.setFrame(frame, display: false)
+        pill.retireBadge(duration: 0, reduceMotion: true)
+        XCTAssertTrue(pill.ignoresMouseEvents)
+        XCTAssertEqual(pill.frame, frame)
+        XCTAssertEqual(pill.alphaValue, 0)
+        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: CGPoint(x: 150, y: 180),
+                                                     modifierFlags: [], timestamp: 0, windowNumber: pill.windowNumber,
+                                                     context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        pill.contentView?.mouseDown(with: event)
+        XCTAssertEqual(clicks, 0)
+        pill.retireBadge(duration: 0, reduceMotion: false)
+        XCTAssertEqual(pill.frame, frame, "Refreshing the queue must not restart the exit")
     }
 }
 
@@ -223,6 +246,156 @@ final class CrewWingTests: XCTestCase {
         XCTAssertFalse(right.isVisible)
     }
 
+    /// 让开菜单（docs/crew.md）：量到菜单排到哪儿，两翼就缩到哪儿；菜单变短了再放回来。
+    @MainActor
+    func testWingsYieldToTheMenuBar() throws {
+        _ = NSApplication.shared
+        let crew = CrewController(art: try art())
+        let now = Date()
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly)
+        crew.relayout(metrics: m14)
+        crew.refresh(DemoData.sessions(now: now, overflow: false), now: now)
+        defer { crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly) }
+        let right = try XCTUnwrap(crew.wing(.right)), left = try XCTUnwrap(crew.wing(.left))
+        XCTAssertNil(crew.room, "没注入量菜单的函数：不量，照 perSide 排")
+        XCTAssertEqual(left.frame.minX, 554)
+
+        crew.menuBarRead(pid: 1, end: 592)
+        XCTAssertEqual(crew.room, CrewRoom(left: 1, right: .max))
+        XCTAssertGreaterThanOrEqual(left.frame.minX, 592, "Chrome 的菜单排到 592：左翼不能压过去")
+        XCTAssertEqual(crew.layout.leftSlots, 1)
+        XCTAssertEqual(crew.layout.rightSlots, 3, "右翼两个角色加胶囊")
+        XCTAssertEqual(crew.layout.overflow, 3)
+        XCTAssertEqual(crew.layout.overflowSide, .right)
+        XCTAssertEqual(right.frame, CGRect(x: 836, y: 950, width: 121, height: 32), "右翼不动")
+
+        crew.menuBarRead(pid: 1, end: 700)
+        XCTAssertFalse(left.isVisible, "菜单折过刘海：两翼都撤下")
+        XCTAssertFalse(right.isVisible)
+        XCTAssertFalse(crew.projects.isEmpty, "名册还在，只是没地方画")
+
+        crew.menuBarRead(pid: 1, end: 365)
+        XCTAssertTrue(left.isVisible, "切回菜单短的 app：两翼回来")
+        XCTAssertEqual(left.frame, CGRect(x: 554, y: 950, width: 121, height: 32))
+        XCTAssertEqual(crew.layout.overflow, 0)
+
+        crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly)
+        XCTAssertNil(crew.room, "关掉开关忘掉量到的结果")
+    }
+
+    /// 读不到菜单时：同一个 app 沿用上一次的，换了 app 不能接着用上一个 app 的（它把两翼挤没了的话小人会一直不见）。
+    @MainActor
+    func testUnreadableMenuBarKeepsTheSameAppsRoomButNotAnotherApps() throws {
+        _ = NSApplication.shared
+        let crew = CrewController(art: try art())
+        let now = Date()
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly)
+        crew.relayout(metrics: m14)
+        crew.refresh(DemoData.sessions(now: now, overflow: false), now: now)
+        defer { crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly) }
+        let left = try XCTUnwrap(crew.wing(.left)), right = try XCTUnwrap(crew.wing(.right))
+
+        crew.menuBarRead(pid: 1, end: 700)
+        XCTAssertFalse(left.isVisible)
+        XCTAssertFalse(right.isVisible)
+        crew.menuBarRead(pid: 1, end: nil)
+        XCTAssertEqual(crew.room, CrewRoom(left: 0, right: 0), "同一个 app 一时没响应：这一轮不算")
+
+        crew.menuBarRead(pid: 2, end: nil)
+        XCTAssertNil(crew.room, "换了 app 又读不到：回到不限")
+        XCTAssertTrue(left.isVisible, "两翼回来，不跟着上一个 app 一直藏着")
+        XCTAssertTrue(right.isVisible)
+        XCTAssertEqual(crew.layout.leftSlots, 3)
+
+        crew.menuBarRead(pid: 2, end: 592)
+        XCTAssertEqual(crew.room, CrewRoom(left: 1, right: .max), "之后读到了照常让开")
+        crew.menuBarRead(pid: 2, end: nil)
+        XCTAssertEqual(crew.room, CrewRoom(left: 1, right: .max))
+    }
+
+    /// 格数按当前屏幕现算：屏幕变了不等下一次量；关掉开关后才回来的那一次读取不算。
+    @MainActor
+    func testRoomFollowsTheScreenAndIgnoresReadsAfterDisable() throws {
+        _ = NSApplication.shared
+        let crew = CrewController(art: try art())
+        let now = Date()
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly)
+        crew.relayout(metrics: m14)
+        crew.refresh(DemoData.sessions(now: now, overflow: false), now: now)
+        crew.menuBarRead(pid: 1, end: 592)
+        XCTAssertEqual(crew.layout.leftSlots, 1)
+        // 16 寸：刘海左缘在 771，同样排到 592 的菜单离刘海远得多
+        let m16 = ScreenMetrics(frame: CGRect(x: 0, y: 0, width: 1728, height: 1117), auxiliaryTopLeftWidth: 771, auxiliaryTopRightWidth: 772, safeAreaTop: 32)
+        crew.relayout(metrics: m16)
+        XCTAssertEqual(crew.room, CrewRoom(left: 5, right: .max))
+        XCTAssertEqual(crew.layout.leftSlots, 3, "换屏当场按新的刘海位置重排")
+        XCTAssertEqual(crew.layout.overflow, 0)
+
+        crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly)
+        crew.menuBarRead(pid: 1, end: 700)
+        XCTAssertNil(crew.room, "关掉开关后在途的读取回来了：不写回去")
+    }
+
+    /// 「左边放不下时挪到右边」开着：左翼缩到一格，右翼接走其余五个，开关一拨当场重排。
+    @MainActor
+    func testSpillRightWidensTheRightWingInsteadOfFolding() throws {
+        _ = NSApplication.shared
+        let crew = CrewController(art: try art())
+        let now = Date()
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly, spillRight: true)
+        crew.relayout(metrics: m14)
+        crew.refresh(DemoData.sessions(now: now, overflow: false), now: now)
+        defer { crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly) }
+        let right = try XCTUnwrap(crew.wing(.right)), left = try XCTUnwrap(crew.wing(.left))
+        XCTAssertEqual(right.frame.width, 121, "菜单没挤过来：照旧三格")
+
+        crew.menuBarRead(pid: 1, end: 592)
+        XCTAssertEqual(left.frame, CGRect(x: 616, y: 950, width: 59, height: 32))
+        XCTAssertEqual(right.frame, CGRect(x: 836, y: 950, width: 183, height: 32), "右翼五格")
+        XCTAssertEqual(crew.layout.overflow, 0, "六个都在")
+
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly, spillRight: false)
+        XCTAssertEqual(right.frame.width, 121, "关掉开关：右翼回到上限，多的折进胶囊")
+        XCTAssertEqual(crew.layout.overflow, 3)
+    }
+
+    /// 注入的函数真的被问到：有项目可画时自己起一轮，在后台队列问完回主线程重排。
+    @MainActor
+    func testWingsMeasureTheMenuBarOwnerOnTheirOwn() throws {
+        _ = NSApplication.shared
+        try XCTSkipIf(NSWorkspace.shared.menuBarOwningApplication == nil, "没有图形会话：菜单栏没有属主，问不到谁")
+        let crew = CrewController(art: try art(), menuEnd: { _ in 592 })
+        let now = Date()
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly)
+        crew.relayout(metrics: m14)
+        defer { crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly) }
+        crew.refresh(DemoData.sessions(now: now, overflow: false), now: now)
+        let deadline = Date().addingTimeInterval(3)
+        while crew.room == nil, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertEqual(crew.room, CrewRoom(left: 1, right: .max))
+        XCTAssertEqual(crew.layout.leftSlots, 1)
+    }
+
+    /// 切 app 那一刻读不到（菜单栏还没换属主、app 刚启动）：半秒后补量一次，不等 2 秒那一轮。
+    /// 名册空着所以 2 秒的定时器没起，量到只能靠切 app 的通知。按时间而不是按次数放行：跑测试时人在真切 app，次数说不准。
+    @MainActor
+    func testActivationMeasuresAgainHalfASecondLater() throws {
+        _ = NSApplication.shared
+        try XCTSkipIf(NSWorkspace.shared.menuBarOwningApplication == nil, "没有图形会话：菜单栏没有属主，问不到谁")
+        let ready = OSAllocatedUnfairLock(initialState: false)
+        let crew = CrewController(art: try art(), menuEnd: { _ in ready.withLock { $0 } ? 592 : nil })
+        crew.apply(enabled: true, perSide: 3, skin: .glass, sharingType: .readOnly)
+        crew.relayout(metrics: m14)
+        defer { crew.apply(enabled: false, perSide: 3, skin: .glass, sharingType: .readOnly) }
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didActivateApplicationNotification, object: NSWorkspace.shared)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        XCTAssertNil(crew.room, "当场那一次没读到：这一轮不算")
+        ready.withLock { $0 = true }
+        let deadline = Date().addingTimeInterval(1.5)
+        while crew.room == nil, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertEqual(crew.room, CrewRoom(left: 1, right: .max), "半秒后补量到了")
+    }
+
     @MainActor
     func testOverflowCapsuleAndDonePlayback() throws {
         _ = NSApplication.shared
@@ -359,6 +532,14 @@ final class PanelKeyTests: XCTestCase {
         XCTAssertEqual(PanelKey.sessionShortcutLabel(8), "⌘9")
         XCTAssertEqual(PanelKey.sessionShortcutLabel(9), "⌘0")
         XCTAssertNil(PanelKey.sessionShortcutLabel(10), "第 11 个起没有键")
+    }
+
+    func testTextEditingReceivesDigitsWithoutNavigating() {
+        for keyCode in PanelKey.digitKeyCodes + [zero] {
+            XCTAssertNil(PanelKey.action(keyCode: keyCode, modifiers: [], pageKeys: true, sessionKeys: true, editingText: true))
+            XCTAssertNil(PanelKey.action(keyCode: keyCode, modifiers: [.command], pageKeys: true, sessionKeys: true, editingText: true))
+        }
+        XCTAssertEqual(PanelKey.action(keyCode: comma, modifiers: [.command], pageKeys: true, sessionKeys: true, editingText: true), .settings)
     }
 
     func testCommandCommaAlwaysOpensSettings() {

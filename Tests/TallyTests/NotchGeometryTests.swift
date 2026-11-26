@@ -33,7 +33,7 @@ final class NotchGeometryTests: XCTestCase {
         XCTAssertEqual(narrow.width, 218)
         XCTAssertEqual(narrow.minX, 16)
         let badge = PillNotificationPanel.placementFrame(in: builtIn14.frame, safeAreaTop: 32, offset: -6, width: 300, height: 370, rightAligned: true)
-        let afterBadge = PillNotificationPanel.placementFrame(in: builtIn14.frame, safeAreaTop: 32, offset: 370, width: 320, height: 44)
+        let afterBadge = PillNotificationPanel.placementFrame(in: builtIn14.frame, safeAreaTop: 32, offset: 0, width: 320, height: 44)
         XCTAssertEqual(badge.height, 370)
         XCTAssertEqual(badge.maxX, builtIn14.frame.maxX - 16)
         let x = PillNotificationPanel.badgeX(in: builtIn14.frame, width: 300, leftWidth: 663, rightWidth: 664, right: true)
@@ -41,7 +41,7 @@ final class NotchGeometryTests: XCTestCase {
         let leftX = PillNotificationPanel.badgeX(in: builtIn14.frame, width: 300, leftWidth: 663, rightWidth: 664, right: false)
         XCTAssertEqual(leftX + 150, 623)
         XCTAssertEqual(badge.maxY, builtIn14.frame.maxY - 32, "第一张工牌的挂带贴着刘海")
-        XCTAssertEqual(badge.minY - afterBadge.maxY, 6, "不同高度的提示不重叠")
+        XCTAssertEqual(afterBadge, first, "The pill returns to the notch after the badge exits")
     }
 
     func testCrewDropdownStaysOnScreenAndCapsHeight() {

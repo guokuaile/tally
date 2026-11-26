@@ -1,6 +1,6 @@
 # 常驻监听与小工具
 
-> 面板之外、跟着设置开关起停的几样：保持唤醒、电池事件、摄像头 / 麦克风占用、截屏隐藏、文件架、菜单栏小恐龙、关窗自动退出。关掉的一样不起监听、不占内存；开关在设置窗口的「面板」「提示」「文件架」「应用」四项里（悬停展开见 [panel.md](panel.md)）。
+> 面板之外、跟着设置开关起停的几样：保持唤醒、电池事件、摄像头 / 麦克风占用、截屏隐藏、文件架、菜单栏小恐龙、关窗自动退出。关掉的一样不起监听、不占内存；开关在设置窗口的「面板」「提示」「文件架」「应用」四项里（悬停展开见 [panel.md](panel.md)）。清洁锁没有设置开关，点系统页那张卡片才起、解锁就拆，也记在这份里。
 
 ## 起停
 
@@ -20,11 +20,11 @@
 
 ## 保持唤醒（`KeepAwake`）
 
-就是 `caffeinate` 的按钮版：一个 IOKit 电源断言，「屏幕也保持常亮」（`Preferences.keepAwakeDisplay`，默认开，和 `caffeinate -dims` 的习惯一致）勾着是 `kIOPMAssertionTypePreventUserIdleDisplaySleep`（等于 `-d`，屏幕常亮系统自然也不睡），不勾是 `kIOPMAssertionTypePreventUserIdleSystemSleep`（等于 `-i`，只挡系统闲置休眠，屏幕照常黑）；不用 `NoDisplaySleep`，那个名字 10.7 起标了废弃（`pmset` 里两者登记的都是 `PreventUserIdleDisplaySleep`，效果一样）；`-s`（接电时不休眠）两者都覆盖，`-m`（磁盘）Apple Silicon 上没意义。断言归 Tally 进程所有，进程退出内核自动释放，不需要退出钩子；`start` 先 `stop` 再建，永远只有一个；开着时切换屏幕常亮换一种断言、到期时刻不变（`setKeepsDisplay`）。时长 15 / 30 分钟、1 / 2 / 4 小时、一直，外加一档自定义（`Preferences.keepAwakeCustomMinutes`，15 分钟到 24 小时、15 分钟一步，默认 90 分钟）：定时的用一个 `Timer` 到点释放，不限时不起任何定时器。自定义档只在系统页卡片上设（面板不抢激活，指望不上输入框，所以是 `−  1 小时 30 分  +` 的步进，见 [system.md](system.md)）；设过之后标题行右键菜单里也多这一条。
+就是 `caffeinate` 的按钮版：一个 IOKit 电源断言，「屏幕也保持常亮」（`Preferences.keepAwakeDisplay`，默认开，和 `caffeinate -dims` 的习惯一致）勾着是 `kIOPMAssertionTypePreventUserIdleDisplaySleep`（等于 `-d`，屏幕常亮系统自然也不睡），不勾是 `kIOPMAssertionTypePreventUserIdleSystemSleep`（等于 `-i`，只挡系统闲置休眠，屏幕照常黑）；不用 `NoDisplaySleep`，那个名字 10.7 起标了废弃（`pmset` 里两者登记的都是 `PreventUserIdleDisplaySleep`，效果一样）；`-s`（接电时不休眠）两者都覆盖，`-m`（磁盘）Apple Silicon 上没意义。断言归 Tally 进程所有，进程退出内核自动释放，不需要退出钩子；`start` 先 `stop` 再建，永远只有一个；开着时切换屏幕常亮换一种断言、到期时刻不变（`setKeepsDisplay`）。时长 15 / 30 分钟、1 / 2 / 4 / 8 / 9 小时、不限，外加一档自定义（`Preferences.keepAwakeCustomMinutes`，15 分钟到 24 小时，可直接输入整数分钟，加减每次 15 分钟，默认 90 分钟）：定时的用一个 `Timer` 到点释放，不限时不起任何定时器。自定义档只在系统页卡片上设（分钟输入框配加减按钮，开始时保存，取消不保存，见 [system.md](system.md)）；设过之后标题行右键菜单里也多这一条。
 
 状态落盘（`keepAwakeActive` / `keepAwakeUntil` / `keepAwakeMinutes`），启动时 `restore()` 接回来：断言随进程死，装个新版本就没了，人只会看到「点了杯子屏幕还是黑」。到期的直接清掉。
 
-标题行按钮：点一下不限时开 / 关，右键菜单选时长、勾「屏幕也保持常亮」；开着时杯子实心橙色，悬停提示「保持唤醒到 HH:mm · 屏幕常亮」之类。右键菜单里「一直保持唤醒」和五个时长档都带勾（`Toggle` 不是 `Button`）：勾落在当前那档上，不限时勾「一直」，点已经勾着的那条就是关闭。原来这几条是 `Button`，天生不显示状态，于是「杯子亮着但菜单里一个勾都没有」，人只能靠杯子颜色和悬停提示反推。档位存在 `KeepAwake.minutes` 里，落盘 `keepAwakeMinutes`：`until` 只是到期时刻，反推不出当初选的是哪档（选 1 小时过了 10 分钟就成了 50 分钟），重装之后勾会跑。
+标题行按钮：点一下不限时开 / 关，右键菜单选时长、勾「屏幕也保持常亮」；开着时杯子实心橙色，悬停提示「保持唤醒到 HH:mm · 屏幕常亮」之类。右键菜单里「不限」和七个时长档都带勾（`Toggle` 不是 `Button`）：勾落在当前那档上，不限时勾「不限」，点已经勾着的那条就是关闭。原来这几条是 `Button`，天生不显示状态，于是「杯子亮着但菜单里一个勾都没有」，人只能靠杯子颜色和悬停提示反推。档位存在 `KeepAwake.minutes` 里，落盘 `keepAwakeMinutes`：`until` 只是到期时刻，反推不出当初选的是哪档（选 1 小时过了 10 分钟就成了 50 分钟），重装之后勾会跑。
 
 ### 合盖也不休眠（`LidSleepBlocker`）
 
@@ -99,16 +99,45 @@
 - **起停**：开着且列表非空才挂 `NSWorkspace` 的 `didLaunchApplication` / `didTerminateApplication`；列表里有 app 在跑才起 3 秒定时器（`tolerance` 0.5），全退了就停。列表里的 app 没在跑时零开销：没有定时器、没有轮询。`apply` 幂等，设置每次变化都调。
 - **数窗口走辅助功能 API**（`AXUIElementCopyAttributeValue` 取 `kAXWindows`），每次采样问一次个数，不挂 `AXObserver`、不读窗口标题与内容、不监听键盘。CGWindowList 不要权限但分不出「最小化的真窗口」和「从未显示过的隐藏窗」：两者属性完全一样（都没有 `kCGWindowIsOnscreen`，层级、透明度、内存占用一致），预览没内容时它仍报 5 个 layer 0 窗口（4 条 1512 × 33 的菜单栏条、1 个 500 × 500 的隐藏窗）。实测 AX 的口径：已显示 1、最小化 1、⌘H 隐藏 1、从未 `orderFront` 过的 0、`orderOut` 后 0，正是要的语义；Finder 的桌面也算一个窗口，把 Finder 加进列表也永远不会退。给元素设 1 秒 `AXUIElementSetMessagingTimeout`：对方卡死时别把 Tally 主线程一起拖住；拿不到（没权限、没响应）这一轮不算。
 - **判定**（`AutoQuitRule.shouldQuit`，纯函数）：窗口数为 0、不在前台（`NSRunningApplication.isActive` 假）、且上一次采样也为 0，三者同时成立才 `terminate()`——等于 ⌘Q，对方可以弹保存、可以拒绝，不强杀。「不在前台」防关完最后一张图正要 ⌘O 时被抢；「连续两次」滤掉关窗动画期间的瞬时零，也给刚启动、窗口还没出来的 app 留 3 到 6 秒。还没 `isFinishedLaunching` 的跳过。「打开」对话框本身是个窗口，开着时不退。
-- **权限**：每次采样先问 `AXIsProcessTrusted()`，没勾就什么都不做；设置页开关开着而没勾时出一行橙字加「去授权」（`AXIsProcessTrustedWithOptions` 带提示：系统弹框并把 Tally 加进「辅助功能」列表，人勾一下）。勾完不用重启，下一次采样就生效。Tally 用固定的「Tally Dev」自签证书，重编译不换代码身份，勾一次长期有效。这是 Tally 唯一一处辅助功能用法，README「权限与隐私」照实写。
+- **权限**：每次采样先问 `AXIsProcessTrusted()`，没勾就什么都不做；设置页开关开着而没勾时出一行橙字加「去授权」（`AXIsProcessTrustedWithOptions` 带提示：系统弹框并把 Tally 加进「辅助功能」列表，人勾一下）。勾完不用重启，下一次采样就生效。Tally 用固定的「Tally Dev」自签证书，重编译不换代码身份，勾一次长期有效。辅助功能权限 Tally 只用在三处：这里、下面的清洁锁、刘海小人让开菜单（[crew.md](crew.md)「让开菜单」），README「权限与隐私」照实写。
 - **设置页**：侧栏「功能」组的「应用」。开关一节；列表一节：每行图标 + 名字（`NSWorkspace.urlForApplication(withBundleIdentifier:)` 找到的那份的 Finder 显示名，没装的只显示 bundle id）+ 「移除」；「添加」菜单列当前在跑的 regular app（Dock 里看得见的，排掉 Tally 自己和已在列表里的），底下一条「选择 .app 文件…」开 `NSOpenPanel`（只认 `.application`，默认指到 `/Applications`，包在 `NotchPanel.steppingAside` 里）。开关关着列表照样能编辑。存的是 bundle id 不存路径：app 搬家、改名不受影响；解码时去空白、去重、保持顺序（`Preferences.autoQuitList`）。
+
+## 清洁锁（`InputLock` + `InputLockRule`）
+
+擦键盘、触控板的时候把输入吞掉，省得到处跳、乱打字。入口是系统页的「清洁锁」卡片（[system.md](system.md)），不落盘、没有设置开关：平时进程里没有任何拦截器，锁着的那两分钟才有。
+
+- **两档**：「锁键盘」只吞按键，触控板照常；「键盘 + 触控板」连点击、拖拽、滚动、手势一起吞，光标也钉在上锁那一刻的位置；按下去的「咔哒」手感是触控板硬件给的，关不掉。
+- **拦截**：`CGEvent.tapCreate` 挂在 `.cghidEventTap` 的最前面、`.defaultTap`（能吞）。挂在这一层是因为它在系统快捷键匹配之前：聚焦、切换 app、Tally 自己的 ⌥⇧T 都还没机会生效。事件源加到主 run loop 的 `.commonModes`，拖东西、开菜单时照样拦。只锁键盘那档的掩码里不带指针事件，触控板的事件根本不经过回调，主线程再忙光标和点击也不受影响。
+- **判定**（`InputLockRule.verdict`，纯函数）：
+
+| 事件 | 只锁键盘 | 键盘 + 触控板 |
+|---|---|---|
+| 按下 T、修饰键恰好是 ⌥⇧ | 吞掉，记下「组合按下过」 | 同左 |
+| 松开 T，且组合按下过 | 解锁，这一下也吞掉 | 同左 |
+| 其余按下、抬起、修饰键变化 | 吞 | 吞 |
+| `systemDefined` 子类型 8（亮度、音量、播放这些功能键） | 吞 | 吞 |
+| `systemDefined` 其余子类型 | 放行 | 吞 |
+| 光标移动、按着键拖动 | 不经过拦截器 | 吞，并把光标拽回上锁时的位置 |
+| 点击、滚动、手势、压感等其余一切 | 不经过拦截器 | 吞 |
+
+- **钉住光标**：吞掉移动事件挡不住光标，它在比拦截器更底下的一层就动了。所以全锁时每来一个移动或拖动事件（`InputLockRule.movesCursor`）就 `CGWarpMouseCursorPosition` 把光标拽回上锁那一刻的位置（`CGEvent(source: nil).location`，和拽回用的是同一套左上角原点的坐标）；拽回不产生事件，不会自己触发自己。只锁键盘那档不动光标。
+- **解锁**有三条路：⌥⇧T、倒计时到点（`InputLockRule.duration`，2 分钟）、只锁键盘那档还能点卡片上的「解锁」。⌥⇧T 是拦截器自己认的，不走 `HotKeyCenter`（热键在拦截器下游，根本收不到），所以设置里关掉 ⌥⇧T 也能解锁；键和文案都定义在 `InputLockRule`（`chordKey` / `chordLabel`），和热键那组只是故意取了一样的。修饰键多按一个都不算，抹布压住一片时不会误开。倒计时按到期时刻算、每秒对一次表，用单调时钟（`ContinuousClock`）：中途睡过一觉醒来照样准，改系统时间也拖不长它；它是兜底，保证怎么都不会把自己锁死。
+- **松开 T 才解锁，不是按下就解**：按住不放时系统会补发重复的按下，按下那一刻就拆拦截器的话，这些重复键全漏出去——落到 ⌥⇧T 热键上把面板开合一下，热键关着就打进前台 app。所以按下只记账（`chordHeld`），期间一切照吞，松开 T 时才拆；不看松开时修饰键还在不在，先松哪个都行。拆的动作再延后一拍，不在拦截器自己的回调里作废它的端口。
+- **拦截器被系统停掉要接回来**：回调超时（主线程忙）时系统发 `tapDisabledByTimeout` 并停掉拦截器，不重新 `tapEnable` 的话擦到一半键盘就活了。回调跑在主线程是个简化（代码里标了 `shortcut:`）：停掉到接回之间的事件会漏出去，真遇到擦到一半漏键，就把事件源挪到独立线程的 run loop。
+- **权限**：能吞事件的拦截器要辅助功能权限。点胶囊时 `AXIsProcessTrustedWithOptions` 带提示：没勾就弹系统框并把 Tally 加进列表，卡片上一行橙字说勾完再点一次。只拿键码和修饰键比对解锁组合，不记录、不落日志。
+- **密码框聚焦时拒绝上锁**：系统的安全输入（`IsSecureEventInputEnabled`）开着时按键直送前台 app，不经过任何拦截器，这时候锁了也是假的，卡片上橙字说明。
+- **拦不住的**：Touch ID / 电源键是硬件级的，短按锁屏、长按关机，擦的时候避开。
+- **面板**：锁上时把展开着的面板钉住，解锁再放开（本来就钉着的不动）。只锁键盘时手一碰触控板光标就离开面板，不钉的话倒计时和「解锁」跟着面板一起收走。锁着时面板被收起（点刘海），这次钉住就算结束：之后再展开不再钉，用户自己钉住的解锁时也不动。
+- **不留残留**：拦截器归 Tally 进程所有，退出、被杀、重装时系统自动撤掉，键盘立刻恢复，不需要退出钩子。
+- **演示模式**只翻界面状态，不建拦截器。
 
 ## 验证
 
 ```bash
-swift test --filter 'BatteryRuleTests|KeepAwakeTests|LidSleepBlockerTests|PrivacyWatcherTests|PreferencesTests|SwipeTests|AutoQuitRuleTests'
+swift test --filter 'BatteryRuleTests|KeepAwakeTests|LidSleepBlockerTests|PrivacyWatcherTests|PreferencesTests|SwipeTests|AutoQuitRuleTests|InputLockRuleTests'
 pmset -g assertions | grep -i tally     # 点了杯子之后应有一行 Tally：保持唤醒，勾了屏幕常亮是 PreventUserIdleDisplaySleep
 pmset -g | grep -i sleepdisabled        # 开了「合盖也不休眠」是 1；关掉后 5 秒内这一行消失
 open -a Preview <任意图片>; sleep 2; pgrep -x Preview   # 之后 ⌘W 关掉、切到别的 app，3 到 6 秒内再 pgrep 应为空（开关开着、辅助功能勾了）
 ```
 
-用例：退出判定（有窗口不退、在前台不退、首次为零不退、连续两次为零且不在前台才退）、监控列表清洗（去空白、去重、保序）与默认值（关、只有预览）、watcher 起停（开着挂通知、列表里没在跑的不起定时器、关掉或列表为空全摘）、辅助功能数窗口在自己进程上的口径（显示 +1、最小化不变、关掉回原值；xctest 要先 `finishLaunching` 自己进程的辅助功能服务才应答；跑测试的进程没权限则跳过）、电池规则五条（首读不报、接拔电、阈值每次放电只报一次且一次跨两个只报最低、充满只在充电之后）、断言起停（定时有到期时刻、不限时没有、重复 stop 无害）、自定义档能落盘且右键菜单的勾落在它上面、步进夹在 15 分钟到 24 小时之间、免密规则文本（三条命令逐字、先 `visudo -c`、验不过连临时文件一起收）与 `pmset -g` 的 `SleepDisabled` 解析、真机挂上内建麦克风与摄像头各 ≥ 1 且关掉清零（没设备跳过）、六个开关缺键取默认且截屏隐藏默认关、提示映射。手动：合盖前点杯子看 `pmset`；第一次开「合盖也不休眠」输一次密码，之后 `sudo -n -l /usr/bin/pmset -a disablesleep 1` 退出码是 0、`pmset -g | grep -i sleepdisabled` 是 1，合盖十分钟再打开机器没睡（`pmset -g log | grep -i sleep` 里没有 clamshell 休眠）；关掉立刻回 0 且**不再弹框**，再开也不弹；`pkill -x Tally` 之后回 0；`pkill -9 -x Tally` 会留下 1，下次启动 Tally 自动抹掉；设置里取消「免密规则」后那条 `sudo -n -l` 又变成非 0；拔电源看提示条；开 FaceTime 展开面板看标题行的绿点；设置里关「截屏隐藏」再截图能拍到面板、开了拍不到；「应用」页开开关、勾辅助功能后，预览开一张图再 ⌘W、切走，3 到 6 秒内 Dock 小圆点消失，最小化、开着「打开」对话框、停在预览前台时都不退，关掉开关后 `pgrep` 预览照常留着。
+用例：清洁锁判定（⌥⇧T 按下只记账、松开 T 才解锁且两档一样、先松修饰键也能解、没按过组合松开 T 不算、多一个修饰键不算、大写锁定与 fn 不影响、按键与功能键两档都吞、鼠标按键状态那类 `systemDefined` 只在全锁时吞、光标移动与点击滚动手势只在全锁时吞）、掩码（只锁键盘不含指针事件、全锁一个不漏）、哪些事件要拽回光标（移动与三种拖动算，点击滚动不算）与倒计时文案；真拦截器不进单测——测试进程挂上它会把这台机器的键盘一起锁住。退出判定（有窗口不退、在前台不退、首次为零不退、连续两次为零且不在前台才退）、监控列表清洗（去空白、去重、保序）与默认值（关、只有预览）、watcher 起停（开着挂通知、列表里没在跑的不起定时器、关掉或列表为空全摘）、辅助功能数窗口在自己进程上的口径（显示 +1、最小化不变、关掉回原值；xctest 要先 `finishLaunching` 自己进程的辅助功能服务才应答；跑测试的进程没权限则跳过）、电池规则五条（首读不报、接拔电、阈值每次放电只报一次且一次跨两个只报最低、充满只在充电之后）、断言起停（定时有到期时刻、不限时没有、重复 stop 无害）、自定义档能落盘且右键菜单的勾落在它上面、步进夹在 15 分钟到 24 小时之间、免密规则文本（三条命令逐字、先 `visudo -c`、验不过连临时文件一起收）与 `pmset -g` 的 `SleepDisabled` 解析、真机挂上内建麦克风与摄像头各 ≥ 1 且关掉清零（没设备跳过）、六个开关缺键取默认且截屏隐藏默认关、提示映射。手动：合盖前点杯子看 `pmset`；第一次开「合盖也不休眠」输一次密码，之后 `sudo -n -l /usr/bin/pmset -a disablesleep 1` 退出码是 0、`pmset -g | grep -i sleepdisabled` 是 1，合盖十分钟再打开机器没睡（`pmset -g log | grep -i sleep` 里没有 clamshell 休眠）；关掉立刻回 0 且**不再弹框**，再开也不弹；`pkill -x Tally` 之后回 0；`pkill -9 -x Tally` 会留下 1，下次启动 Tally 自动抹掉；设置里取消「免密规则」后那条 `sudo -n -l` 又变成非 0；拔电源看提示条；开 FaceTime 展开面板看标题行的绿点；设置里关「截屏隐藏」再截图能拍到面板、开了拍不到；「应用」页开开关、勾辅助功能后，预览开一张图再 ⌘W、切走，3 到 6 秒内 Dock 小圆点消失，最小化、开着「打开」对话框、停在预览前台时都不退，关掉开关后 `pgrep` 预览照常留着。清洁锁的吞与解锁用合成事件验，不用真去按：`swiftc` 编一个小程序，自己在会话层（`.cgSessionEventTap`）挂一个拦截器，只数、只吞 `eventSourceUserData` 带标记的事件，再往 HID 层发带标记的按键和点击——Tally 的拦截器在上游，标记事件没到小程序就是被 Tally 吞了，到了的也被小程序吞掉、进不了任何 app。顺序是：没锁时发一个键（小程序应收到）→ 点胶囊上锁 → 再发键、发点击（应收不到）→ 发 ⌥⇧T → 再发（应收到），同时 `/usr/bin/log stream --level debug` 里先后出现「清洁锁：锁上」「清洁锁：解开」；整轮锁着不到 3 秒。全锁那档再发一个合成的移动事件到别处，读回的光标位置仍是上锁时那个点。悬停展开的面板上锁后把光标挪到面板外，截图里面板还开着、倒计时在走，解锁后面板自己收起。合成事件验不了的要真手：亮度音量这些功能键按了不动、锁着时 `pkill -x Tally` 键盘当场恢复、终端里停在 `sudo` 的密码提示上再点卡片出橙字不上锁、不按 ⌥⇧T 等 2 分钟自己解开；真手指在触控板上滑时光标定不定得住、多指系统手势（切桌面、调度中心）和大写锁定的灯以真机上的表现为准。

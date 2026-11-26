@@ -63,6 +63,8 @@
 
 ## 验证
 
+截图目录发现的 FSEvents 集成用例通过 `start(watching:)` 只监听专属临时目录，并写入目录外的图片验证隔离；保留真实事件与目标文件断言，避免其他项目构建图标或用户保存图片抢先命中。应用调用不传目录，仍监听家目录和用户临时目录。
+
 ```bash
 swift test --filter 'ShelfStoreTests|ScreenshotWatcherTests|ScreenshotFolderFinderTests|PreferencesTests'
 pkill -x Tally; while pgrep -x Tally >/dev/null; do sleep 0.5; done

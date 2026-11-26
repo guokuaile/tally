@@ -44,6 +44,15 @@ final class ClaudeLimitsCacheTests: XCTestCase {
         XCTAssertEqual(limits.session?.resetsAt, Date(timeIntervalSince1970: 1_788_855_600))
         XCTAssertEqual(limits.week?.used, 0.26)
         XCTAssertFalse(limits.isStale)
+        XCTAssertNil(limits.accountUUID)
+    }
+
+    func testOptionalAccountIdentityIsReadWithoutChangingWindows() throws {
+        let cache = try makeCache(#"{"account_uuid":"account-a","organization_uuid":"organization-a","five_hour":{"used_percentage":28}}"#)
+        let limits = try XCTUnwrap(cache.read())
+        XCTAssertEqual(limits.accountUUID, "account-a")
+        XCTAssertEqual(limits.organizationUUID, "organization-a")
+        XCTAssertEqual(limits.session?.used, 0.28)
     }
 
     func testOverLimitIsNotClamped() throws {

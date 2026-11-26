@@ -186,7 +186,7 @@ final class KeepAwakeTests: XCTestCase {
         XCTAssertNil(keep.minutes, "关掉就没有勾")
     }
 
-    /// 自定义档会带零头，档位文案得写得出「1 小时 30 分」；步进要对齐到 15 分钟并夹在范围里。
+    // Typed durations keep minute precision while button adjustments stay in range.
     @MainActor
     func testCustomDurationLabelAndClamp() {
         XCTAssertEqual(KeepAwake.durationLabel(15), "15 分钟")
@@ -194,8 +194,23 @@ final class KeepAwakeTests: XCTestCase {
         XCTAssertEqual(KeepAwake.durationLabel(90), "1 小时 30 分")
         XCTAssertEqual(KeepAwake.clampCustom(0), 15, "下限 15 分钟")
         XCTAssertEqual(KeepAwake.clampCustom(-30), 15)
-        XCTAssertEqual(KeepAwake.clampCustom(100), 90, "对齐到 15 分钟一步")
+        XCTAssertEqual(KeepAwake.clampCustom(100), 100)
+        XCTAssertEqual(KeepAwake.clampCustom(115), 115)
         XCTAssertEqual(KeepAwake.clampCustom(9999), 24 * 60, "上限 24 小时")
+        XCTAssertEqual(KeepAwake.clampCustom(Int.min), 15)
+        XCTAssertEqual(KeepAwake.clampCustom(Int.max), 1440)
+    }
+
+    @MainActor
+    func testCustomDurationInput() {
+        for minutes in [15, 16, 90, 100, 480, 540, 1440] {
+            XCTAssertEqual(KeepAwake.customMinutes(from: String(minutes)), minutes)
+        }
+        XCTAssertEqual(KeepAwake.customMinutes(from: " 100\n"), 100)
+        XCTAssertEqual(KeepAwake.durationLabel(100), "1 小时 40 分")
+        for input in ["", " ", "abc", "1.5", "1:30", "0", "14", "1441", "-90", String(repeating: "9", count: 40)] {
+            XCTAssertNil(KeepAwake.customMinutes(from: input), input)
+        }
     }
 }
 

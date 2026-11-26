@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 系统页：「硬件」「电池」并排，下面保持唤醒、压力条、内存大户、废纸篓。
+// Detailed configuration lives in Settings; the system page exposes manual actions.
 struct SystemPage: View {
     var store = SystemStore.shared
     var preferences = PreferencesStore.shared
@@ -56,19 +56,34 @@ struct SystemPage: View {
                     }
                 }
             }
-            // 跟着标题行那颗杯子的总开关走：关了功能就不起，控件也不该留在这儿
-            if preferences.prefs.keepAwakeButton {
-                KeepAwakeCard()
+            VStack(spacing: 6) {
+                HStack(alignment: .top, spacing: 8) {
+                    DisplayCard()
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
+                    WallpaperCard()
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
+                }
+                HStack(alignment: .top, spacing: 8) {
+                    if preferences.prefs.keepAwakeButton {
+                        KeepAwakeCard()
+                            .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    InputLockCard()
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
+                }
             }
+            .environment(\.colorScheme, .dark)
             Card("压力", symbol: "gauge.with.dots.needle.67percent", tint: .purple) {
                 MetricBar(name: "内存", fraction: fraction(s.memoryUsed, s.memoryTotal), level: s.memoryLevel,
                           text: pair(s.memoryUsed, s.memoryTotal, prefix: "已用 ") + (s.pressure.map { " · \($0.label)" } ?? ""))
                 HStack(spacing: 16) {
                     MetricBar(name: "CPU", fraction: s.cpuFraction, level: s.cpuLevel,
                               text: s.cpuFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", textWidth: 44)
-                    MetricBar(name: "磁盘", fraction: usedFraction(available: s.diskAvailable, total: s.diskTotal), level: s.diskLevel,
-                              text: pair(s.diskAvailable, s.diskTotal, prefix: "可用 "), textWidth: 150)
+                    MetricBar(name: "GPU", fraction: s.gpuFraction, level: s.gpuLevel,
+                              text: s.gpuFraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "—", textWidth: 44)
                 }
+                MetricBar(name: "磁盘", fraction: usedFraction(available: s.diskAvailable, total: s.diskTotal), level: s.diskLevel,
+                          text: pair(s.diskAvailable, s.diskTotal, prefix: "可用 "))
                 if let swapUsed = s.swapUsed, swapUsed > 0 {
                     MetricBar(name: "交换", fraction: fraction(s.swapUsed, s.swapTotal), level: nil, text: pair(s.swapUsed, s.swapTotal))
                 }
@@ -82,7 +97,10 @@ struct SystemPage: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
+        }
+        .onAppear { DisplayModeService.shared.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            DisplayModeService.shared.refresh()
         }
     }
 
@@ -151,14 +169,13 @@ struct SystemPage: View {
     }
 }
 
-/// 保持唤醒卡片：标题行那颗杯子只有 24 × 22pt，还得先悬停展开刘海再右键，选时长太难点。
-/// 这里把六个档位摊成胶囊，当前那档填橙色；杯子留着当快捷开关和状态灯。
+// Keep common durations directly accessible and less frequent choices in the menu.
 private struct KeepAwakeCard: View {
     var keepAwake = KeepAwake.shared
     var lid = LidSleepBlocker.shared
     var preferences = PreferencesStore.shared
-    /// 「自定义」那颗点开之后才出现的步进行。
     @State private var editingCustom = false
+    @State private var customInput = ""
     /// 授权框弹着的时候不让重复点。
     @State private var authorizing = false
 
@@ -169,54 +186,89 @@ private struct KeepAwakeCard: View {
     }()
 
     var body: some View {
-        Card("保持唤醒", symbol: keepAwake.isActive ? "cup.and.saucer.fill" : "cup.and.saucer", tint: .orange) {
-            HStack(spacing: 6) {
-                let keepDisplay = preferences.prefs.keepAwakeDisplay
-                pill("一直", on: keepAwake.isActive && keepAwake.until == nil) {
-                    keepAwake.start(minutes: nil, keepDisplay: keepDisplay)
-                }
-                ForEach(KeepAwake.durations, id: \.self) { minutes in
-                    pill(KeepAwake.durationLabel(minutes), on: keepAwake.minutes == minutes) {
-                        keepAwake.start(minutes: minutes, keepDisplay: keepDisplay)
+        Card("保持唤醒", symbol: keepAwake.isActive ? "cup.and.saucer.fill" : "cup.and.saucer", tint: .orange, spacing: 4, accessory: AnyView(
+            Menu {
+                Toggle("屏幕也常亮", isOn: Binding(
+                    get: { preferences.prefs.keepAwakeDisplay },
+                    set: { on in preferences.prefs.keepAwakeDisplay = on; keepAwake.setKeepsDisplay(on) }
+                ))
+                Toggle("合盖也不休眠", isOn: Binding(get: { lid.isActive }, set: { _ in toggleLid() }))
+                    .disabled(authorizing || lid.busy)
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(lid.isActive ? Color.orange : Color.white.opacity(0.7))
+                    .frame(width: 24, height: 22)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .frame(width: 24, height: 22)
+            .accessibilityLabel("保持唤醒选项")
+            .help("屏幕常亮与合盖设置")
+        )) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(status).font(.metric(13)).foregroundStyle(.white.opacity(0.95))
+                Text(lid.isActive ? "合盖不休眠 · 注意散热" : keepAwake.isActive
+                     ? (preferences.prefs.keepAwakeDisplay ? "屏幕常亮 · 任务持续运行" : "允许熄屏 · 任务持续运行") : "闲置时正常休眠")
+                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
+                HStack(spacing: 6) {
+                    systemPill("不限", on: keepAwake.isActive && keepAwake.until == nil) {
+                        keepAwake.start(minutes: nil, keepDisplay: preferences.prefs.keepAwakeDisplay)
+                    }
+                    systemPill("1 小时", on: keepAwake.isActive && keepAwake.minutes == 60) {
+                        keepAwake.start(minutes: 60, keepDisplay: preferences.prefs.keepAwakeDisplay)
+                    }
+                    Menu {
+                        ForEach(KeepAwake.durations.filter { $0 != 60 }, id: \.self) { minutes in
+                            Button(KeepAwake.durationLabel(minutes)) {
+                                keepAwake.start(minutes: minutes, keepDisplay: preferences.prefs.keepAwakeDisplay)
+                            }
+                        }
+                        Divider()
+                        Button("自定义时长…") {
+                            customInput = String(KeepAwake.clampCustom(preferences.prefs.keepAwakeCustomMinutes ?? KeepAwake.customDefault))
+                            editingCustom.toggle()
+                        }
+                    } label: { Text("更多") }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .padding(.horizontal, 9).frame(height: 19)
+                    .background(Capsule().fill(.white.opacity(0.14)))
+                    .accessibilityLabel("更多唤醒时长")
+                    if keepAwake.isActive {
+                        systemPill("关闭", on: true) { keepAwake.stop() }
                     }
                 }
-                // 点它只做一件事：展开步进行去设一个时长。不直接启动，省得人去猜这一下是设还是开
-                pill(customLabel, on: custom != nil && keepAwake.minutes == custom) { editingCustom.toggle() }
-                Spacer(minLength: 8)
-                if keepAwake.isActive {
-                    pill("关闭", on: false) { keepAwake.stop() }
-                }
+                .frame(minHeight: 19, alignment: .leading)
+            }
+            if authorizing || lid.busy {
+                Text("正在处理合盖设置…").font(.system(size: 10)).foregroundStyle(.white.opacity(0.65))
             }
             if editingCustom {
                 HStack(spacing: 6) {
                     stepper("minus", by: -KeepAwake.customStep)
-                    Text(KeepAwake.durationLabel(custom ?? KeepAwake.customDefault))
+                    TextField("15–1440", text: $customInput)
+                        .textFieldStyle(.roundedBorder)
                         .font(.system(size: 11, design: .rounded).monospacedDigit())
                         .foregroundStyle(.white.opacity(0.85))
-                        .frame(minWidth: 68)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 62)
+                        .accessibilityLabel("自定义唤醒分钟数")
+                        .onSubmit(startCustom)
+                    Text("分钟")
+                        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
                     stepper("plus", by: KeepAwake.customStep)
-                    pill("开始", on: false) {
-                        // 一次没调过就直接开始也要把这档记下来，不然胶囊和右键菜单里都看不见它
-                        let minutes = custom ?? KeepAwake.customDefault
-                        preferences.prefs.keepAwakeCustomMinutes = minutes
-                        editingCustom = false
-                        keepAwake.start(minutes: minutes, keepDisplay: preferences.prefs.keepAwakeDisplay)
-                    }
-                    Spacer(minLength: 8)
+                    Spacer(minLength: 0)
                 }
-            }
-            HStack(spacing: 6) {
-                Text(status)
-                    .font(.system(size: 11, design: .rounded).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.55))
-                    .lineLimit(1)
-                Spacer(minLength: 8)
-                pill("合盖也不休眠", on: lid.isActive) { toggleLid() }
-                    .disabled(authorizing || lid.busy)
-                pill("屏幕也常亮", on: preferences.prefs.keepAwakeDisplay) {
-                    let on = !preferences.prefs.keepAwakeDisplay
-                    preferences.prefs.keepAwakeDisplay = on
-                    keepAwake.setKeepsDisplay(on)
+                Text(custom.map { KeepAwake.durationLabel($0) } ?? "请输入 15–1440 的整数分钟")
+                    .font(.system(size: 10))
+                    .foregroundStyle(custom == nil ? Color.orange : Color.white.opacity(0.5))
+                HStack(spacing: 6) {
+                    systemPill("开始", on: false, action: startCustom)
+                        .disabled(custom == nil)
+                        .opacity(custom == nil ? 0.4 : 1)
+                    systemPill("取消", on: false) { editingCustom = false }
+                    Spacer(minLength: 0)
                 }
             }
             if lid.isActive {
@@ -237,9 +289,9 @@ private struct KeepAwakeCard: View {
                     Text("系统仍留着上次的「合盖不休眠」，没能自动恢复")
                         .font(.system(size: 10))
                         .foregroundStyle(.orange)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 8)
-                    pill("恢复", on: false) {
+                    systemPill("恢复", on: false) {
                         authorizing = true
                         Task { _ = await lid.clearResidue(); authorizing = false }
                     }
@@ -249,9 +301,14 @@ private struct KeepAwakeCard: View {
         }
     }
 
-    private var custom: Int? { preferences.prefs.keepAwakeCustomMinutes }
+    private var custom: Int? { KeepAwake.customMinutes(from: customInput) }
 
-    private var customLabel: String { custom.map(KeepAwake.durationLabel) ?? "自定义" }
+    private func startCustom() {
+        guard let minutes = custom else { return }
+        preferences.prefs.keepAwakeCustomMinutes = minutes
+        editingCustom = false
+        keepAwake.start(minutes: minutes, keepDisplay: preferences.prefs.keepAwakeDisplay)
+    }
 
     // Both directions wait for the system command before updating the toggle.
     private func toggleLid() {
@@ -266,10 +323,11 @@ private struct KeepAwakeCard: View {
         }
     }
 
-    /// 自定义时长的步进；面板不抢激活，输入框指望不上，所以用加减。
+    // Keep edits local until Start so Cancel preserves the saved duration.
     private func stepper(_ symbol: String, by delta: Int) -> some View {
         Button {
-            preferences.prefs.keepAwakeCustomMinutes = KeepAwake.clampCustom((custom ?? KeepAwake.customDefault) + delta)
+            guard let custom else { return }
+            customInput = String(KeepAwake.clampCustom(custom + delta))
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .bold))
@@ -278,24 +336,71 @@ private struct KeepAwakeCard: View {
                 .background(Capsule().fill(.white.opacity(0.14)))
         }
         .buttonStyle(.plain)
+        .disabled(custom == nil)
+        .accessibilityLabel(delta < 0 ? "减少十五分钟" : "增加十五分钟")
     }
 
     private var status: String {
-        guard keepAwake.isActive else { return "关着，Mac 闲置一会儿就会休眠" }
-        guard let until = keepAwake.until else { return "一直开着，直到手动关闭" }
-        return "到 \(Self.clock.string(from: until)) 自动关闭"
+        guard keepAwake.isActive else { return "未开启" }
+        guard let until = keepAwake.until else { return "持续开启" }
+        return "至 \(Self.clock.string(from: until))"
+    }
+}
+
+/// 清洁锁卡片：擦键盘、触控板前点一下，按键（和点击）被吞掉，两分钟后自己解开。机制在 docs/monitors.md「清洁锁」。
+private struct InputLockCard: View {
+    var lock = InputLock.shared
+
+    var body: some View {
+        Card("清洁锁", symbol: lock.mode == nil ? "keyboard" : "lock.fill", tint: .cyan, spacing: 4, accessory: AnyView(
+            Text("\(Int(InputLockRule.duration) / 60) 分钟")
+                .font(.system(size: 10)).foregroundStyle(.white.opacity(0.45)).frame(height: 22)
+        )) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(lock.mode == nil ? "未锁定" : lock.mode == .keyboard ? "键盘已锁" : "键盘与触控板已锁")
+                    .font(.metric(13)).foregroundStyle(.white.opacity(0.95))
+                Text(lock.mode == nil ? "到时自动解锁，也可按 \(InputLockRule.chordLabel)" : "\(InputLockRule.countdown(lock.remaining)) 后自动解锁 · \(InputLockRule.chordLabel) 解锁")
+                    .font(.system(size: 11, design: .rounded).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    switch lock.mode {
+                    case nil:
+                        systemPill("锁键盘", on: false) { lock.start(.keyboard) }
+                        systemPill("键盘 + 触控板", on: false) { lock.start(.all) }
+                    case .keyboard:
+                        systemPill("解锁", on: true) { lock.stop() }
+                    case .all:
+                        // Pointer input is blocked; the keyboard escape remains visible above.
+                        EmptyView()
+                    }
+                }
+            }
+            if let failure = lock.failure {
+                Text(failure)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        }
     }
 
-    /// 胶囊按钮，选中填橙色。样式跟废纸篓「清空」、代理卡「打开 ▸」一致。
-    private func pill(_ text: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(on ? Color.orange : Color.white.opacity(0.85))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 3)
-                .background(Capsule().fill(on ? Color.orange.opacity(0.22) : Color.white.opacity(0.14)))
-        }
-        .buttonStyle(.plain)
+}
+
+// Shared system-card controls stay legible on the always-black notch in either system appearance.
+@MainActor
+func systemPill(_ text: String, on: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+        systemControlCapsule(text, on: on)
     }
+    .buttonStyle(.plain)
+}
+
+@MainActor
+func systemControlCapsule(_ text: String, on: Bool = false) -> some View {
+    Text(text)
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(on ? Color.orange : Color.white.opacity(0.85))
+        .padding(.horizontal, 9).padding(.vertical, 3)
+        .background(Capsule().fill(on ? Color.orange.opacity(0.22) : Color.white.opacity(0.14)))
 }

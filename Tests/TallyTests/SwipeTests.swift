@@ -62,10 +62,12 @@ final class SwipeTests: XCTestCase {
 
     func testPagingStopsAtEnds() {
         let pages = LaunchOptions.Page.visible(shelf: false, music: false)
-        XCTAssertEqual(SwipeTracker.page(after: .ai, direction: .next, in: pages), .network)
-        XCTAssertEqual(SwipeTracker.page(after: .network, direction: .previous, in: pages), .ai)
+        XCTAssertEqual(SwipeTracker.page(after: .ai, direction: .next, in: pages), .system)
+        XCTAssertEqual(SwipeTracker.page(after: .system, direction: .previous, in: pages), .ai)
+        XCTAssertEqual(SwipeTracker.page(after: .system, direction: .next, in: pages), .network)
+        XCTAssertEqual(SwipeTracker.page(after: .network, direction: .previous, in: pages), .system)
         XCTAssertNil(SwipeTracker.page(after: .ai, direction: .previous, in: pages))
-        XCTAssertEqual(SwipeTracker.page(after: .system, direction: .next, in: pages), .apps)
+        XCTAssertEqual(SwipeTracker.page(after: .network, direction: .next, in: pages), .apps)
         XCTAssertNil(SwipeTracker.page(after: .apps, direction: .next, in: pages))
         XCTAssertNil(SwipeTracker.page(after: .settings, direction: .next, in: pages), "不是面板页")
     }

@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 import Observation
 
+typealias UsageClaudeAccountStore = Never
+
 /// 各家用量的刷新与结果。替代 Atoll 的 LLMUsageManager，不用 Defaults。
 @MainActor
 @Observable
@@ -10,7 +12,7 @@ final class UsageStore {
     /// 演示模式换成编好的提供方：真的那几家一建出来就读扫描缓存和退避文件，刷新时还要读日志、凭据、调接口。
     static let shared = DemoMode.isOn ? UsageStore(providers: DemoData.usageProviders) : UsageStore()
 
-    enum Reason {
+    enum Reason: Equatable {
         case panelOpened, timer, manual
     }
 
@@ -27,6 +29,11 @@ final class UsageStore {
     /// 只含已开启的提供方；开启后第一次刷新完成前是 `.loading`。
     private(set) var results: [ProviderID: UsageResult] = [:]
     private(set) var isRefreshing = false
+    private(set) var isUsingCodexResetCredit = false
+    private(set) var codexResetFeedback: String?
+    var codexResetNeedsReview: Bool { resetPreferences.loadError != nil || resetPreferences.prefs.pendingCodexResetRequestID != nil }
+    private let resetPreferences: PreferencesStore
+    private var lastCodexResetRequestID: UUID?
     /// 上一次刷新开始的时刻，界面显示「更新于」。
     private(set) var lastRefreshed: Date?
 
@@ -66,38 +73,37 @@ final class UsageStore {
         providers: [UsageProvider]? = nil,
         clock: @escaping () -> Date = Date.init,
         preferences: (() -> Preferences)? = nil,
-        hasLiveSession: (() -> Bool)? = nil
+        hasLiveSession: (() -> Bool)? = nil,
+        claudeAccounts: UsageClaudeAccountStore? = nil,
+        resetPreferences: PreferencesStore? = nil
     ) {
         let scopedBox = ClaudeUsageProvider.ScopedLimitsBox()
-        self.allProviders = providers ?? [
+        if let providers {
+            self.allProviders = providers
+        } else {
+            let claude = ClaudeUsageProvider(scopedBox: scopedBox)
+            self.allProviders = [
             // 429 退避落盘的那一份只给真 app 用，测试注入的提供方碰不到它
-            ClaudeUsageProvider(quota: ClaudeQuotaReadOnly(backoff: .shared), scopedBox: scopedBox),
+            claude,
             CodexUsageProvider(quotaClient: CodexQuotaClient(backoff: .shared)), AntigravityUsageProvider(), CursorUsageProvider(),
             DeepSeekUsageProvider(backoff: .shared), KimiUsageProvider(backoff: .shared), GLMUsageProvider(backoff: .shared),
             NewAPIUsageProvider(backoff: .shared),
-        ]
-        // 按模型分的周窗口是后台取的，取到就直接补进已有快照，不用等下一轮刷新
-        scopedBox.setOnUpdate { [weak scopedBox] request, scoped in
-            Task { @MainActor in
-                guard scopedBox?.isCurrent(request) == true else { return }
-                UsageStore.shared.applyClaudeScopedLimits(scoped)
-            }
+            ]
         }
+        // 按模型分的周窗口是后台取的，取到就直接补进已有快照，不用等下一轮刷新
         self.clock = clock
         self.preferences = preferences ?? { PreferencesStore.shared.prefs }
         self.hasLiveSession = hasLiveSession ?? { SessionStore.shared.sessions.contains { $0.state != .ended } }
+        self.resetPreferences = resetPreferences ?? (providers == nil ? PreferencesStore.shared : PreferencesStore(inMemory: Preferences()))
+        if let error = self.resetPreferences.loadError {
+            codexResetFeedback = error
+        } else if self.resetPreferences.prefs.pendingCodexResetRequestID != nil {
+            codexResetFeedback = "上次重置结果待确认；请先在 Codex 核对，再解除此标记。"
+        }
     }
 
     /// 后台取到按模型分的周窗口时补进 Claude 那条快照，不重新解析日志。
     func applyClaudeScopedLimits(_ scoped: [ScopedLimit]) {
-        guard case .success(var snapshot)? = results[.claude], snapshot.scopedLimits != scoped else { return }
-        snapshot.scopedLimits = scoped
-        results[.claude] = .success(snapshot)
-        let now = clock()
-        for window in scoped where !window.limit.isExpired(at: now) {
-            if let event = quotaTracker.feed(provider: .claude, window: window.label, limit: window.limit) { quotaAlert?(event) }
-        }
-        scheduleResetRefresh()
     }
 
     /// 退出前把扫描缓存写盘，省得下次启动白扫一遍。
@@ -119,13 +125,14 @@ final class UsageStore {
         refresh(reason: .timer)
     }
 
-    /// 5 分钟那一轮：没有存活的会话就跳过。没人在用 agent 就没有新日志可扫，别处消耗的配额等展开面板再查；
-    /// 每轮要 stat 几千个日志文件、调一次 Codex 配额接口，闲置一小时白跑 12 次。启动那一轮、睡醒补刷、配额重置补刷不走这里。
+
+    /// Account quotas can change outside this Mac; idle refreshes skip expensive transcript scans.
     @discardableResult
     func periodicTick() -> Bool {
         guard hasLiveSession() else { return false }
         return refresh(reason: .timer)
     }
+
 
     private var enabledProviders: [UsageProvider] {
         let prefs = preferences()
@@ -160,6 +167,84 @@ final class UsageStore {
         results[id] = .loading
         let requests = requestIDs(for: [provider])
         return Task { await runRefresh(providers: [provider], pass: nil, requests: requests) }
+    }
+
+    func consumeCodexResetCredit(_ confirmation: CodexResetCredits.Confirmation) async {
+        guard !isUsingCodexResetCredit, lastCodexResetRequestID != confirmation.id else { return }
+        guard !codexResetNeedsReview else {
+            codexResetFeedback = "上次重置结果待确认，已暂停新的兑换；请先在 Codex 核对。"
+            return
+        }
+        guard let provider = enabledProviders.compactMap({ $0 as? CodexUsageProvider }).first,
+              case .success(let snapshot)? = results[.codex],
+              let current = snapshot.codexResetCredits,
+              current.credentialBinding == confirmation.credits.credentialBinding,
+              current.availableCount > 0,
+              current.cards.contains(confirmation.card),
+              confirmation.credits.nextCard(at: clock()) != nil else {
+            codexResetFeedback = "卡片或账号读数已变化，请刷新后重新确认。"
+            return
+        }
+        resetPreferences.prefs.pendingCodexResetRequestID = confirmation.id.uuidString
+        guard resetPreferences.saveError == nil else {
+            resetPreferences.prefs.pendingCodexResetRequestID = nil
+            codexResetFeedback = "无法保存重置操作状态，未发送兑换请求。"
+            return
+        }
+        isUsingCodexResetCredit = true
+        lastCodexResetRequestID = confirmation.id
+        codexResetFeedback = "正在使用 1 次重置机会…"
+        defer { isUsingCodexResetCredit = false }
+        let outcome = await provider.quotaClient.consumeResetCredit(
+            credits: confirmation.credits, card: confirmation.card,
+            requestID: confirmation.id.uuidString, now: clock())
+        let account = confirmation.credits.accountLabel
+        switch outcome {
+        case .reset:
+            codexResetFeedback = "\(account)：额度已重置，正在更新读数。"
+        case .nothingToReset:
+            codexResetFeedback = "\(account)：当前额度无需重置。"
+        case .noCredit:
+            codexResetFeedback = "\(account)：已没有可用重置卡。"
+        case .alreadyRedeemed:
+            codexResetFeedback = "\(account)：这次重置已处理，正在核对读数。"
+        case .rejected(let message):
+            codexResetFeedback = message
+        case .unknown:
+            codexResetFeedback = "\(account)：重置结果待确认，已停止提交；请核对最新读数或在 Codex 查看。"
+        }
+        if outcome != .unknown { resetPreferences.prefs.pendingCodexResetRequestID = nil }
+        liveLimits[.codex] = nil
+        quotaTracker.reset(provider: .codex)
+        if case .success(var current)? = results[.codex] {
+            current.codexResetCredits = nil
+            current.sessionLimit = nil
+            current.weekLimit = nil
+            current.limitsStale = true
+            results[.codex] = .success(current)
+        }
+        await refetch(.codex)?.value
+        if case .reset = outcome {
+            codexResetFeedback = "\(account)：额度已重置。"
+        } else if case .alreadyRedeemed = outcome {
+            codexResetFeedback = "\(account)：这次重置已处理。"
+        }
+    }
+
+    func acknowledgeCodexResetOutcome() async {
+        guard !isUsingCodexResetCredit, codexResetNeedsReview else { return }
+        guard resetPreferences.loadError == nil else {
+            codexResetFeedback = resetPreferences.loadError
+            return
+        }
+        resetPreferences.prefs.pendingCodexResetRequestID = nil
+        guard resetPreferences.saveError == nil else {
+            codexResetFeedback = "核对标记未能保存，请检查设置文件是否可写。"
+            return
+        }
+        codexResetFeedback = "已解除待核对标记，正在刷新读数。"
+        await refetch(.codex)?.value
+        codexResetFeedback = "已解除待核对标记。"
     }
 
     /// 三种理由都受 60 秒最短间隔约束，被跳过的调用不重置计时。返回 false 表示被跳过。
@@ -227,6 +312,8 @@ final class UsageStore {
                 }
             }
             for await (id, result) in group where results[id] != nil && currentRequests[id] == requests[id] && (pass == nil || pass == generation) {
+                // The statusline may belong to an earlier CLI login; never carry its quota into the next account.
+                if id == .claude { liveLimits[id] = nil }
                 if case .success(let snapshot) = result, !snapshot.limitsStale,
                    snapshot.sessionLimit != nil || snapshot.weekLimit != nil {
                     liveLimits[id] = LiveLimits(session: snapshot.sessionLimit, week: snapshot.weekLimit, at: now)
@@ -318,6 +405,7 @@ final class UsageStore {
             snapshot.limitsNote = message
             // 余额是钱不是配额窗口：这一轮没拿到就不显示。余额数字没有「~」标记，沿用的旧值会被当成刚查到的
             snapshot.balances = []
+            snapshot.codexResetCredits = nil
         default:
             return result
         }

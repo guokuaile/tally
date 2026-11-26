@@ -2,6 +2,37 @@ import XCTest
 @testable import Tally
 
 final class PreferencesTests: XCTestCase {
+    @MainActor
+    func testUnreadablePreferencesCannotErasePendingReset() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("tally-invalid-prefs-\(UUID().uuidString).json")
+        let original = Data(#"{"pendingCodexResetRequestID":"existing-intent","enableClaude":"invalid"}"#.utf8)
+        try original.write(to: file)
+        let store = PreferencesStore(url: file)
+        XCTAssertNotNil(store.loadError)
+        let usage = UsageStore(providers: [], resetPreferences: store)
+        XCTAssertTrue(usage.codexResetNeedsReview)
+        store.prefs.enableCodex = false
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertThrowsError(try store.setDisplayUndo([:]))
+        XCTAssertEqual(try Data(contentsOf: file), original)
+    }
+
+
+    func testDisplayFieldsDefaultAndRoundTrip() throws {
+        let old = try JSONDecoder().decode(Preferences.self, from: Data(#"{"launchAtLogin":true}"#.utf8))
+        XCTAssertTrue(old.displayTargets.isEmpty)
+        XCTAssertTrue(old.displayUndo.isEmpty)
+        var changed = old
+        let mode = DisplayModeSelection(width: 2580, height: 1080, pixelWidth: 5160,
+                                        pixelHeight: 2160, refreshRate: 100)
+        changed.displayTargets["UUID"] = mode
+        changed.displayUndo["UUID"] = DisplayUndoRecord(confirmed: nil,
+            pending: DisplayUndoPoint(before: mode, applied: mode))
+        let decoded = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(changed))
+        XCTAssertEqual(decoded.displayTargets["UUID"], mode)
+        XCTAssertNil(decoded.displayUndo["UUID"]?.confirmed)
+        XCTAssertNotNil(decoded.displayUndo["UUID"]?.pending)
+    }
 
     func testOldFileWithoutProviderKeysDecodesToDefaults() throws {
         let old = Data(#"{"launchAtLogin":true}"#.utf8)
@@ -11,6 +42,19 @@ final class PreferencesTests: XCTestCase {
         XCTAssertTrue(prefs.enableCodex)
         XCTAssertTrue(prefs.enableAntigravity)
         XCTAssertTrue(prefs.enableCursor)
+    }
+
+    func testClaudeAccountRefreshIntervalDefaultsClampsAndRoundTrips() throws {
+        let old = try JSONDecoder().decode(Preferences.self, from: Data(#"{"launchAtLogin":true}"#.utf8))
+        XCTAssertEqual(old.claudeAccountRefreshMinutes, 10)
+        let low = try JSONDecoder().decode(Preferences.self, from: Data(#"{"claudeAccountRefreshMinutes":0}"#.utf8))
+        let high = try JSONDecoder().decode(Preferences.self, from: Data(#"{"claudeAccountRefreshMinutes":999}"#.utf8))
+        XCTAssertEqual(low.claudeAccountRefreshMinutes, 1)
+        XCTAssertEqual(high.claudeAccountRefreshMinutes, 60)
+        var custom = old
+        custom.claudeAccountRefreshMinutes = 7
+        let restored = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(custom))
+        XCTAssertEqual(restored.claudeAccountRefreshMinutes, 7)
     }
 
     @MainActor
@@ -101,8 +145,8 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(bogus.hotKeyEnabled)
         let removed = try JSONDecoder().decode(Preferences.self, from: Data(#"{"lastPage":"tasks"}"#.utf8))
         XCTAssertEqual(removed.lastPage, "ai", "任务页删掉后存过它的文件回落 ai")
-        XCTAssertEqual(LaunchOptions.Page.panelPages, [.ai, .network, .system, .apps, .shelf, .music])
-        XCTAssertEqual(LaunchOptions.Page.visible(shelf: false, music: false), [.ai, .network, .system, .apps])
+        XCTAssertEqual(LaunchOptions.Page.panelPages, [.ai, .system, .network, .apps, .shelf, .music])
+        XCTAssertEqual(LaunchOptions.Page.visible(shelf: false, music: false), [.ai, .system, .network, .apps])
         XCTAssertEqual(LaunchOptions.Page.visible(shelf: true, music: true), LaunchOptions.Page.panelPages)
         XCTAssertEqual(LaunchOptions.Page.visible(shelf: false, music: true).last, .music, "音乐排最后：它出现、消失不挪别的页签")
     }
@@ -112,6 +156,7 @@ final class PreferencesTests: XCTestCase {
         XCTAssertTrue(prefs.crewEnabled, "刘海小人默认开")
         XCTAssertEqual(prefs.crewPerSide, 3)
         XCTAssertEqual(prefs.crewSkin, "glass")
+        XCTAssertFalse(prefs.crewSpillRight, "右翼超上限默认关：图标多的机器会被压住")
         XCTAssertTrue(prefs.badgeEnabled)
         XCTAssertEqual(prefs.badgeSeconds, 8)
         XCTAssertEqual(prefs.badgePosition, "right")
@@ -159,11 +204,13 @@ final class PreferencesTests: XCTestCase {
         store.prefs.crewEnabled = false
         store.prefs.crewPerSide = 2
         store.prefs.crewSkin = "gradient"
+        store.prefs.crewSpillRight = true
         store.prefs.badgeThemes = ["writing", "data"]
         let reloaded = PreferencesStore(url: url)
         XCTAssertFalse(reloaded.prefs.crewEnabled)
         XCTAssertEqual(reloaded.prefs.crewPerSide, 2)
         XCTAssertEqual(reloaded.prefs.crewSkin, "gradient")
+        XCTAssertTrue(reloaded.prefs.crewSpillRight)
         XCTAssertEqual(reloaded.prefs.badgeThemes, ["writing", "data"])
     }
 

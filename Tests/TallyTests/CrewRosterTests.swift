@@ -157,6 +157,76 @@ final class CrewRosterTests: XCTestCase {
         XCTAssertEqual(CrewRoster.layout(projects, perSide: 0).right.count, 1)
     }
 
+    /// 菜单栏只给左翼留一格（docs/crew.md「让开菜单」）：放不下的挪到右翼，再放不下才折进胶囊。
+    func testMenuBarRoomCapsEachSideSeparately() {
+        let narrowLeft = CrewRoom(left: 1, right: .max)
+        let four = CrewRoster.layout((0..<4).map { project("p\($0)") }, perSide: 3, room: narrowLeft)
+        XCTAssertEqual(four.right.map(\.id), ["p0", "p2", "p3"], "左翼满了，轮到左的放右边")
+        XCTAssertEqual(four.left.map(\.id), ["p1"])
+        XCTAssertEqual(four.overflow, 0, "四个都还看得见")
+        let six = CrewRoster.layout((0..<6).map { project("p\($0)") }, perSide: 3, room: narrowLeft)
+        XCTAssertEqual(six.right.map(\.id), ["p0", "p2"])
+        XCTAssertEqual(six.left.map(\.id), ["p1"])
+        XCTAssertEqual(six.overflow, 3, "容量 1 + 3，留三个加胶囊")
+        XCTAssertEqual(six.overflowSide, .right, "左翼没空格了，胶囊去右翼最外")
+        XCTAssertEqual(six.leftSlots, 1)
+        XCTAssertEqual(six.rightSlots, 3)
+        // 两家：Claude 超过左翼的一格，交界往右推
+        let mixed = CrewRoster.layout([project("c0"), project("c1"), project("c2"), project("x0", provider: "codex")], perSide: 3, room: narrowLeft)
+        XCTAssertEqual(mixed.left.map(\.id), ["c0"])
+        XCTAssertEqual(mixed.right.map(\.id), ["c1", "c2", "x0"], "Codex 在右翼最外")
+        XCTAssertEqual(mixed.overflow, 0)
+    }
+
+    func testNoRoomOnOneOrBothSides() {
+        let projects = [project("c0"), project("x0", provider: "codex"), project("x1", provider: "codex")]
+        let rightOnly = CrewRoster.layout(projects, perSide: 3, room: CrewRoom(left: 0, right: .max))
+        XCTAssertEqual(rightOnly.left, [])
+        XCTAssertEqual(rightOnly.right.map(\.id), ["c0", "x0", "x1"], "左翼一格没有：Claude 贴刘海，Codex 往外")
+        let capsuleOnly = CrewRoster.layout((0..<3).map { project("p\($0)") }, perSide: 3, room: CrewRoom(left: 0, right: 1))
+        XCTAssertEqual(capsuleOnly.right, [])
+        XCTAssertEqual(capsuleOnly.overflow, 3)
+        XCTAssertEqual(capsuleOnly.overflowSide, .right, "只剩一格给胶囊，在有地方的那一侧")
+        XCTAssertEqual(capsuleOnly.leftSlots, 0)
+        XCTAssertEqual(capsuleOnly.rightSlots, 1)
+        let none = CrewRoster.layout(projects, perSide: 3, room: CrewRoom(left: 0, right: 0))
+        XCTAssertEqual(none, CrewLayout(right: [], left: [], overflow: 0), "菜单折过刘海：两翼都不画，胶囊也不画")
+        XCTAssertEqual(none.leftSlots + none.rightSlots, 0)
+    }
+
+    func testRoomNeverWidensBeyondPerSide() {
+        let projects = (0..<10).map { project("p\($0)") }
+        XCTAssertEqual(CrewRoster.layout(projects, perSide: 2, room: CrewRoom(left: 9, right: .max)), CrewRoster.layout(projects, perSide: 2))
+        XCTAssertEqual(CrewRoster.layout(projects, perSide: 3, room: CrewRoom(left: -2, right: 3)).left, [], "负数按 0")
+    }
+
+    /// 「左边放不下时挪到右边」：左翼被菜单挤掉几格，右翼就多放几格，总数不变。
+    func testSpillRightHandsTheSqueezedSlotsToTheRightWing() {
+        let narrowLeft = CrewRoom(left: 1, right: .max)
+        let six = CrewRoster.layout((0..<6).map { project("p\($0)") }, perSide: 3, room: narrowLeft, spillRight: true)
+        XCTAssertEqual(six.left.map(\.id), ["p1"])
+        XCTAssertEqual(six.right.map(\.id), ["p0", "p2", "p3", "p4", "p5"], "六个都在：左 1 右 5")
+        XCTAssertEqual(six.overflow, 0)
+        let mixed = CrewRoster.layout([project("c0"), project("x0", provider: "codex"), project("c1"), project("x1", provider: "codex"),
+                                       project("c2"), project("x2", provider: "codex")], perSide: 3, room: narrowLeft, spillRight: true)
+        XCTAssertEqual(mixed.left.map(\.id), ["c0"])
+        XCTAssertEqual(mixed.right.map(\.id), ["c1", "c2", "x0", "x1", "x2"], "Claude 贴刘海，Codex 往外")
+        XCTAssertEqual(mixed.overflow, 0)
+        let eight = CrewRoster.layout((0..<8).map { project("p\($0)") }, perSide: 3, room: CrewRoom(left: 0, right: .max), spillRight: true)
+        XCTAssertEqual(eight.left, [])
+        XCTAssertEqual(eight.right.count, 5, "总数还是 2 × perSide：五个加胶囊")
+        XCTAssertEqual(eight.overflow, 3)
+        XCTAssertEqual(eight.overflowSide, .right)
+    }
+
+    func testSpillRightChangesNothingWhenTheLeftWingIsNotSqueezed() {
+        let projects = (0..<8).map { project("p\($0)") }
+        XCTAssertEqual(CrewRoster.layout(projects, perSide: 3, spillRight: true), CrewRoster.layout(projects, perSide: 3), "没量到：照旧 3 + 3")
+        XCTAssertEqual(CrewRoster.layout(projects, perSide: 3, room: CrewRoom(left: 9, right: .max), spillRight: true), CrewRoster.layout(projects, perSide: 3))
+        XCTAssertEqual(CrewRoster.layout(projects, perSide: 3, room: CrewRoom(left: 0, right: 0), spillRight: true), CrewLayout(right: [], left: [], overflow: 0),
+                       "菜单折过刘海：右翼也没地方，开着也不放")
+    }
+
     func testNewcomersDuringLaunchGraceAreRememberedButNotBadged() {
         let launched = now.addingTimeInterval(-3)
         let projects = CrewRoster.projects([session("a", .running, cwd: "/repo"), session("b", .running, cwd: "/repo")], now: now)

@@ -320,12 +320,6 @@ final class ClaudeHomeTests: XCTestCase {
         XCTAssertEqual(ClaudeHome.globalConfig("/x/work").path, "/x/work/.claude.json", "设了在目录里面")
     }
 
-    /// 钥匙串服务名要和 Claude Code 算得一模一样，否则设了 CLAUDE_CONFIG_DIR 就读不到配额（或读到别的账号）。
-    func testKeychainServiceMatchesClaudeCode() {
-        XCTAssertEqual(ClaudeHome.keychainService(nil), "Claude Code-credentials")
-        XCTAssertEqual(ClaudeHome.keychainService("/Users/vinz/.claude-work"), "Claude Code-credentials-19914660")
-        XCTAssertEqual(ClaudeHome.keychainService("/Users/vinz/.claude-work/"), "Claude Code-credentials-e5649954", "按原字符串算，尾斜杠不去掉")
-    }
 }
 
 /// codex 的家可以被 `CODEX_HOME` 指到别处（有人给终端 codex 单开一个家，跟 ChatGPT 桌面版隔开）。

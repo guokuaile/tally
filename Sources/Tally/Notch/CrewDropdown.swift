@@ -109,30 +109,32 @@ private struct CrewMovingAvatar: View {
     var tier: CrewTier = .fresh
     let cast: CastMember
     var generation = 0
+    var startedAt = Date()
+    var phase: Double = 0
+    var seed = 0
+    var wokeAt: Date? = nil
+    var animating = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var began = Date()
-    @State private var greeting = true
     var body: some View {
         GeometryReader { geometry in
-            if reduceMotion || !greeting {
+            if reduceMotion || !animating {
                 CrewBadgeIcon(mood: mood, tier: tier, cast: cast, size: min(geometry.size.width, geometry.size.height), inset: 0.12)
             } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 20)) { timeline in
-                    let elapsed = timeline.date.timeIntervalSince(began)
+                TimelineView(.animation(minimumInterval: ProcessInfo.processInfo.isLowPowerModeEnabled ? 0.1 : 0.05)) { timeline in
+                    let elapsed = max(0, timeline.date.timeIntervalSince(startedAt))
+                    let wake = wokeAt.flatMap { at in
+                        BloubArt.bundled.flatMap { CrewPlayback.wakeMotion(mood: mood, tier: tier, elapsed: timeline.date.timeIntervalSince(at), phase: phase, still: false, art: $0) }
+                    }
+                    let motion = wake ?? CastMotion.forHover(elapsed: timeline.date.timeIntervalSince(began))
+                        ?? CastMotion.forCrew(mood: mood, tier: tier, elapsed: elapsed, phase: phase, still: false, seed: seed)
                     CrewBadgeIcon(mood: mood, tier: tier, cast: cast, size: min(geometry.size.width, geometry.size.height), inset: 0.12,
-                                  motionOverride: CastMotion.forHover(elapsed: elapsed))
+                                  elapsed: elapsed + phase, motionOverride: motion, motionIsResolved: true)
                 }
             }
         }
         .accessibilityHidden(true)
-        .task(id: "\(generation)-\(reduceMotion)") {
-            began = Date()
-            greeting = true
-            guard !reduceMotion else { return }
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            guard !Task.isCancelled else { return }
-            greeting = false
-        }
+        .onChange(of: generation, initial: true) { _, _ in began = Date() }
     }
 }
 
@@ -157,9 +159,25 @@ final class CrewAvatarPanel: NSPanel {
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
-    func update(mood: CrewMood, tier: CrewTier = .fresh, cast: CastMember, restart: Bool = false) {
+    func update(mood: CrewMood, tier: CrewTier = .fresh, cast: CastMember, restart: Bool = false,
+                startedAt: Date = Date(), phase: Double = 0, seed: Int = 0, wokeAt: Date? = nil, animating: Bool = true) {
         if restart { generation += 1 }
-        host.rootView = CrewMovingAvatar(mood: mood, tier: tier, cast: cast, generation: generation)
+        host.rootView = CrewMovingAvatar(mood: mood, tier: tier, cast: cast, generation: generation,
+                                        startedAt: startedAt, phase: phase, seed: seed, wokeAt: wokeAt, animating: animating)
+    }
+
+    func setAnimating(_ enabled: Bool) {
+        host.rootView.animating = enabled
+    }
+
+    override func orderOut(_ sender: Any?) {
+        setAnimating(false)
+        super.orderOut(sender)
+    }
+
+    override func close() {
+        setAnimating(false)
+        super.close()
     }
 }
 

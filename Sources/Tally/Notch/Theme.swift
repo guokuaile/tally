@@ -6,20 +6,22 @@ struct Card<Content: View>: View {
     let title: String?
     let symbol: String?
     let tint: Color
+    let spacing: CGFloat
     /// 标题行最右边的小控件（会话卡片的「已关闭 N ›」），没有就不画。
     let accessory: AnyView?
     let content: Content
 
-    init(_ title: String? = nil, symbol: String? = nil, tint: Color = .white, accessory: AnyView? = nil, @ViewBuilder content: () -> Content) {
+    init(_ title: String? = nil, symbol: String? = nil, tint: Color = .white, spacing: CGFloat = 6, accessory: AnyView? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.symbol = symbol
         self.tint = tint
+        self.spacing = spacing
         self.accessory = accessory
         self.content = content()
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: spacing) {
             if let title {
                 HStack(spacing: 5) {
                     if let symbol {

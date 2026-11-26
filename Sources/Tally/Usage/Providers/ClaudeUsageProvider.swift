@@ -6,21 +6,21 @@ struct ClaudeUsageProvider: UsageProvider {
     let id: ProviderID = .claude
     let root: URL
     let limits: ClaudeLimitsCache
-    let quota: ClaudeQuotaReadOnly
+    let currentAccount: () -> (accountUUID: String, organizationUUID: String)?
     /// 引用类型：provider 是 struct，被 UsageStore 存着复制来复制去，节流状态与扫描缓存都得挂在盒子里才留得住。
     let scopedBox: ScopedLimitsBox
     let scan: UsageScanCache
 
     init(root: URL = ClaudeHome.url.appendingPathComponent("projects"),
          limits: ClaudeLimitsCache = ClaudeLimitsCache(),
-         quota: ClaudeQuotaReadOnly = ClaudeQuotaReadOnly(),
          scopedBox: ScopedLimitsBox = ScopedLimitsBox(),
-         scan: UsageScanCache = UsageScanCache(name: "claude")) {
+         scan: UsageScanCache = UsageScanCache(name: "claude"),
+         currentAccount: @escaping () -> (accountUUID: String, organizationUUID: String)? = { Self.currentAccountIdentity() }) {
         self.root = root
         self.limits = limits
-        self.quota = quota
         self.scopedBox = scopedBox
         self.scan = scan
+        self.currentAccount = currentAccount
     }
 
     /// 按模型分的周窗口（Fable 那条）只有官方接口给，statusline 缓存没有。缓存新鲜时也要每 10 分钟问一次接口
@@ -111,8 +111,6 @@ struct ClaudeUsageProvider: UsageProvider {
 
     /// 手动刷新是「现在就要真值」：存着的 token 扔掉重读，那条按模型分的窗口不等 10 分钟节流。429 退避不豁免。
     func forceFresh() {
-        quota.tokenBox.reset()
-        scopedBox.refetchNow()
     }
 
     func fetchSnapshot(now: Date) async throws -> UsageSnapshot {
@@ -126,47 +124,31 @@ struct ClaudeUsageProvider: UsageProvider {
         let files = jsonlFiles(under: root)
         guard !files.isEmpty else { throw UsageError.notFound("还没有 Claude Code 的用量日志，跑一轮就有了") }
         var snapshot = scan.aggregate(files: files, now: now)
-        // 每轮都比一次，不能只在要问接口时才比：缓存新鲜时十分钟才问一次，切了账号那条窗口会挂着上一个账号的数
-        if quota.dropTokenIfCredentialsChanged() { scopedBox.reset(owner: owner) }
         let cache = limits.read(now: now)
-        let live: ClaudeQuotaResult?
-        if Self.cacheIsFresh(cache) {
-            // 缓存够用，两条配额不等网络。那条按模型分的窗口只有接口有，扔后台取，下一轮刷新才用上：
-            // 1 GB 日志本来就要解析好几秒，再串一个网络往返（代理抽风时更久）整行会一直「加载中」。
-            live = nil
-            if scopedBox.needsFetch(now: now), let request = scopedBox.beginRequest(owner: owner) {
-                let box = scopedBox
-                let client = quota
-                Task.detached(priority: .utility) {
-                    if case .limits(let fetched) = await client.fetch(now: Date()) {
-                        box.record(fetched.scoped, now: Date(), request: request)
-                    } else {
-                        box.record(nil, now: Date(), request: request)
-                    }
-                }
-            }
+        if let accountUUID = cache?.accountUUID,
+           let organizationUUID = cache?.organizationUUID,
+           let current = currentAccount(),
+           accountUUID == current.accountUUID,
+           organizationUUID == current.organizationUUID {
+            snapshot.sessionLimit = cache?.session.flatMap { $0.isExpired(at: now) ? nil : $0 }
+            snapshot.weekLimit = cache?.week.flatMap { $0.isExpired(at: now) ? nil : $0 }
+            snapshot.limitsStale = cache?.isStale ?? true
+            snapshot.claudeAccountID = accountUUID + "/" + organizationUUID
         } else {
-            // 缓存本来就得问接口，顺带把那条窗口一起收了
-            let request = scopedBox.beginRequest(owner: owner)
-            let result = await quota.fetch(now: now)
-            live = result
-            if let request {
-                if case .limits(let fetched) = result {
-                    scopedBox.record(fetched.scoped, now: now, request: request)
-                } else {
-                    scopedBox.record(nil, now: now, request: request)
-                }
-            }
+            snapshot.limitsNote = "Claude 配额归属无法确认，请在 Claude Code 查看"
         }
-        let resolved = Self.resolveLimits(cache: cache, live: live, now: now)
-        snapshot.sessionLimit = resolved.session
-        snapshot.weekLimit = resolved.week
-        snapshot.limitsStale = resolved.stale
-        snapshot.limitsNote = resolved.note
-        // 盒子里沿用的是上一次取到的值，过了它自己的重置时间就不再算数
-        snapshot.scopedLimits = scopedBox.current.filter { !$0.limit.isExpired(at: now) }
         snapshot.plan = Self.readPlanLabel()
         return snapshot
+    }
+
+    private static func currentAccountIdentity() -> (accountUUID: String, organizationUUID: String)? {
+        let url = ClaudeHome.globalConfig(ClaudeHome.rawValue)
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = object["oauthAccount"] as? [String: Any],
+              let uuid = account["accountUuid"] as? String, !uuid.isEmpty,
+              let organization = account["organizationUuid"] as? String, !organization.isEmpty else { return nil }
+        return (uuid, organization)
     }
 
     static func cacheIsFresh(_ cache: ClaudeLimits?) -> Bool {
@@ -183,22 +165,6 @@ struct ClaudeUsageProvider: UsageProvider {
     /// 顺序：缓存新鲜 → 用缓存（`live` 是为那条按模型分的窗口顺带取的，不影响这两条）；
     /// 否则看只读客户端的结果：拿到就用；token 过期时标注并退回陈旧缓存；不可用时退回陈旧缓存，没有就两条都 nil。
     /// 不管哪条路，已过重置时间的窗口都丢掉：隔夜没开 Claude Code，缓存里还是昨天的 92%，那个窗口早就重置了。
-    static func resolveLimits(cache: ClaudeLimits?, live: ClaudeQuotaResult?, now: Date) -> ResolvedLimits {
-        func current(_ limit: UsageLimit?) -> UsageLimit? { limit.flatMap { $0.isExpired(at: now) ? nil : $0 } }
-        if let cache, !cache.isStale {
-            return ResolvedLimits(session: current(cache.session), week: current(cache.week), stale: false, note: nil)
-        }
-        switch live {
-        case nil:
-            return ResolvedLimits(session: current(cache?.session), week: current(cache?.week), stale: cache != nil, note: nil)
-        case .limits(let live):
-            return ResolvedLimits(session: current(live.session), week: current(live.week), stale: false, note: nil)
-        case .tokenExpired:
-            return ResolvedLimits(session: current(cache?.session), week: current(cache?.week), stale: cache != nil, note: "登录已过期，去 Claude Code 跑一轮")
-        case .unavailable:
-            return ResolvedLimits(session: current(cache?.session), week: current(cache?.week), stale: cache != nil, note: nil)
-        }
-    }
 
     private func jsonlFiles(under dir: URL) -> [URL] {
         guard let en = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil) else { return [] }
